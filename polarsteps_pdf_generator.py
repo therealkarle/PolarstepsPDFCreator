@@ -147,9 +147,10 @@ class TripParser:
 class MapGenerator:
     """Generates static maps using ESRI World Imagery tiles."""
     
-    def __init__(self, width: int = 800, height: int = 600):
+    def __init__(self, width: int = 800, height: int = 600, default_zoom: int = 12):
         self.width = width
         self.height = height
+        self.default_zoom = default_zoom
     
     def _create_map(self, width: int = None, height: int = None) -> StaticMap:
         """Create a StaticMap with ESRI satellite tiles."""
@@ -195,7 +196,7 @@ class MapGenerator:
         
         return img_bytes.getvalue()
     
-    def generate_step_map(self, lat: float, lon: float, zoom: int = 12, width: int = 0, height: int = 0) -> bytes:
+    def generate_step_map(self, lat: float, lon: float, zoom: Optional[int] = None, width: int = 0, height: int = 0) -> bytes:
         """Generate a small map for a single step location.
 
         Parameters:
@@ -212,8 +213,9 @@ class MapGenerator:
         marker = CircleMarker((lon, lat), MARKER_COLOR_START, 12)
         m.add_marker(marker)
 
-        # Render with requested zoom
-        image = m.render(zoom=zoom)
+        # Render with requested zoom (fallback to default)
+        render_zoom = zoom if zoom is not None else self.default_zoom
+        image = m.render(zoom=render_zoom)
         img_bytes = io.BytesIO()
         image.save(img_bytes, format="PNG")
         img_bytes.seek(0)
@@ -235,17 +237,19 @@ class PDFBuilder:
     TEXT_COLOR = HexColor("#333333")
     LIGHT_GRAY = HexColor("#F5F5F5")
     
-    def __init__(self, output_path: Path, trip_parser: TripParser, map_generator: MapGenerator):
+    def __init__(self, output_path: Path, trip_parser: TripParser, map_generator: MapGenerator, config: dict = None):
         self.output_path = Path(output_path)
         self.trip_parser = trip_parser
         self.map_generator = map_generator
-        self.styles = self._create_styles()
-        self.elements = []
+        self.config = config or {}
 
         # Enforce fixed font sizes for step text to avoid layout variance
-        # These values are integers (points)
-        self.STEP_TITLE_FONT_SIZE = 18
-        self.STEP_TEXT_FONT_SIZE = 12
+        # These values are integers (points) and should be set before creating styles
+        self.STEP_TITLE_FONT_SIZE = int(self.config.get("step_title_font_size", 18))
+        self.STEP_TEXT_FONT_SIZE = int(self.config.get("step_text_font_size", 12))
+
+        self.styles = self._create_styles()
+        self.elements = []
     
     def _create_styles(self) -> dict:
         """Create custom paragraph styles."""
@@ -399,7 +403,8 @@ class PDFBuilder:
                         with Image.open(emoji_file) as eimg:
                             ew, eh = eimg.size
                             # scale emoji height slightly larger for visibility
-                            scale = (font_size_px * 1.2) / float(eh)
+                            emoji_scale = float(self.config.get("emoji_scale", 1.2)) if hasattr(self, 'config') else 1.2
+                            scale = (font_size_px * emoji_scale) / float(eh)
                             ew = int(ew * scale)
                             eh = int(eh * scale)
                     except Exception:
@@ -437,7 +442,8 @@ class PDFBuilder:
                     try:
                         with Image.open(emoji_file).convert("RGBA") as eimg:
                             ew, eh = eimg.size
-                            scale = (font_size_px * 1.2) / float(eh)
+                            emoji_scale = float(self.config.get("emoji_scale", 1.2)) if hasattr(self, 'config') else 1.2
+                            scale = (font_size_px * emoji_scale) / float(eh)
                             ew = int(ew * scale)
                             eh = int(eh * scale)
                             eimg = eimg.resize((ew, eh), Image.LANCZOS)
@@ -676,6 +682,7 @@ class PDFBuilder:
         used_height = self._flowables_height(used_flowables) if used_flowables else 0.0
         remaining = max(0.0, page_inner - used_height)
         return remaining
+
     
     def _add_video_links(self, videos: list):
         """Add compact video link collection."""
@@ -980,8 +987,18 @@ def main():
 
     output_path = pdfs_dir / f"{trip_name_safe}.pdf"
     
-    map_gen = MapGenerator()
-    pdf_builder = PDFBuilder(output_path, parser, map_gen)
+    # Load config.json from script directory if present
+    config_path = script_dir / "config.json"
+    config = {}
+    try:
+        if config_path.exists():
+            with open(config_path, "r", encoding="utf-8") as cf:
+                config = json.load(cf)
+    except Exception:
+        config = {}
+
+    map_gen = MapGenerator(default_zoom=int(config.get("default_map_zoom", 12)))
+    pdf_builder = PDFBuilder(output_path, parser, map_gen, config=config)
     pdf_builder.build()
     
     print(f"\n✅ Done! PDF saved to: {output_path}")

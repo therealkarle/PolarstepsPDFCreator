@@ -1,0 +1,9 @@
+{
+  "step_title_font_size": 18,
+  "step_text_font_size": 12,
+  "safety_margin_mm": 12,
+  "default_map_zoom": 12,
+  "min_map_zoom": 3,
+  "emoji_scale": 1.2,
+  "max_photos_per_step": 6
+}
