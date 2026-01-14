@@ -4,3 +4,10 @@ BSPData/
 # Ignore generated trip PDFs
 TripPdfs/
 
+#Igqnore virtual environment folder
+venv/
+
+# Ignore cache files
+__pycache__/
+.emoji_cache/
+
