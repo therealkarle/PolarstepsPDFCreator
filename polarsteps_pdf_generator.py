@@ -690,7 +690,7 @@ def main():
     trip_name_safe = "".join(c if c.isalnum() or c in " -_" else "_" for c in parser.get_trip_name())
     # Ensure an output folder named 'pdfs' next to the script exists and use it for PDF files
     script_dir = Path(__file__).parent
-    pdfs_dir = script_dir / "Trip pdfs"
+    pdfs_dir = script_dir / "TripPdfs"
     try:
         pdfs_dir.mkdir(parents=True, exist_ok=True)
     except Exception:
