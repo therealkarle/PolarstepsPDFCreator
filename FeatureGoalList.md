@@ -5,16 +5,17 @@ Diese Liste dient als ausführliche Checkliste für noch zu implementierende Fea
 ---
 
 ## 🔧 Karten / Map Improvements
-- [ ] **Höhere Auflösung** (Option in `config.json`, default höher auf 2× tiles)
+- [x] **Höhere Auflösung** (Option in `config.json`, default höher auf 2× tiles)
   - Akzeptanzkriterien: Karte wird schärfer auf PDF-Titelseite und Schritt-Karten, kein sichtbares Kachel-Flimmern.
-- [ ] **Bessere Fit-Algorithmen für Bounds/Outlines** (sicherstellen, dass Routen und Umrisse gut passen)
+- [x] **Bessere Fit-Algorithmen für Bounds/Outlines** (sicherstellen, dass Routen und Umrisse gut passen)
   - Akzeptanzkriterien: Route nicht abgeschnitten, Padding-Option konfigurierbar.
 - [ ] **Doppelte Bilder erkennen & entfernen** (z.B. Fall: "Hochlitten Weihnachtsferien" — Bild wurde mehrfach für verschiedene Schritte verwendet)
   - Akzeptanzkriterien: Algorithmus findet identische/nahe Duplikate nach Pfad/Hash und verhindert wiederholte Verwendung als Marker.
 - [ ] **Kombinierbare Kartenlayer** (Satellite + Street + City Name Overlay) auswählbar in `config`
   - Akzeptanzkriterien: Auswahlmöglichkeit in Config; MapGenerator lädt passende Tile-Templates und rendert Overlay-Labels.
-- [ ] **Marker-Thumbnail-Caching & Hervorhebung** (aktuelle Step farblich hervorheben)
+- [x] **Marker-Thumbnail-Caching & Hervorhebung** (aktuelle Step farblich hervorheben)
   - Akzeptanzkriterien: Marker Thumbnails werden in `.map_marker_cache` zwischengespeichert; aktueller Step hat auffälligen Ring.
+-[] Titelbild Rendertimes verbessrn
 
 ---
 

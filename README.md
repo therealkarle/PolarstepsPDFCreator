@@ -128,6 +128,11 @@ Edit `config.json` to customize the PDF generation:
   "safety_margin_mm": 12,
   "default_map_zoom": 12,
   "min_map_zoom": 3,
+  "max_map_zoom": 16,
+  "map_render_scale": 2.0,
+  "marker_thumb_size": 40,
+  "step_map_zoom_out": 1,
+  "step_map_padding": 0.12,
   "emoji_scale": 1.2,
   "max_photos_per_step": 6,
   "text_font_path": "C:/Windows/Fonts/SegoeUI.ttf",
@@ -140,6 +145,19 @@ Edit `config.json` to customize the PDF generation:
 - **step_title_font_size**: Font size for step titles (default: 18)
 - **step_text_font_size**: Font size for step descriptions (default: 12)
 - **default_map_zoom**: Default zoom level for maps (default: 12)
+- **min_map_zoom**: Minimum zoom level for maps (default: 3)
+- **max_map_zoom**: Maximum zoom level for maps (default: 16)
+- **map_render_scale**: Render maps at higher pixel density (default: 2.0)
+- **marker_thumb_size**: Base size of thumbnail markers on maps in pixels (default: 40)
+- **step_map_zoom_out**: Zoom out by N levels on step maps (default: 0 — set >0 to show more context)
+- **step_map_padding**: Padding around bounds on step maps (default: 0.06 — smaller means tighter crop)
+- **step_map_auto_tighten**: Automatically reduce step-map padding for trips with many steps to produce more zoomed-in step maps (default: true)
+- **step_map_tighten_scale_small**: Padding scale for 21-40 steps (default: 0.8 — applied as pad_frac * scale)
+- **step_map_tighten_scale_medium**: Padding scale for 41-80 steps (default: 0.6)
+- **step_map_tighten_scale_large**: Padding scale for >80 steps (default: 0.5)
+- **step_map_neighbor_max_km**: Ignore prev/next neighbors farther than this when fitting step maps (default: 180 km; prevents huge zoom-out on long trips)
+- **step_map_neighbor_limit_steps_threshold**: Minimum step count before neighbor distance limiting applies (default: 20; set 0 to always apply)
+- **step_map_max_pad_km**: Maximum absolute padding applied to step maps (km). Caps how much padding can be added even on wide spans (default: 25 km).
 - **max_photos_per_step**: Maximum photos per step page (default: 6)
 
 ## Cache System

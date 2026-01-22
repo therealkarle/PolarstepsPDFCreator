@@ -21,6 +21,9 @@ import queue
 import html
 import hashlib
 import requests
+import os
+import sys
+import subprocess
 from collections import deque
 
 # Trip parsing
@@ -254,6 +257,9 @@ ROUTE_LINE_WIDTH = 3
 MARKER_COLOR_START = "#1A5F7A"  # teal
 MARKER_COLOR_STEP = "#4ECDC4"  # lighter teal
 
+# Color for steps missing a photo
+MISSING_PHOTO_COLOR = "#FF4D4F"  # red
+
 # Emoji regex (captures sequences including ZWJ/FE0F)
 EMOJI_PATTERN = re.compile(
     r'([\U0001F1E6-\U0001F1FF\U0001F300-\U0001F6FF\U0001F900-\U0001F9FF\u2600-\u26FF\u2700-\u27BF\u200d\ufe0f]+)',
@@ -267,6 +273,8 @@ from reportlab.lib.colors import HexColor
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_JUSTIFY
 from reportlab.platypus import Paragraph, Image as RLImage, Table, TableStyle, Spacer, SimpleDocTemplate, PageBreak, KeepTogether, ListFlowable, ListItem
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
 
 # Pillow (PIL) for image processing
 from PIL import Image, ImageDraw, ImageFont, ImageOps
@@ -279,28 +287,232 @@ class MapGenerator:
       - default_map_zoom: default zoom level (integer)
       - min_map_zoom: minimum zoom level
       - max_map_zoom: maximum zoom level
+      - map_render_scale: render maps at higher pixel density (float)
+      - marker_thumb_size: base marker thumbnail size in pixels
     """
 
-    def __init__(self, width: int = 800, height: int = 600, default_zoom: int = 12, min_zoom: int = 6, max_zoom: int = 16):
+    def __init__(self, width: int = 800, height: int = 600, default_zoom: int = 12, min_zoom: int = 6, max_zoom: int = 16, render_scale: float = 1.0, marker_thumb_size: int = 40):
         self.width = width
         self.height = height
         self.default_zoom = default_zoom
         self.min_zoom = min_zoom
         self.max_zoom = max_zoom
+        self.render_scale = max(1.0, float(render_scale))
         # maximum thumbnail size used for markers
-        self.marker_thumb_size = 40
+        self.marker_thumb_size = marker_thumb_size
         # how many zoom levels to step out for step maps (helps to show prev/current/next comfortably)
-        self.step_map_zoom_out = 1
-        # padding fraction around computed bounds for step maps
-        self.step_map_padding = 0.12
+        # Default to 0 to avoid unnecessarily zooming out when rendering high-res step maps
+        self.step_map_zoom_out = 0
+        # padding fraction around computed bounds for step maps (smaller by default to avoid wide zoom-out)
+        self.step_map_padding = 0.06
+
+        # Automatically tighten step-map padding for trips with many steps (reduces padding -> more zoomed-in)
+        self.step_map_auto_tighten = True
+        # Scales to reduce padding when trips have many steps (smaller scale => tighter crop)
+        # Applied per thresholds: small (21-40), medium (41-80), large (>80)
+        self.step_map_tighten_scale_small = 0.8   # 21-40 steps
+        self.step_map_tighten_scale_medium = 0.6  # 41-80 steps
+        self.step_map_tighten_scale_large = 0.5   # >80 steps
+
+        # Limit how far prev/next neighbors can be for fitting; helps avoid huge zoom-out on long trips
+        self.step_map_neighbor_max_km = 180.0
+        # Only apply neighbor distance limiting when trips have at least this many steps (0=always)
+        self.step_map_neighbor_limit_steps_threshold = 20
+
+        # Cap the absolute padding applied on step maps (km); keeps far neighbors from forcing huge pads
+        self.step_map_max_pad_km = 25.0
+
+        # overview map padding fraction around trip bounds
+        self.overview_map_padding = 0.06
+        # Minimum padding in pixels for overview padding to be considered visible when forcing zoom-out
+        self.overview_min_pad_px = 12
+        # Use this to print debug info about computed pads/zoom when True
+        self.debug_map = False
+
+        # Step-map horizontal span constraints (km) to avoid over/under zooming.
+        # These are soft constraints: we will never crop out prev/current/next.
+        self.step_map_min_width_km = 12.0
+        self.step_map_max_width_km = 120.0
+
+        # If adjacent steps are within this radius of the current step, treat them as same-location
+        # and skip to the next distinct step for fitting.
+        self.step_cluster_radius_km = 4.0
+
+        # Weighting for centering (current step is favored)
+        self.step_center_weight_current = 2.0
+        self.step_center_weight_other = 1.0
 
 
-    def _create_map(self, width: int = None, height: int = None) -> StaticMap:
+    @staticmethod
+    def _extract_lon_lat(step: dict) -> Optional[tuple]:
+        """Return (lon, lat) from a step dict, or None if unavailable."""
+        try:
+            loc = step.get("data", {}).get("location", {}) if isinstance(step, dict) else {}
+            if not loc:
+                return None
+            lat = loc.get("lat") or loc.get("latitude") or loc.get("Latitude")
+            lon = loc.get("lon") or loc.get("lng") or loc.get("longitude") or loc.get("Longitude")
+            lat = float(lat) if lat is not None else None
+            lon = float(lon) if lon is not None else None
+            if lat is None or lon is None:
+                return None
+            return (lon, lat)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _haversine_km(lon1: float, lat1: float, lon2: float, lat2: float) -> float:
+        """Great-circle distance in kilometers."""
+        import math
+
+        r = 6371.0088
+        phi1 = math.radians(lat1)
+        phi2 = math.radians(lat2)
+        dphi = math.radians(lat2 - lat1)
+        dlambda = math.radians(lon2 - lon1)
+        a = math.sin(dphi / 2.0) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2.0) ** 2
+        c = 2.0 * math.atan2(math.sqrt(a), math.sqrt(max(0.0, 1.0 - a)))
+        return r * c
+
+    def _step_has_photo(self, step: dict) -> bool:
+        """Return True if the step likely has a usable photo (local or URL)."""
+        try:
+            photos = step.get('photos', []) if isinstance(step, dict) else []
+            for p in photos:
+                try:
+                    pp = Path(p)
+                    if pp.exists():
+                        return True
+                except Exception:
+                    continue
+            data = step.get('data', {}) if isinstance(step, dict) else {}
+            for key in ("cover_photo", "cover_photo_path", "cover_photo_thumb_path", "main_media_item_path", "cover_photo_url"):
+                val = data.get(key) if isinstance(data, dict) else None
+                if isinstance(val, dict) and val.get('path'):
+                    return True
+                if isinstance(val, str) and val:
+                    # treat any non-empty string as a photo reference (URL/path)
+                    return True
+        except Exception:
+            return False
+        return False
+
+    def _find_distinct_neighbor_index(self, trip_parser: TripParser, step_index: int, direction: int) -> Optional[int]:
+        """Find previous/next step index with coords outside cluster radius.
+
+        direction: -1 for previous, +1 for next
+        """
+        if direction not in (-1, 1):
+            return None
+        if not (0 <= step_index < len(trip_parser.steps)):
+            return None
+
+        current = self._extract_lon_lat(trip_parser.steps[step_index])
+        if not current:
+            return None
+
+        best_fallback = None
+        cur_lon, cur_lat = current
+        i = step_index + direction
+        while 0 <= i < len(trip_parser.steps):
+            coord = self._extract_lon_lat(trip_parser.steps[i])
+            if coord:
+                best_fallback = i
+                lon, lat = coord
+                try:
+                    dist = self._haversine_km(cur_lon, cur_lat, lon, lat)
+                except Exception:
+                    dist = None
+                if dist is not None and dist >= float(self.step_cluster_radius_km):
+                    return i
+            i += direction
+
+        return best_fallback
+
+    def _zoom_for_horizontal_km(self, width_km: float, center_lat: float, width_px: int, *, prefer: str = "at_least") -> int:
+        """Compute an integer zoom that targets a horizontal map width in km.
+
+        prefer:
+          - "at_least": returns a zoom where view-width is >= width_km (safe, may include more area)
+          - "at_most": returns a zoom where view-width is <= width_km (tighter, may crop if used without fit-check)
+        """
+        import math
+
+        width_km = max(0.1, float(width_km))
+        center_lat = float(center_lat)
+        cos_lat = max(0.01, abs(math.cos(math.radians(center_lat))))
+        km_per_deg_lon = 111.32 * cos_lat
+        width_deg = width_km / km_per_deg_lon
+        dpp = width_deg / float(max(width_px, 1))
+        if dpp <= 0:
+            return self.default_zoom
+        z = math.log2(360.0 / (256.0 * dpp))
+        if prefer == "at_most":
+            return int(math.ceil(z))
+        return int(z)
+
+    def _view_half_spans_deg(self, zoom: int, center_lat: float, width_px: int, height_px: int) -> tuple:
+        """Approximate (half_lon_span_deg, half_lat_span_deg) for the given zoom and center latitude."""
+        import math
+
+        z = int(zoom)
+        dpp_lon = 360.0 / (256.0 * (2 ** z))
+        half_lon = dpp_lon * (float(width_px) / 2.0)
+
+        cos_lat = max(0.01, abs(math.cos(math.radians(float(center_lat)))))
+        dpp_lat = dpp_lon * cos_lat
+        half_lat = dpp_lat * (float(height_px) / 2.0)
+        return half_lon, half_lat
+
+    def _weighted_center(self, points: list) -> Optional[tuple]:
+        """points: list of (lon, lat, weight). Returns (lon, lat) or None."""
+        if not points:
+            return None
+        s_w = 0.0
+        s_lon = 0.0
+        s_lat = 0.0
+        for lon, lat, w in points:
+            try:
+                w = float(w)
+                s_w += w
+                s_lon += float(lon) * w
+                s_lat += float(lat) * w
+            except Exception:
+                continue
+        if s_w <= 0:
+            return None
+        return (s_lon / s_w, s_lat / s_w)
+
+    def _clamp_center_to_bounds(self, center: tuple, zoom: int, bounds: tuple, width_px: int, height_px: int) -> tuple:
+        """Clamp center so that bounds stay within viewport at the given zoom.
+
+        bounds: (min_lon, max_lon, min_lat, max_lat)
+        """
+        min_lon, max_lon, min_lat, max_lat = bounds
+        cen_lon, cen_lat = center
+
+        # Use current center_lat for half-span estimation; this is a good-enough clamp.
+        half_lon, half_lat = self._view_half_spans_deg(zoom, cen_lat, width_px, height_px)
+        if (max_lon - min_lon) <= 2 * half_lon:
+            lo = max_lon - half_lon
+            hi = min_lon + half_lon
+            if lo <= hi:
+                cen_lon = max(lo, min(hi, cen_lon))
+        if (max_lat - min_lat) <= 2 * half_lat:
+            lo = max_lat - half_lat
+            hi = min_lat + half_lat
+            if lo <= hi:
+                cen_lat = max(lo, min(hi, cen_lat))
+
+        return (cen_lon, cen_lat)
+
+
+    def _create_map(self, width: int = None, height: int = None) -> "object":
         """Create a StaticMap with ESRI satellite tiles."""
         if StaticMap is None:
             raise RuntimeError("staticmap not available: install the 'staticmap' package to enable map generation")
-        w = width or self.width
-        h = height or self.height
+        w = int(round((width or self.width) * self.render_scale))
+        h = int(round((height or self.height) * self.render_scale))
         return StaticMap(
             w, h,
             url_template=ESRI_SATELLITE_URL,
@@ -335,24 +547,132 @@ class MapGenerator:
 
                 if lat is not None and lon is not None:
                     # create thumbnail (white ring); prefer IconMarker when available
-                    thumb = self._get_step_thumbnail(step, size=36, ring_color=(255,255,255,230))
+                    marker_px = max(8, int(round(self.marker_thumb_size * self.render_scale)))
+                    thumb = self._get_step_thumbnail(step, size=marker_px, ring_color=(255,255,255,230))
                     if thumb and IconMarker is not None:
                         # IconMarker offsets are relative to the left-bottom of the image; use half size to center
-                        off_x = int(self.marker_thumb_size / 2)
-                        off_y = int(self.marker_thumb_size / 2)
+                        off_x = int(marker_px / 2)
+                        off_y = int(marker_px / 2)
                         try:
                             m.add_marker(IconMarker((lon, lat), str(thumb), off_x, off_y))
                             continue
                         except Exception:
                             pass
 
-                    # fallback to circle marker
+                    # fallback to circle marker (no red in overview map)
                     color = MARKER_COLOR_START if i == 0 else MARKER_COLOR_STEP
-                    marker = CircleMarker((lon, lat), color, 12)
-                    m.add_marker(marker)
+                    marker_radius = max(4, int(round(12 * self.render_scale)))
+                    m.add_marker(CircleMarker((lon, lat), color, marker_radius))
 
-        # Render to bytes
-        image = m.render()
+            # Gather coords (route preferred, fallback to steps)
+            coords = route_coords
+            if not coords:
+                coords = [c for c in (self._extract_lon_lat(s) for s in trip_parser.steps) if c]
+
+            if not coords:
+                # nothing to show
+                image = m.render()
+                img_bytes = io.BytesIO()
+                image.save(img_bytes, format="PNG")
+                img_bytes.seek(0)
+                return img_bytes.getvalue()
+
+            lons = [c[0] for c in coords]
+            lats = [c[1] for c in coords]
+            min_lon, max_lon = min(lons), max(lons)
+            min_lat, max_lat = min(lats), max(lats)
+
+            # Try percent-of-maximum-distance padding when configured (smaller, adaptive)
+            overview_pct = float(getattr(self, "overview_padding_percent", 0.0) or 0.0)
+            # Prefer computing max distance between STEPS (user expectation); fallback to coords if needed
+            step_coords = [self._extract_lon_lat(s) for s in trip_parser.steps]
+            step_coords = [c for c in step_coords if c]
+            if overview_pct and len(step_coords) > 1:
+                max_km = 0.0
+                for i in range(len(step_coords)):
+                    for j in range(i + 1, len(step_coords)):
+                        try:
+                            d = self._haversine_km(step_coords[i][0], step_coords[i][1], step_coords[j][0], step_coords[j][1])
+                        except Exception:
+                            d = 0.0
+                        if d > max_km:
+                            max_km = d
+                # If computed max_km is tiny (points almost identical), fallback to bbox method
+                if max_km <= 0.01:
+                    overview_pct = 0.0
+                else:
+                    pad_km = max_km * overview_pct
+                    # convert pad_km to degrees at center latitude
+                    center_lat = sum([c[1] for c in step_coords]) / len(step_coords) if step_coords else (sum(lats) / len(lats) if lats else 0.0)
+                    import math
+                    cos_lat = max(0.01, abs(math.cos(math.radians(center_lat))))
+                    deg_per_km_lon = 1.0 / (111.32 * cos_lat)
+                    deg_per_km_lat = 1.0 / 111.32
+                    lon_pad = pad_km * deg_per_km_lon
+                    lat_pad = pad_km * deg_per_km_lat
+            if overview_pct == 0.0:
+                pad_frac = float(getattr(self, "overview_map_padding", 0.06))
+                lon_pad = (max_lon - min_lon) * pad_frac if max_lon != min_lon else 0.01
+                lat_pad = (max_lat - min_lat) * pad_frac if max_lat != min_lat else 0.01
+
+            min_lon_p, max_lon_p = min_lon - lon_pad, max_lon + lon_pad
+            min_lat_p, max_lat_p = min_lat - lat_pad, max_lat + lat_pad
+
+            if getattr(self, 'debug_map', False):
+                try:
+                    # compute zooms for diagnostics
+                    zoom_unpadded = self._compute_zoom_for_bounds(min_lon, max_lon, min_lat, max_lat, self.width, self.height)
+                    zoom_padded = self._compute_zoom_for_bounds(min_lon_p, max_lon_p, min_lat_p, max_lat_p, self.width, self.height)
+                    # compute pad in pixels (approx)
+                    lon_span = max_lon - min_lon if max_lon != min_lon else 1e-6
+                    pad_px = (lon_pad / lon_span) * float(self.width)
+                    print(f"Overview padding: overview_pct={overview_pct}, max_km={max_km if 'max_km' in locals() else 'N/A'}, pad_km={pad_km if 'pad_km' in locals() else 'N/A'}, lon_pad={lon_pad}, lat_pad={lat_pad}, pad_px~{pad_px:.2f}, zoom_unpadded={zoom_unpadded}, zoom_padded={zoom_padded}, zoom_final={zoom}")
+                except Exception:
+                    pass
+
+            zoom = self._compute_zoom_for_bounds(min_lon_p, max_lon_p, min_lat_p, max_lat_p, self.width, self.height)
+
+            # Optionally force additional zoom-out when padding was requested but integer zoom didn't change
+            try:
+                force_zoom_out = bool(getattr(self, 'overview_force_zoom_out_when_padding', False))
+            except Exception:
+                force_zoom_out = False
+            try:
+                zoom_unpadded = self._compute_zoom_for_bounds(min_lon, max_lon, min_lat, max_lat, self.width, self.height)
+            except Exception:
+                zoom_unpadded = zoom
+
+            if force_zoom_out and (overview_pct and overview_pct > 0.0 or float(getattr(self, 'overview_map_padding', 0.0)) > 0.0):
+                if zoom == zoom_unpadded:
+                    # Only apply zoom-out if doing so will increase visible pad to at least overview_min_pad_px
+                    try:
+                        min_px = float(getattr(self, 'overview_min_pad_px', 12))
+                    except Exception:
+                        min_px = 12.0
+                    applied = False
+                    # Try 1..3 zoom-out levels (don't go insane)
+                    for delta in range(1, 4):
+                        cand = max(self.min_zoom, int(zoom) - delta)
+                        # degrees per pixel at candidate zoom
+                        dpp_lon = 360.0 / (256.0 * (2 ** cand))
+                        pad_px_cand = lon_pad / dpp_lon if dpp_lon > 0 else 0.0
+                        if getattr(self, 'debug_map', False):
+                            print(f"Check zoom-out: cand={cand}, pad_px_cand={pad_px_cand:.2f}, needed={min_px}")
+                        if pad_px_cand >= min_px:
+                            if getattr(self, 'debug_map', False):
+                                print(f"Applying zoom out: {zoom} -> {cand} (pad_px={pad_px_cand:.2f} >= {min_px})")
+                            zoom = cand
+                            applied = True
+                            break
+                    if not applied and getattr(self, 'debug_map', False):
+                        cur_pad_px = lon_pad / (360.0 / (256.0 * (2 ** int(zoom)))) if zoom is not None else 0.0
+                        print(f"No zoom-out applied (pad_px={cur_pad_px:.2f} < min_px={min_px})")
+
+            center = ((min_lon_p + max_lon_p) / 2.0, (min_lat_p + max_lat_p) / 2.0)
+            image = m.render(zoom=zoom, center=center)
+        else:
+            image = m.render()
+
         img_bytes = io.BytesIO()
         image.save(img_bytes, format="PNG")
         img_bytes.seek(0)
@@ -394,17 +714,31 @@ class MapGenerator:
         if photo_path is None:
             return None
 
+        # Normalize photo_path: can be a Path or a URL string
+        is_url = False
+        if isinstance(photo_path, str):
+            is_url = photo_path.startswith("http://") or photo_path.startswith("https://")
+            if not is_url:
+                try:
+                    photo_path = Path(photo_path)
+                except Exception:
+                    return None
+
         cache_dir = Path(__file__).parent / ".map_marker_cache"
         cache_dir.mkdir(parents=True, exist_ok=True)
 
         try:
-            mtime = photo_path.stat().st_mtime
+            mtime = photo_path.stat().st_mtime if (not is_url and isinstance(photo_path, Path)) else 0
         except Exception:
             mtime = 0
 
         # include ring color in cache key
         ring_hex = ''.join(f"{c:02x}" for c in ring_color)
-        cache_key = f"{photo_path.resolve()}|{mtime}|{size}|{ring_hex}"
+        try:
+            key_src = str(photo_path.resolve()) if isinstance(photo_path, Path) else str(photo_path)
+        except Exception:
+            key_src = str(photo_path)
+        cache_key = f"{key_src}|{mtime}|{size}|{ring_hex}"
         cache_name = hashlib.sha1(cache_key.encode("utf-8")).hexdigest() + ".png"
         cache_path = cache_dir / cache_name
 
@@ -412,6 +746,8 @@ class MapGenerator:
             return cache_path
 
         try:
+            if is_url:
+                raise ValueError("URL thumbnail requires download")
             with Image.open(photo_path) as img:
                 img = img.convert("RGBA")
                 img = ImageOps.fit(img, (size, size), method=Image.LANCZOS)
@@ -446,6 +782,48 @@ class MapGenerator:
                         return self._get_step_thumbnail({"photos": [tmp_path]}, size=size, ring_color=ring_color)
             except Exception:
                 pass
+            return None
+
+    def _get_ring_overlay(self, size: int, color: str = MISSING_PHOTO_COLOR, thickness: int = 3) -> Optional[Path]:
+        """Return a cached PNG ring (transparent center) to overlay markers for emphasis.
+
+        - `size` is the outer diameter in pixels
+        - `color` is a hex string like "#FF4D4F"
+        - `thickness` is the stroke width in pixels
+        """
+        try:
+            cache_dir = Path(__file__).parent / ".map_marker_cache"
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            key_src = f"ring|{size}|{color}|{thickness}"
+            cache_name = hashlib.sha1(key_src.encode("utf-8")).hexdigest() + ".png"
+            cache_path = cache_dir / cache_name
+            if cache_path.exists():
+                return cache_path
+
+            # Convert hex color to RGBA tuple
+            if isinstance(color, str) and color.startswith("#"):
+                c = color.lstrip("#")
+                if len(c) == 6:
+                    r = int(c[0:2], 16)
+                    g = int(c[2:4], 16)
+                    b = int(c[4:6], 16)
+                    a = 220
+                else:
+                    r, g, b, a = 255, 80, 80, 220
+            else:
+                try:
+                    r, g, b = color[0], color[1], color[2]
+                    a = color[3] if len(color) > 3 else 220
+                except Exception:
+                    r, g, b, a = 255, 80, 80, 220
+
+            img = Image.new("RGBA", (int(size), int(size)), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(img)
+            # Draw ring by outlining ellipse
+            draw.ellipse((0, 0, size - 1, size - 1), outline=(r, g, b, a), width=int(thickness))
+            img.save(cache_path, format="PNG")
+            return cache_path
+        except Exception:
             return None
 
     def _compute_zoom_for_bounds(self, min_lon: float, max_lon: float, min_lat: float, max_lat: float, width_px: int, height_px: int) -> int:
@@ -491,109 +869,140 @@ class MapGenerator:
         w = width or self.width
         h = height or self.height
 
-        # Collect coords for prev/current/next (or fallback to current only)
-        coords = []
-        for idx in (step_index - 1, step_index, step_index + 1):
-            if 0 <= idx < len(trip_parser.steps):
-                st = trip_parser.steps[idx]
-                loc = st.get("data", {}).get("location", {})
-                if loc:
-                    lat = loc.get("lat") or loc.get("latitude") or loc.get("Latitude")
-                    lon = loc.get("lon") or loc.get("lng") or loc.get("longitude") or loc.get("Longitude")
+        # Determine current + distinct previous/next (skip same-location clusters)
+        current_coord = self._extract_lon_lat(trip_parser.steps[step_index]) if (0 <= step_index < len(trip_parser.steps)) else None
+        if not current_coord:
+            m = self._create_map(w, h)
+            image = m.render()
+            img_bytes = io.BytesIO()
+            image.save(img_bytes, format="PNG")
+            img_bytes.seek(0)
+            return img_bytes.getvalue()
+
+        prev_idx = self._find_distinct_neighbor_index(trip_parser, step_index, -1)
+        next_idx = self._find_distinct_neighbor_index(trip_parser, step_index, +1)
+        prev_coord = self._extract_lon_lat(trip_parser.steps[prev_idx]) if prev_idx is not None else None
+        next_coord = self._extract_lon_lat(trip_parser.steps[next_idx]) if next_idx is not None else None
+
+        # On long trips, ignore far-away neighbors to keep the step map tighter
+        try:
+            step_count = len(trip_parser.steps) if hasattr(trip_parser, "steps") else 0
+            max_neighbor_km = float(getattr(self, "step_map_neighbor_max_km", 0) or 0)
+            min_steps_for_limit = int(getattr(self, "step_map_neighbor_limit_steps_threshold", 0) or 0)
+            if max_neighbor_km > 0 and (min_steps_for_limit == 0 or step_count >= min_steps_for_limit):
+                if prev_coord:
                     try:
-                        lat = float(lat) if lat is not None else None
-                        lon = float(lon) if lon is not None else None
+                        dist_prev = self._haversine_km(current_coord[0], current_coord[1], prev_coord[0], prev_coord[1])
+                        if dist_prev > max_neighbor_km:
+                            if getattr(self, 'debug_map', False):
+                                print(f"Step map neighbor clamp: prev {dist_prev:.1f}km > {max_neighbor_km}km -> ignore")
+                            prev_coord = None
                     except Exception:
-                        lat = None
-                        lon = None
-                    if lat is not None and lon is not None:
-                        coords.append((lon, lat))
+                        pass
+                if next_coord:
+                    try:
+                        dist_next = self._haversine_km(current_coord[0], current_coord[1], next_coord[0], next_coord[1])
+                        if dist_next > max_neighbor_km:
+                            if getattr(self, 'debug_map', False):
+                                print(f"Step map neighbor clamp: next {dist_next:.1f}km > {max_neighbor_km}km -> ignore")
+                            next_coord = None
+                    except Exception:
+                        pass
+        except Exception:
+            pass
 
-        # If nothing found, fallback to current step center
-        if not coords and 0 <= step_index < len(trip_parser.steps):
-            st = trip_parser.steps[step_index]
-            loc = st.get("data", {}).get("location", {})
-            lat = loc.get("lat") or loc.get("latitude") or loc.get("Latitude")
-            lon = loc.get("lon") or loc.get("lng") or loc.get("longitude") or loc.get("Longitude")
-            try:
-                lat = float(lat) if lat is not None else None
-                lon = float(lon) if lon is not None else None
-            except Exception:
-                lat = None
-                lon = None
-            if lat is None or lon is None:
-                # nothing to show
-                m = self._create_map(w, h)
-                image = m.render()
-                img_bytes = io.BytesIO()
-                image.save(img_bytes, format="PNG")
-                img_bytes.seek(0)
-                return img_bytes.getvalue()
-            coords = [(lon, lat)]
-
-        lons = [c[0] for c in coords]
-        lats = [c[1] for c in coords]
+        fit_coords = [c for c in (prev_coord, current_coord, next_coord) if c]
+        lons = [c[0] for c in fit_coords]
+        lats = [c[1] for c in fit_coords]
         min_lon, max_lon = min(lons), max(lons)
         min_lat, max_lat = min(lats), max(lats)
 
-        # expand by padding
-        lon_pad = (max_lon - min_lon) * padding if max_lon != min_lon else 0.01
-        lat_pad = (max_lat - min_lat) * padding if max_lat != min_lat else 0.01
-        min_lon -= lon_pad
-        max_lon += lon_pad
-        min_lat -= lat_pad
-        max_lat += lat_pad
+        pad_frac = float(padding if padding is not None else getattr(self, "step_map_padding", 0.12))
 
-        # compute zoom (and apply configured zoom-out to show surrounding steps clearly)
-        padding = padding if padding is not None else getattr(self, 'step_map_padding', 0.12)
-        # recompute padded bounds
-        lon_pad = (max_lon - min_lon) * padding if max_lon != min_lon else 0.01
-        lat_pad = (max_lat - min_lat) * padding if max_lat != min_lat else 0.01
+        # Auto-tighten padding for trips with many steps so step maps become more zoomed-in.
+        try:
+            n_steps = len(trip_parser.steps) if hasattr(trip_parser, "steps") else 0
+            if getattr(self, "step_map_auto_tighten", True) and n_steps > 20:
+                if n_steps <= 40:
+                    pad_scale = float(getattr(self, "step_map_tighten_scale_small", 0.8))
+                elif n_steps <= 80:
+                    pad_scale = float(getattr(self, "step_map_tighten_scale_medium", 0.6))
+                else:
+                    pad_scale = float(getattr(self, "step_map_tighten_scale_large", 0.5))
+                if getattr(self, 'debug_map', False):
+                    print(f"Step map: auto-tighten for {n_steps} steps: pad_frac {pad_frac} -> {pad_frac*pad_scale}")
+                pad_frac = max(0.0, pad_frac * pad_scale)
+        except Exception:
+            pass
+
+        # Cap absolute padding in km to avoid excessive zoom-out on long spans.
+        try:
+            center_lat_for_pad = (min_lat + max_lat) / 2.0
+            span_lon_deg = max_lon - min_lon
+            span_lat_deg = max_lat - min_lat
+            # approximate horizontal km span at center latitude
+            import math
+            km_per_deg_lon = 111.32 * max(0.01, abs(math.cos(math.radians(center_lat_for_pad))))
+            span_km = span_lon_deg * km_per_deg_lon
+            max_pad_km = float(getattr(self, "step_map_max_pad_km", 0.0) or 0.0)
+            if max_pad_km > 0 and span_km > 0:
+                pad_km = span_km * pad_frac
+                if pad_km > max_pad_km:
+                    pad_frac = max_pad_km / span_km
+                    if getattr(self, 'debug_map', False):
+                        print(f"Step map: pad capped by max_pad_km={max_pad_km}km -> pad_frac={pad_frac:.4f}")
+        except Exception:
+            pass
+
+        lon_pad = (max_lon - min_lon) * pad_frac if max_lon != min_lon else 0.01
+        lat_pad = (max_lat - min_lat) * pad_frac if max_lat != min_lat else 0.01
         min_lon_p, max_lon_p = min_lon - lon_pad, max_lon + lon_pad
         min_lat_p, max_lat_p = min_lat - lat_pad, max_lat + lat_pad
 
-        zoom = self._compute_zoom_for_bounds(min_lon_p, max_lon_p, min_lat_p, max_lat_p, w, h)
-        # apply zoom-out (default 1 level) to ensure context (but clamp to min/max)
+        # Base zoom to fit (never crops).
+        zoom_fit = self._compute_zoom_for_bounds(min_lon_p, max_lon_p, min_lat_p, max_lat_p, w, h)
+        zoom = int(zoom_fit)
+
+        # Apply min-width constraint (km): avoid being too zoomed-in.
+        center_lat_for_km = current_coord[1]
+        zoom_min_width = self._zoom_for_horizontal_km(getattr(self, "step_map_min_width_km", 12.0), center_lat_for_km, w, prefer="at_least")
+        zoom = min(int(zoom), int(zoom_min_width))  # smaller zoom => wider view
+
+        # Apply configured extra zoom-out levels, then clamp to min/max zoom.
         try:
-            out_levels = int(getattr(self, 'step_map_zoom_out', 1))
+            out_levels = int(getattr(self, "step_map_zoom_out", 0) or 0)
         except Exception:
-            out_levels = 1
-        zoom = max(self.min_zoom, min(self.max_zoom, zoom - out_levels))
+            out_levels = 0
+        zoom = zoom - out_levels
+        zoom = max(self.min_zoom, min(self.max_zoom, int(zoom)))
+
+        # Optional max-width constraint (km): only if it doesn't crop the fit bounds.
+        try:
+            max_km = float(getattr(self, "step_map_max_width_km", 0) or 0)
+        except Exception:
+            max_km = 0.0
+        if max_km > 0:
+            zoom_max_width = self._zoom_for_horizontal_km(max_km, center_lat_for_km, w, prefer="at_most")
+            # If zoom is so far out that it exceeds max_km, we can zoom in, but never beyond zoom_fit.
+            zoom = min(int(zoom_fit), max(int(zoom), int(zoom_max_width)))
+            zoom = max(self.min_zoom, min(self.max_zoom, int(zoom)))
+
+        # Centering: weighted towards current step, but clamped so prev/current/next remain visible.
+        center_points = [
+            (current_coord[0], current_coord[1], getattr(self, "step_center_weight_current", 2.0)),
+        ]
+        if prev_coord:
+            center_points.append((prev_coord[0], prev_coord[1], getattr(self, "step_center_weight_other", 1.0)))
+        if next_coord:
+            center_points.append((next_coord[0], next_coord[1], getattr(self, "step_center_weight_other", 1.0)))
+        wc = self._weighted_center(center_points)
+        # filter Nones introduced above
+        if wc is None:
+            wc = ((min_lon_p + max_lon_p) / 2.0, (min_lat_p + max_lat_p) / 2.0)
+        bounds = (min_lon_p, max_lon_p, min_lat_p, max_lat_p)
+        center = self._clamp_center_to_bounds(wc, zoom, bounds, w, h)
 
         m = self._create_map(w, h)
-
-        # Add all step markers (thumbnail icons if available). Highlight current step.
-        for i, st in enumerate(trip_parser.steps):
-            loc = st.get("data", {}).get("location", {})
-            if not loc:
-                continue
-            lat = loc.get("lat") or loc.get("latitude") or loc.get("Latitude")
-            lon = loc.get("lon") or loc.get("lng") or loc.get("longitude") or loc.get("Longitude")
-            try:
-                lat = float(lat) if lat is not None else None
-                lon = float(lon) if lon is not None else None
-            except Exception:
-                continue
-            if lat is None or lon is None:
-                continue
-
-            # create thumbnail; highlight if this is current
-            is_current = (i == step_index)
-            ring_color = (255, 80, 80, 220) if is_current else (255, 255, 255, 230)
-            thumb = self._get_step_thumbnail(st, size=self.marker_thumb_size, ring_color=ring_color)
-            if thumb and IconMarker is not None:
-                # IconMarker expects (lon, lat), file_path, offset_x, offset_y; use half size to align center
-                off_x = int(self.marker_thumb_size / 2)
-                off_y = int(self.marker_thumb_size / 2)
-                try:
-                    m.add_marker(IconMarker((lon, lat), str(thumb), off_x, off_y))
-                except Exception:
-                    # fallback to circle
-                    color = MARKER_COLOR_START if i == 0 else MARKER_COLOR_STEP
-                    m.add_marker(CircleMarker((lon, lat), color, 12))
-            else:
-                color = MARKER_COLOR_START if i == 0 else ("#FF4D4F" if is_current else MARKER_COLOR_STEP)
-                m.add_marker(CircleMarker((lon, lat), color, 12))
 
         # Also draw route line for context (outline + main line for visibility)
         route_coords = trip_parser.get_route_coordinates()
@@ -603,28 +1012,70 @@ class MapGenerator:
             line = Line(route_coords, ROUTE_COLOR, ROUTE_LINE_WIDTH)
             m.add_line(line)
 
-        # Determine center on current step for explicit centering
-        current_center = None
-        if 0 <= step_index < len(trip_parser.steps):
-            st = trip_parser.steps[step_index]
-            loc = st.get("data", {}).get("location", {})
-            if loc:
-                clat = loc.get("lat") or loc.get("latitude") or loc.get("Latitude")
-                clon = loc.get("lon") or loc.get("lng") or loc.get("longitude") or loc.get("Longitude")
-                try:
-                    clat = float(clat) if clat is not None else None
-                    clon = float(clon) if clon is not None else None
-                except Exception:
-                    clat = None
-                    clon = None
-                if clat is not None and clon is not None:
-                    current_center = (clon, clat)
+        # Add all step markers; draw current last so it's always on top.
+        marker_px = max(8, int(round(self.marker_thumb_size * self.render_scale)))
+        marker_radius = max(4, int(round(12 * self.render_scale)))
+        normal_indices = [i for i in range(len(trip_parser.steps)) if i != step_index]
+        draw_order = normal_indices + ([step_index] if 0 <= step_index < len(trip_parser.steps) else [])
+        for i in draw_order:
+            st = trip_parser.steps[i]
+            coord = self._extract_lon_lat(st)
+            if not coord:
+                continue
+            lon, lat = coord
 
-        # Render map centered on current step
-        if current_center:
-            image = m.render(zoom=zoom, center=current_center)
-        else:
-            image = m.render(zoom=zoom)
+            is_current = (i == step_index)
+            try:
+                has_photo = self._step_has_photo(st)
+            except Exception:
+                has_photo = True
+            ring_color = (255, 80, 80, 220) if is_current else (255, 255, 255, 230)
+            thumb = self._get_step_thumbnail(st, size=marker_px, ring_color=ring_color)
+
+            # Add a red halo under the current step marker only when a photo exists
+            if is_current and has_photo:
+                try:
+                    m.add_marker(CircleMarker((lon, lat), MISSING_PHOTO_COLOR, marker_radius + 4))
+                except Exception:
+                    pass
+
+            if thumb and IconMarker is not None:
+                off_x = int(marker_px / 2)
+                off_y = int(marker_px / 2)
+                try:
+                    m.add_marker(IconMarker((lon, lat), str(thumb), off_x, off_y))
+                    # If this is the current step with a photo, overlay a ring image on top to ensure visibility
+                    if is_current and has_photo:
+                        try:
+                            overlay = self._get_ring_overlay(marker_px + 8, color=MISSING_PHOTO_COLOR, thickness=max(2, int(round(self.render_scale * 2))))
+                            if overlay:
+                                off_xo = int((marker_px + 8) / 2)
+                                off_yo = int((marker_px + 8) / 2)
+                                try:
+                                    m.add_marker(IconMarker((lon, lat), str(overlay), off_xo, off_yo))
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+                    continue
+                except Exception:
+                    pass
+
+            if is_current and not has_photo:
+                color = MISSING_PHOTO_COLOR
+            else:
+                color = MARKER_COLOR_START if i == 0 else ("#FF4D4F" if is_current else MARKER_COLOR_STEP)
+            m.add_marker(CircleMarker((lon, lat), color, marker_radius))
+
+        if getattr(self, 'debug_map', False):
+            try:
+                dpp_lon = 360.0 / (256.0 * (2 ** int(zoom)))
+                pad_px = lon_pad / dpp_lon if dpp_lon > 0 else 0.0
+                print(f"Step padding: lon_pad={lon_pad:.6f}, pad_px~{pad_px:.2f}, zoom={zoom}, center={center}")
+            except Exception:
+                pass
+
+        image = m.render(zoom=zoom, center=center)
         img_bytes = io.BytesIO()
         image.save(img_bytes, format="PNG")
         img_bytes.seek(0)
@@ -1061,17 +1512,39 @@ class PDFBuilder:
         self.elements.append(Spacer(1, 10 * mm))
         try:
             map_bytes = self.map_generator.generate_overview_map(self.trip_parser)
-            map_img = RLImage(io.BytesIO(map_bytes))
-            
-            # Scale to fit page width
-            aspect = 800 / 600
-            map_width = self.CONTENT_WIDTH
-            map_height = map_width / aspect
-            
-            map_img.drawWidth = map_width
-            map_img.drawHeight = map_height
-            
-            self.elements.append(map_img)
+            if getattr(self.map_generator, 'debug_map', False):
+                try:
+                    tmp = Path.cwd() / f"debug_overview_{self.trip_parser.get_trip_name().replace(' ', '_')}.png"
+                    tmp.write_bytes(map_bytes)
+                    print(f"Debug: wrote overview image to {tmp} ({len(map_bytes)} bytes)")
+                except Exception:
+                    pass
+
+            # Normalize image with Pillow (drop alpha, convert to RGB) to avoid PDF embedding issues
+            try:
+                pil = Image.open(io.BytesIO(map_bytes)).convert('RGB')
+                buf = io.BytesIO()
+                pil.save(buf, format='PNG')
+                buf.seek(0)
+                map_img = RLImage(buf)
+            except Exception:
+                # Fallback to raw bytes if Pillow conversion fails
+                try:
+                    map_img = RLImage(io.BytesIO(map_bytes))
+                except Exception as e:
+                    print(f"Warning: could not create overview RLImage: {e}")
+                    map_img = None
+
+            if map_img:
+                # Scale to fit page width
+                aspect = float(self.map_generator.width) / float(self.map_generator.height)
+                map_width = self.CONTENT_WIDTH
+                map_height = map_width / aspect
+
+                map_img.drawWidth = map_width
+                map_img.drawHeight = map_height
+
+                self.elements.append(map_img)
         except Exception as e:
             print(f"  Warning: Could not generate overview map: {e}")
         
@@ -1368,24 +1841,46 @@ class PDFBuilder:
             lat = None
             lon = None
 
-        if lat is not None and lon is not None:
-            try:
-                map_height_points = 60 * mm
-                # generate map ensuring prev & next are visible and current is highlighted
-                        # use configured zoom-out and padding
-                map_bytes = self.map_generator.generate_step_map_for_step(
-                    self.trip_parser,
-                    step_number - 1,
-                    width=int(self.CONTENT_WIDTH),
-                    height=int(map_height_points),
-                    padding=float(self.config.get('step_map_padding', getattr(self.map_generator, 'step_map_padding', 0.12)))
-                )
-                map_img = RLImage(io.BytesIO(map_bytes))
-                map_img.drawWidth = self.CONTENT_WIDTH
-                map_img.drawHeight = map_height_points
-                step_flow.append(map_img)
-            except Exception as e:
-                print(f"    Warning: Could not generate step map: {e}")
+        # Always attempt to generate a step map (MapGenerator has fallbacks if coords are missing)
+        try:
+            map_height_points = 60 * mm
+            # generate map ensuring prev & next are visible and current is highlighted
+            map_bytes = self.map_generator.generate_step_map_for_step(
+                self.trip_parser,
+                step_number - 1,
+                width=int(self.CONTENT_WIDTH),
+                height=int(map_height_points),
+                padding=float(self.config.get('step_map_padding', getattr(self.map_generator, 'step_map_padding', 0.12)))
+            )
+            if getattr(self.map_generator, 'debug_map', False):
+                try:
+                    tmp = Path.cwd() / f"debug_step_{step_number}_{self.trip_parser.get_trip_name().replace(' ', '_')}.png"
+                    tmp.write_bytes(map_bytes)
+                    print(f"Debug: wrote step image to {tmp} ({len(map_bytes)} bytes)")
+                except Exception:
+                    pass
+
+            if map_bytes:
+                # Normalize image with Pillow to avoid embedding problems (drop alpha)
+                try:
+                    pil = Image.open(io.BytesIO(map_bytes)).convert('RGB')
+                    buf = io.BytesIO()
+                    pil.save(buf, format='PNG')
+                    buf.seek(0)
+                    map_img = RLImage(buf)
+                except Exception:
+                    try:
+                        map_img = RLImage(io.BytesIO(map_bytes))
+                    except Exception as e:
+                        print(f"    Warning: could not create RLImage for step map: {e}")
+                        map_img = None
+
+                if map_img:
+                    map_img.drawWidth = self.CONTENT_WIDTH
+                    map_img.drawHeight = map_height_points
+                    step_flow.append(map_img)
+        except Exception as e:
+            print(f"    Warning: Could not generate step map: {e}")
 
         # Description
         description = step_data.get("description", "")
@@ -1476,6 +1971,25 @@ class PDFBuilder:
         print("  Generating PDF file...")
         doc.build(self.elements)
         print(f"  PDF created: {self.output_path}")
+
+        # Optionally open the rendered PDF file after creation (config key: open_pdf_after_render)
+        try:
+            open_after = bool(self.config.get("open_pdf_after_render", True))
+        except Exception:
+            open_after = True
+
+        if open_after:
+            try:
+                if os.name == "nt":
+                    # Windows
+                    os.startfile(str(self.output_path))
+                elif sys.platform == "darwin":
+                    subprocess.run(["open", str(self.output_path)], check=False)
+                else:
+                    # Linux/Unix
+                    subprocess.run(["xdg-open", str(self.output_path)], check=False)
+            except Exception as e:
+                print(f"  Warning: Could not open PDF: {e}")
 
 
 class CacheManager:
@@ -2149,13 +2663,34 @@ def render_trip(trip_path: Path, script_dir: Path, config: dict, cache_manager: 
         map_gen = MapGenerator(
             default_zoom=int(config.get("default_map_zoom", 12)),
             min_zoom=int(config.get("min_map_zoom", 6)),
-            max_zoom=int(config.get("max_map_zoom", 16))
+            max_zoom=int(config.get("max_map_zoom", 16)),
+            render_scale=float(config.get("map_render_scale", 1.0)),
+            marker_thumb_size=int(config.get("marker_thumb_size", 40))
         )
         # optionally allow configuring thumbnail size and step-map behavior
         try:
             map_gen.marker_thumb_size = int(config.get("marker_thumb_size", map_gen.marker_thumb_size))
+            map_gen.render_scale = max(1.0, float(config.get("map_render_scale", map_gen.render_scale)))
             map_gen.step_map_zoom_out = int(config.get("step_map_zoom_out", map_gen.step_map_zoom_out))
             map_gen.step_map_padding = float(config.get("step_map_padding", map_gen.step_map_padding))
+            map_gen.overview_map_padding = float(config.get("overview_map_padding", map_gen.overview_map_padding))
+            map_gen.overview_padding_percent = float(config.get("overview_padding_percent", getattr(map_gen, 'overview_padding_percent', 0.0)))
+            map_gen.overview_force_zoom_out_when_padding = bool(config.get("overview_force_zoom_out_when_padding", getattr(map_gen, 'overview_force_zoom_out_when_padding', False)))
+            map_gen.overview_min_pad_px = float(config.get("overview_min_pad_px", getattr(map_gen, 'overview_min_pad_px', 12)))
+            map_gen.debug_map = bool(config.get("debug_map", getattr(map_gen, 'debug_map', False)))
+            map_gen.step_map_min_width_km = float(config.get("step_map_min_width_km", map_gen.step_map_min_width_km))
+            map_gen.step_map_max_width_km = float(config.get("step_map_max_width_km", map_gen.step_map_max_width_km))
+            map_gen.step_cluster_radius_km = float(config.get("step_cluster_radius_km", map_gen.step_cluster_radius_km))
+            map_gen.step_center_weight_current = float(config.get("step_center_weight_current", map_gen.step_center_weight_current))
+            map_gen.step_center_weight_other = float(config.get("step_center_weight_other", map_gen.step_center_weight_other))
+            # Optional: allow disabling/enabling auto-tighten behavior and tuning scales via config
+            map_gen.step_map_auto_tighten = bool(config.get("step_map_auto_tighten", map_gen.step_map_auto_tighten))
+            map_gen.step_map_tighten_scale_small = float(config.get("step_map_tighten_scale_small", getattr(map_gen, 'step_map_tighten_scale_small', 0.8)))
+            map_gen.step_map_tighten_scale_medium = float(config.get("step_map_tighten_scale_medium", getattr(map_gen, 'step_map_tighten_scale_medium', 0.6)))
+            map_gen.step_map_tighten_scale_large = float(config.get("step_map_tighten_scale_large", getattr(map_gen, 'step_map_tighten_scale_large', 0.5)))
+            map_gen.step_map_neighbor_max_km = float(config.get("step_map_neighbor_max_km", getattr(map_gen, 'step_map_neighbor_max_km', 250.0)))
+            map_gen.step_map_neighbor_limit_steps_threshold = int(config.get("step_map_neighbor_limit_steps_threshold", getattr(map_gen, 'step_map_neighbor_limit_steps_threshold', 20)))
+            map_gen.step_map_max_pad_km = float(config.get("step_map_max_pad_km", getattr(map_gen, 'step_map_max_pad_km', 25.0)))
         except Exception:
             pass
 
