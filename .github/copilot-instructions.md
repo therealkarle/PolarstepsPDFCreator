@@ -52,5 +52,8 @@ Purpose: Short, actionable guidance to quickly make safe, useful changes in this
 - Update `README.md` and `config.json` defaults if you add user-facing flags or configuration keys.
 - Preserve backward compatibility for user workflows (existing `render` flags, cache semantics, and output paths).
 
+
+-Never do commit as an AI agent without human review. Only humans should do commits.
+
 ---
 If any part of the codebase seems ambiguous or you want a specific example (e.g., unit test template for `parse_selection()`), tell me which area to expand and I will add a short example snippet or a test file. ✅
