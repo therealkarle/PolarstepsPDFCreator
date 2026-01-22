@@ -246,7 +246,11 @@ except Exception:
 # ESRI World Imagery tile template
 ESRI_SATELLITE_URL = "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
 # Map colors
-ROUTE_COLOR = "#FF4D4F"  # red-ish
+ROUTE_COLOR = "#FFFFFF"  # white
+# Outline color/width for the route line to ensure visibility over satellite tiles
+ROUTE_OUTLINE_COLOR = "#000000"  # black
+ROUTE_OUTLINE_WIDTH = 5
+ROUTE_LINE_WIDTH = 3
 MARKER_COLOR_START = "#1A5F7A"  # teal
 MARKER_COLOR_STEP = "#4ECDC4"  # lighter teal
 
@@ -307,10 +311,10 @@ class MapGenerator:
         """Generate overview map with route and step markers."""
         m = self._create_map()
 
-        # Add route line
+        # Add route line (white only for overview; outline omitted to keep map clean)
         route_coords = trip_parser.get_route_coordinates()
         if len(route_coords) > 1:
-            line = Line(route_coords, ROUTE_COLOR, 3)
+            line = Line(route_coords, ROUTE_COLOR, ROUTE_LINE_WIDTH)
             m.add_line(line)
 
         # Add step markers (use photo thumbnails when possible)
@@ -591,13 +595,36 @@ class MapGenerator:
                 color = MARKER_COLOR_START if i == 0 else ("#FF4D4F" if is_current else MARKER_COLOR_STEP)
                 m.add_marker(CircleMarker((lon, lat), color, 12))
 
-        # Also draw route line for context
+        # Also draw route line for context (outline + main line for visibility)
         route_coords = trip_parser.get_route_coordinates()
         if len(route_coords) > 1:
-            line = Line(route_coords, ROUTE_COLOR, 3)
+            outline = Line(route_coords, ROUTE_OUTLINE_COLOR, ROUTE_OUTLINE_WIDTH)
+            m.add_line(outline)
+            line = Line(route_coords, ROUTE_COLOR, ROUTE_LINE_WIDTH)
             m.add_line(line)
 
-        image = m.render(zoom=zoom)
+        # Determine center on current step for explicit centering
+        current_center = None
+        if 0 <= step_index < len(trip_parser.steps):
+            st = trip_parser.steps[step_index]
+            loc = st.get("data", {}).get("location", {})
+            if loc:
+                clat = loc.get("lat") or loc.get("latitude") or loc.get("Latitude")
+                clon = loc.get("lon") or loc.get("lng") or loc.get("longitude") or loc.get("Longitude")
+                try:
+                    clat = float(clat) if clat is not None else None
+                    clon = float(clon) if clon is not None else None
+                except Exception:
+                    clat = None
+                    clon = None
+                if clat is not None and clon is not None:
+                    current_center = (clon, clat)
+
+        # Render map centered on current step
+        if current_center:
+            image = m.render(zoom=zoom, center=current_center)
+        else:
+            image = m.render(zoom=zoom)
         img_bytes = io.BytesIO()
         image.save(img_bytes, format="PNG")
         img_bytes.seek(0)
