@@ -16,6 +16,15 @@ from datetime import datetime
 import argparse
 import json
 import re
+# Optional TOML loader (tomllib for Python 3.11+, fallback to the 'toml' package)
+try:
+    import tomllib as _tomllib
+except Exception:
+    try:
+        import toml as _tomllib
+    except Exception:
+        _tomllib = None
+
 import threading
 import queue
 import html
@@ -246,8 +255,10 @@ except Exception:
     Line = None
     IconMarker = None
 
-# ESRI World Imagery tile template
+# ESRI World Imagery tile template (Satellite/Hybrid)
 ESRI_SATELLITE_URL = "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
+# ESRI World Street Map tile template (Road)
+ESRI_ROAD_URL = "https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}"
 # Map colors
 ROUTE_COLOR = "#FFFFFF"  # white
 # Outline color/width for the route line to ensure visibility over satellite tiles
@@ -291,13 +302,14 @@ class MapGenerator:
       - marker_thumb_size: base marker thumbnail size in pixels
     """
 
-    def __init__(self, width: int = 800, height: int = 600, default_zoom: int = 12, min_zoom: int = 6, max_zoom: int = 16, render_scale: float = 1.0, marker_thumb_size: int = 40):
+    def __init__(self, width: int = 800, height: int = 600, default_zoom: int = 12, min_zoom: int = 6, max_zoom: int = 16, render_scale: float = 1.0, marker_thumb_size: int = 40, url_template: str = ESRI_SATELLITE_URL):
         self.width = width
         self.height = height
         self.default_zoom = default_zoom
         self.min_zoom = min_zoom
         self.max_zoom = max_zoom
         self.render_scale = max(1.0, float(render_scale))
+        self.url_template = url_template
         # maximum thumbnail size used for markers
         self.marker_thumb_size = marker_thumb_size
         # how many zoom levels to step out for step maps (helps to show prev/current/next comfortably)
@@ -508,14 +520,14 @@ class MapGenerator:
 
 
     def _create_map(self, width: int = None, height: int = None) -> "object":
-        """Create a StaticMap with ESRI satellite tiles."""
+        """Create a StaticMap with configured tiles."""
         if StaticMap is None:
             raise RuntimeError("staticmap not available: install the 'staticmap' package to enable map generation")
         w = int(round((width or self.width) * self.render_scale))
         h = int(round((height or self.height) * self.render_scale))
         return StaticMap(
             w, h,
-            url_template=ESRI_SATELLITE_URL,
+            url_template=self.url_template,
             tile_size=256
         )
 
@@ -2661,12 +2673,20 @@ def render_trip(trip_path: Path, script_dir: Path, config: dict, cache_manager: 
 
         output_path = pdfs_dir / f"{trip_name_safe}.pdf"
         
+        # Determine map URL
+        map_style = config.get("map_style", "hybrid").lower()
+        if map_style == "road":
+            map_url = ESRI_ROAD_URL
+        else:
+            map_url = ESRI_SATELLITE_URL
+
         map_gen = MapGenerator(
             default_zoom=int(config.get("default_map_zoom", 12)),
             min_zoom=int(config.get("min_map_zoom", 6)),
             max_zoom=int(config.get("max_map_zoom", 16)),
             render_scale=float(config.get("map_render_scale", 1.0)),
-            marker_thumb_size=int(config.get("marker_thumb_size", 40))
+            marker_thumb_size=int(config.get("marker_thumb_size", 40)),
+            url_template=map_url
         )
         # optionally allow configuring thumbnail size and step-map behavior
         try:
@@ -2797,19 +2817,27 @@ Examples:
     
     script_dir = Path(__file__).parent
     
-    # Load config
-    config_path = script_dir / "config.json"
+    # Load config (supports TOML with comments; falls back to commented JSON)
     config = {}
+    config_toml = script_dir / "config.toml"
+    config_json = script_dir / "config.json"
     try:
-        if config_path.exists():
-            with open(config_path, "r", encoding="utf-8") as cf:
+        if config_toml.exists():
+            if _tomllib is None:
+                raise RuntimeError("TOML config found but tomllib/toml is not available. Install the 'toml' package or run with Python 3.11+.")
+            with open(config_toml, "r", encoding="utf-8") as cf:
+                toml_content = cf.read()
+                # Use loads for both 'toml' package and stdlib 'tomllib'
+                config = _tomllib.loads(toml_content)
+        elif config_json.exists():
+            with open(config_json, "r", encoding="utf-8") as cf:
                 content = cf.read()
                 # Remove comments // ... and /* ... */ to allow commented JSON
                 content = re.sub(r"//.*", "", content)
                 content = re.sub(r"/\*.*?\*/", "", content, flags=re.DOTALL)
                 config = json.loads(content)
     except Exception as e:
-        print(f"Warning: could not load config.json: {e}")
+        print(f"Warning: could not load config: {e}")
         config = {}
     
     # Initialize cache manager

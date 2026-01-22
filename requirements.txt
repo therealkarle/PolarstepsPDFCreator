@@ -3,3 +3,5 @@ reportlab>=4.0.0
 Pillow>=10.0.0
 staticmap>=0.5.7
 requests>=2.31.0
+# TOML parser for config (allows comments and clearer syntax)
+toml>=0.10.2
