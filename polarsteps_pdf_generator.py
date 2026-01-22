@@ -18,6 +18,9 @@ import json
 import re
 import threading
 import queue
+import html
+import hashlib
+import requests
 from collections import deque
 
 # Trip parsing
@@ -47,6 +50,13 @@ class TripParser:
         except Exception:
             self.trip_data = {}
 
+        def _clean_text(value: str) -> str:
+            if value is None:
+                return ""
+            text = str(value).replace("\r\n", "\n").replace("\r", "\n")
+            text = "\n".join(line.rstrip() for line in text.split("\n"))
+            return text.strip()
+
         # Prefer explicit steps in trip.json if available
         if isinstance(self.trip_data.get("steps"), list) and self.trip_data.get("steps"):
             for s in self.trip_data.get("steps", []):
@@ -59,6 +69,67 @@ class TripParser:
                         photos.append(Path(self.trip_path) / p) if p else None
                     for v in s.get("videos", []):
                         videos.append(Path(self.trip_path) / v) if v else None
+                if isinstance(data, dict):
+                    data["description"] = _clean_text(data.get("description", ""))
+                    data["display_name"] = _clean_text(data.get("display_name", data.get("name", ""))) or data.get("name")
+                self.steps.append({"data": data, "photos": photos, "videos": videos})
+            return
+
+        # Fallback: use all_steps from trip.json (common export format)
+        if isinstance(self.trip_data.get("all_steps"), list) and self.trip_data.get("all_steps"):
+            # Try to match local step folders to attach photos/videos when available
+            trip_children = [c for c in sorted(self.trip_path.iterdir()) if c.is_dir()]
+            for s in self.trip_data.get("all_steps", []):
+                data = s if isinstance(s, dict) else {}
+                # Normalize location field
+                loc = data.get("location") if isinstance(data, dict) else None
+                if isinstance(loc, dict):
+                    data["location"] = loc
+                if isinstance(data, dict):
+                    data["description"] = _clean_text(data.get("description", ""))
+                    data["display_name"] = _clean_text(data.get("display_name", data.get("name", ""))) or data.get("name")
+
+                # Attempt to find a matching local folder by slug/display_slug/display_name
+                photos = []
+                videos = []
+                slug = (data.get("slug") or data.get("display_slug") or "").lower()
+                display = (data.get("display_name") or "").lower().replace(" ", "-")
+
+                candidate = None
+                for c in trip_children:
+                    name = c.name.lower()
+                    if slug and slug in name:
+                        candidate = c
+                        break
+                    if display and display in name:
+                        candidate = c
+                        break
+                # If we found a folder, look for photos/videos inside
+                if candidate:
+                    photos_dir = candidate / "photos"
+                    videos_dir = candidate / "videos"
+                    if photos_dir.exists() and photos_dir.is_dir():
+                        for ext in ("*.jpg", "*.jpeg", "*.png"):
+                            photos.extend(sorted(photos_dir.glob(ext)))
+                    if videos_dir.exists() and videos_dir.is_dir():
+                        for ext in ("*.mp4", "*.mov", "*.mkv"):
+                            videos.extend(sorted(videos_dir.glob(ext)))
+
+                # Fallback: attempt to use a trip-level photos folder named like step
+                if not photos:
+                    for c in trip_children:
+                        if c.name.lower().startswith("photo") and c.is_dir():
+                            for ext in ("*.jpg", "*.jpeg", "*.png"):
+                                for p in sorted(c.glob(ext)):
+                                    # naive heuristic: include first N photos
+                                    photos.append(p)
+                                    if len(photos) >= 6:
+                                        break
+                                if len(photos) >= 6:
+                                    break
+                            if photos:
+                                break
+
                 self.steps.append({"data": data, "photos": photos, "videos": videos})
             return
 
@@ -165,11 +236,12 @@ class TripParser:
 
 # Static map helper and defaults
 try:
-    from staticmap import StaticMap, CircleMarker, Line
+    from staticmap import StaticMap, CircleMarker, Line, IconMarker
 except Exception:
     StaticMap = None
     CircleMarker = None
     Line = None
+    IconMarker = None
 
 # ESRI World Imagery tile template
 ESRI_SATELLITE_URL = "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
@@ -178,25 +250,46 @@ ROUTE_COLOR = "#FF4D4F"  # red-ish
 MARKER_COLOR_START = "#1A5F7A"  # teal
 MARKER_COLOR_STEP = "#4ECDC4"  # lighter teal
 
+# Emoji regex (captures sequences including ZWJ/FE0F)
+EMOJI_PATTERN = re.compile(
+    r'([\U0001F1E6-\U0001F1FF\U0001F300-\U0001F6FF\U0001F900-\U0001F9FF\u2600-\u26FF\u2700-\u27BF\u200d\ufe0f]+)',
+    flags=re.UNICODE
+)
+
 # ReportLab: page sizes, units, styles and flowables
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import mm
 from reportlab.lib.colors import HexColor
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_JUSTIFY
-from reportlab.platypus import Paragraph, Image as RLImage, Table, TableStyle, Spacer, SimpleDocTemplate, PageBreak, KeepTogether
+from reportlab.platypus import Paragraph, Image as RLImage, Table, TableStyle, Spacer, SimpleDocTemplate, PageBreak, KeepTogether, ListFlowable, ListItem
 
 # Pillow (PIL) for image processing
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 
 class MapGenerator:
-    """Generates static maps using ESRI World Imagery tiles."""
+    """Generates static maps using ESRI World Imagery tiles.
 
-    def __init__(self, width: int = 800, height: int = 600, default_zoom: int = 12):
+    Config keys used:
+      - default_map_zoom: default zoom level (integer)
+      - min_map_zoom: minimum zoom level
+      - max_map_zoom: maximum zoom level
+    """
+
+    def __init__(self, width: int = 800, height: int = 600, default_zoom: int = 12, min_zoom: int = 6, max_zoom: int = 16):
         self.width = width
         self.height = height
         self.default_zoom = default_zoom
+        self.min_zoom = min_zoom
+        self.max_zoom = max_zoom
+        # maximum thumbnail size used for markers
+        self.marker_thumb_size = 40
+        # how many zoom levels to step out for step maps (helps to show prev/current/next comfortably)
+        self.step_map_zoom_out = 1
+        # padding fraction around computed bounds for step maps
+        self.step_map_padding = 0.12
+
 
     def _create_map(self, width: int = None, height: int = None) -> StaticMap:
         """Create a StaticMap with ESRI satellite tiles."""
@@ -220,17 +313,36 @@ class MapGenerator:
             line = Line(route_coords, ROUTE_COLOR, 3)
             m.add_line(line)
 
-        # Add step markers
+        # Add step markers (use photo thumbnails when possible)
         for i, step in enumerate(trip_parser.steps):
             step_data = step["data"]
             location = step_data.get("location", {})
 
             if location:
-                lat = location.get("lat")
-                lon = location.get("lon")
+                lat = location.get("lat") or location.get("latitude") or location.get("Latitude")
+                lon = location.get("lon") or location.get("lng") or location.get("longitude") or location.get("Longitude")
 
-                if lat and lon:
-                    # Use different colors for markers
+                try:
+                    lat = float(lat) if lat is not None else None
+                    lon = float(lon) if lon is not None else None
+                except Exception:
+                    lat = None
+                    lon = None
+
+                if lat is not None and lon is not None:
+                    # create thumbnail (white ring); prefer IconMarker when available
+                    thumb = self._get_step_thumbnail(step, size=36, ring_color=(255,255,255,230))
+                    if thumb and IconMarker is not None:
+                        # IconMarker offsets are relative to the left-bottom of the image; use half size to center
+                        off_x = int(self.marker_thumb_size / 2)
+                        off_y = int(self.marker_thumb_size / 2)
+                        try:
+                            m.add_marker(IconMarker((lon, lat), str(thumb), off_x, off_y))
+                            continue
+                        except Exception:
+                            pass
+
+                    # fallback to circle marker
                     color = MARKER_COLOR_START if i == 0 else MARKER_COLOR_STEP
                     marker = CircleMarker((lon, lat), color, 12)
                     m.add_marker(marker)
@@ -243,41 +355,260 @@ class MapGenerator:
 
         return img_bytes.getvalue()
 
+    def _get_step_thumbnail(self, step: dict, size: int = 36, ring_color: tuple = (255,255,255,230)) -> Optional[Path]:
+        """Create a circular thumbnail marker for a step's first photo (cached).
+
+        ring_color: RGBA tuple for the ring around thumbnail. Included in cache key so highlighted thumbnails are separate.
+        """
+        photos = step.get("photos", [])
+        photo_path = None
+
+        # Prefer a local photo if listed
+        if photos:
+            candidate = photos[0]
+            photo_path = Path(candidate)
+            if not photo_path.exists():
+                photo_path = None
+
+        # Fallback: look for cover photo URL in step data
+        if photo_path is None:
+            data = step.get("data", {}) if isinstance(step, dict) else {}
+            # Try multiple keys that may contain a URL
+            for key in ("cover_photo", "cover_photo_path", "cover_photo_thumb_path", "main_media_item_path", "cover_photo_url"):
+                val = None
+                if isinstance(data, dict):
+                    if key in data:
+                        v = data.get(key)
+                        if isinstance(v, dict) and v.get("path"):
+                            val = v.get("path")
+                        elif isinstance(v, str):
+                            val = v
+                if val:
+                    photo_path = val  # keep as string (URL)
+                    break
+
+        if photo_path is None:
+            return None
+
+        cache_dir = Path(__file__).parent / ".map_marker_cache"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+
+        try:
+            mtime = photo_path.stat().st_mtime
+        except Exception:
+            mtime = 0
+
+        # include ring color in cache key
+        ring_hex = ''.join(f"{c:02x}" for c in ring_color)
+        cache_key = f"{photo_path.resolve()}|{mtime}|{size}|{ring_hex}"
+        cache_name = hashlib.sha1(cache_key.encode("utf-8")).hexdigest() + ".png"
+        cache_path = cache_dir / cache_name
+
+        if cache_path.exists():
+            return cache_path
+
+        try:
+            with Image.open(photo_path) as img:
+                img = img.convert("RGBA")
+                img = ImageOps.fit(img, (size, size), method=Image.LANCZOS)
+
+                # Circular mask
+                mask = Image.new("L", (size, size), 0)
+                draw = ImageDraw.Draw(mask)
+                draw.ellipse((0, 0, size - 1, size - 1), fill=255)
+
+                out = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+                out.paste(img, (0, 0), mask=mask)
+
+                # Border ring with configurable color
+                ring = ImageDraw.Draw(out)
+                ring_color_rgba = ring_color if len(ring_color) == 4 else (ring_color[0], ring_color[1], ring_color[2], 230)
+                ring.ellipse((1, 1, size - 2, size - 2), outline=ring_color_rgba, width=2)
+
+                out.save(cache_path, format="PNG")
+                return cache_path
+        except Exception:
+            # If photo_path looks like a URL, try to fetch it into cache and retry
+            try:
+                url = str(photo_path)
+                if url.startswith("http://") or url.startswith("https://"):
+                    r = requests.get(url, timeout=10)
+                    if r.status_code == 200:
+                        cache_dir = Path(__file__).parent / ".map_marker_cache"
+                        cache_dir.mkdir(parents=True, exist_ok=True)
+                        tmp_path = cache_dir / (hashlib.sha1(url.encode("utf-8")).hexdigest() + ".jpg")
+                        tmp_path.write_bytes(r.content)
+                        # Retry with downloaded image
+                        return self._get_step_thumbnail({"photos": [tmp_path]}, size=size, ring_color=ring_color)
+            except Exception:
+                pass
+            return None
+
+    def _compute_zoom_for_bounds(self, min_lon: float, max_lon: float, min_lat: float, max_lat: float, width_px: int, height_px: int) -> int:
+        """Compute an approximate zoom level to fit given bounds into width/height in pixels.
+
+        This is a heuristic using lon-span; Mercator projection and latitude scaling are approximated.
+        """
+        try:
+            import math
+            lon_span = max_lon - min_lon
+            lat_span = max_lat - min_lat
+            if lon_span <= 0:
+                return self.default_zoom
+
+            # degrees per pixel needed for lon
+            dpp_lon = lon_span / float(max(width_px, 1))
+            z_lon = math.log2(360.0 / (256.0 * dpp_lon)) if dpp_lon > 0 else self.default_zoom
+
+            # account for latitude using cosine of center lat
+            center_lat = (min_lat + max_lat) / 2.0
+            cos_lat = max(0.01, abs(math.cos(math.radians(center_lat))))
+            dpp_lat = lat_span / float(max(height_px, 1))
+            # rough adjustment for lat
+            z_lat = math.log2(360.0 / (256.0 * (dpp_lat / cos_lat))) if dpp_lat > 0 else z_lon
+
+            z = int(min(z_lon, z_lat))
+        except Exception:
+            z = self.default_zoom
+
+        # clamp
+        z = max(self.min_zoom, min(self.max_zoom, z))
+        return z
+
+    def generate_step_map_for_step(self, trip_parser: TripParser, step_index: int, width: int = 0, height: int = 0, padding: float = 0.1) -> bytes:
+        """Generate a map centered/zoomed to ensure prev/current/next steps are visible.
+
+        - `step_index` is 0-based index of the current step in trip_parser.steps
+        - `padding` is relative padding (fraction) around computed bounds
+        """
+        if StaticMap is None:
+            raise RuntimeError("staticmap not available: install the 'staticmap' package to enable step maps")
+
+        w = width or self.width
+        h = height or self.height
+
+        # Collect coords for prev/current/next (or fallback to current only)
+        coords = []
+        for idx in (step_index - 1, step_index, step_index + 1):
+            if 0 <= idx < len(trip_parser.steps):
+                st = trip_parser.steps[idx]
+                loc = st.get("data", {}).get("location", {})
+                if loc:
+                    lat = loc.get("lat") or loc.get("latitude") or loc.get("Latitude")
+                    lon = loc.get("lon") or loc.get("lng") or loc.get("longitude") or loc.get("Longitude")
+                    try:
+                        lat = float(lat) if lat is not None else None
+                        lon = float(lon) if lon is not None else None
+                    except Exception:
+                        lat = None
+                        lon = None
+                    if lat is not None and lon is not None:
+                        coords.append((lon, lat))
+
+        # If nothing found, fallback to current step center
+        if not coords and 0 <= step_index < len(trip_parser.steps):
+            st = trip_parser.steps[step_index]
+            loc = st.get("data", {}).get("location", {})
+            lat = loc.get("lat") or loc.get("latitude") or loc.get("Latitude")
+            lon = loc.get("lon") or loc.get("lng") or loc.get("longitude") or loc.get("Longitude")
+            try:
+                lat = float(lat) if lat is not None else None
+                lon = float(lon) if lon is not None else None
+            except Exception:
+                lat = None
+                lon = None
+            if lat is None or lon is None:
+                # nothing to show
+                m = self._create_map(w, h)
+                image = m.render()
+                img_bytes = io.BytesIO()
+                image.save(img_bytes, format="PNG")
+                img_bytes.seek(0)
+                return img_bytes.getvalue()
+            coords = [(lon, lat)]
+
+        lons = [c[0] for c in coords]
+        lats = [c[1] for c in coords]
+        min_lon, max_lon = min(lons), max(lons)
+        min_lat, max_lat = min(lats), max(lats)
+
+        # expand by padding
+        lon_pad = (max_lon - min_lon) * padding if max_lon != min_lon else 0.01
+        lat_pad = (max_lat - min_lat) * padding if max_lat != min_lat else 0.01
+        min_lon -= lon_pad
+        max_lon += lon_pad
+        min_lat -= lat_pad
+        max_lat += lat_pad
+
+        # compute zoom (and apply configured zoom-out to show surrounding steps clearly)
+        padding = padding if padding is not None else getattr(self, 'step_map_padding', 0.12)
+        # recompute padded bounds
+        lon_pad = (max_lon - min_lon) * padding if max_lon != min_lon else 0.01
+        lat_pad = (max_lat - min_lat) * padding if max_lat != min_lat else 0.01
+        min_lon_p, max_lon_p = min_lon - lon_pad, max_lon + lon_pad
+        min_lat_p, max_lat_p = min_lat - lat_pad, max_lat + lat_pad
+
+        zoom = self._compute_zoom_for_bounds(min_lon_p, max_lon_p, min_lat_p, max_lat_p, w, h)
+        # apply zoom-out (default 1 level) to ensure context (but clamp to min/max)
+        try:
+            out_levels = int(getattr(self, 'step_map_zoom_out', 1))
+        except Exception:
+            out_levels = 1
+        zoom = max(self.min_zoom, min(self.max_zoom, zoom - out_levels))
+
+        m = self._create_map(w, h)
+
+        # Add all step markers (thumbnail icons if available). Highlight current step.
+        for i, st in enumerate(trip_parser.steps):
+            loc = st.get("data", {}).get("location", {})
+            if not loc:
+                continue
+            lat = loc.get("lat") or loc.get("latitude") or loc.get("Latitude")
+            lon = loc.get("lon") or loc.get("lng") or loc.get("longitude") or loc.get("Longitude")
+            try:
+                lat = float(lat) if lat is not None else None
+                lon = float(lon) if lon is not None else None
+            except Exception:
+                continue
+            if lat is None or lon is None:
+                continue
+
+            # create thumbnail; highlight if this is current
+            is_current = (i == step_index)
+            ring_color = (255, 80, 80, 220) if is_current else (255, 255, 255, 230)
+            thumb = self._get_step_thumbnail(st, size=self.marker_thumb_size, ring_color=ring_color)
+            if thumb and IconMarker is not None:
+                # IconMarker expects (lon, lat), file_path, offset_x, offset_y; use half size to align center
+                off_x = int(self.marker_thumb_size / 2)
+                off_y = int(self.marker_thumb_size / 2)
+                try:
+                    m.add_marker(IconMarker((lon, lat), str(thumb), off_x, off_y))
+                except Exception:
+                    # fallback to circle
+                    color = MARKER_COLOR_START if i == 0 else MARKER_COLOR_STEP
+                    m.add_marker(CircleMarker((lon, lat), color, 12))
+            else:
+                color = MARKER_COLOR_START if i == 0 else ("#FF4D4F" if is_current else MARKER_COLOR_STEP)
+                m.add_marker(CircleMarker((lon, lat), color, 12))
+
+        # Also draw route line for context
+        route_coords = trip_parser.get_route_coordinates()
+        if len(route_coords) > 1:
+            line = Line(route_coords, ROUTE_COLOR, 3)
+            m.add_line(line)
+
+        image = m.render(zoom=zoom)
+        img_bytes = io.BytesIO()
+        image.save(img_bytes, format="PNG")
+        img_bytes.seek(0)
+        return img_bytes.getvalue()
+
 
 # Back-compat helper in case other modules need dates from a TripParser
 def trip_parser_get_dates(trip_path: Path):
     tp = TripParser(trip_path)
     tp.load()
     return tp.get_trip_dates() if hasattr(tp, 'get_trip_dates') else (None, None)
-
-    def generate_step_map(self, lat: float, lon: float, zoom: Optional[int] = None, width: int = 0, height: int = 0) -> bytes:
-        """Generate a small map for a single step location.
-
-        Parameters:
-        - lat, lon: location
-        - zoom: map zoom level (lower = smaller scale / more area)
-        - width, height: pixel dimensions for the generated map (0 = use defaults)
-        """
-        if StaticMap is None or CircleMarker is None:
-            raise RuntimeError("staticmap (and CircleMarker) not available: install 'staticmap' to enable step maps")
-
-        # Use provided size if given, otherwise defaults
-        w = width or 400
-        h = height or 300
-        m = self._create_map(w, h)
-
-        # Add marker
-        marker = CircleMarker((lon, lat), MARKER_COLOR_START, 12)
-        m.add_marker(marker)
-
-        # Render with requested zoom (fallback to default)
-        render_zoom = zoom if zoom is not None else self.default_zoom
-        image = m.render(zoom=render_zoom)
-        img_bytes = io.BytesIO()
-        image.save(img_bytes, format="PNG")
-        img_bytes.seek(0)
-
-        return img_bytes.getvalue()
 
 
 class PDFBuilder:
@@ -390,12 +721,82 @@ class PDFBuilder:
         """Detect if the text contains emoji characters."""
         if not text:
             return False
-        emoji_pattern = re.compile(
-            "[\U0001F300-\U0001F5FF\U0001F600-\U0001F64F\U0001F680-\U0001F6FF"
-            "\U0001F700-\U0001F77F\U00002600-\U000026FF\U00002700-\U000027BF\U0001F1E6-\U0001F1FF]",
-            flags=re.UNICODE,
-        )
-        return bool(emoji_pattern.search(text))
+        return bool(EMOJI_PATTERN.search(text))
+
+    def _get_emoji_png_path(self, emoji: str) -> Optional[Path]:
+        """Get or fetch a Twemoji PNG for an emoji sequence (cached)."""
+        if not emoji:
+            return None
+
+        cache_dir = Path(__file__).parent / ".emoji_cache"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+
+        # Convert emoji sequence to codepoint sequence
+        cps = [f"{ord(ch):x}" for ch in emoji]
+        cp_seq = "-".join(cps)
+        emoji_file = cache_dir / f"{cp_seq}.png"
+
+        if emoji_file.exists():
+            return emoji_file
+
+        # Fetch from Twemoji CDN (72x72)
+        url = f"https://twemoji.maxcdn.com/v/latest/72x72/{cp_seq}.png"
+        try:
+            r = requests.get(url, timeout=10)
+            if r.status_code == 200:
+                emoji_file.write_bytes(r.content)
+                return emoji_file
+        except Exception:
+            return None
+
+        return None
+
+    def _emoji_img_tag(self, emoji: str, size_px: int) -> str:
+        """Return an inline <img> tag for an emoji, or the escaped emoji if unavailable."""
+        emoji_path = self._get_emoji_png_path(emoji)
+        if not emoji_path:
+            return html.escape(emoji)
+
+        # Use POSIX-style path to avoid backslash escaping in XML
+        src = emoji_path.as_posix()
+        valign = -2
+        return f'<img src="{src}" width="{size_px}" height="{size_px}" valign="{valign}"/>'
+
+    def _text_to_inline_emoji_html(self, text: str, style: ParagraphStyle, preserve_newlines: bool = True) -> str:
+        """Convert text to ReportLab paragraph markup with inline emoji images."""
+        if text is None:
+            return ""
+
+        # Scale emoji roughly to text size
+        scale = float(self.config.get("emoji_scale", 1.1)) if hasattr(self, "config") else 1.1
+        size_px = max(8, int(float(style.fontSize) * scale))
+
+        parts = EMOJI_PATTERN.split(text)
+        out = []
+        for part in parts:
+            if not part:
+                continue
+            if EMOJI_PATTERN.fullmatch(part):
+                out.append(self._emoji_img_tag(part, size_px))
+            else:
+                escaped = html.escape(part)
+                if preserve_newlines:
+                    escaped = escaped.replace("\n", "<br/>")
+                out.append(escaped)
+        return "".join(out)
+
+    def _paragraph_with_inline_emoji(self, text: str, style_name: str, preserve_newlines: bool = True) -> Paragraph:
+        """Create a Paragraph with inline emoji images while keeping text copyable."""
+        style = self.styles.get(style_name)
+        html_text = self._text_to_inline_emoji_html(text or "", style, preserve_newlines=preserve_newlines)
+        try:
+            return Paragraph(html_text, style)
+        except Exception:
+            # Fallback: keep text copyable even if inline image parsing fails
+            safe_text = html.escape(text or "")
+            if preserve_newlines:
+                safe_text = safe_text.replace("\n", "<br/>")
+            return Paragraph(safe_text, style)
 
     def _register_fonts(self):
         """Try to register an emoji-capable font and a text font for consistent PDF text rendering.
@@ -603,24 +1004,12 @@ class PDFBuilder:
         return rl_img
 
     def _add_text_or_image(self, text: str, style_name: str, escape_html: bool = True):
-        """Add text as a Paragraph or render as image if it contains emoji characters."""
-        style = self.styles.get(style_name)
+        """Add text as a Paragraph with inline emoji images (copyable text)."""
         if text is None:
             return
 
-        # For descriptions we keep original newlines; for Paragraph we need HTML escaped + <br/>
-        if self._contains_emoji(text):
-            # Render to image and append
-            rl_img = self._render_text_to_image(text, style, self.CONTENT_WIDTH)
-            self.elements.append(rl_img)
-        else:
-            safe_text = text
-            if escape_html:
-                safe_text = safe_text.replace("&", "&amp;")
-                safe_text = safe_text.replace("<", "&lt;")
-                safe_text = safe_text.replace(">", "&gt;")
-                safe_text = safe_text.replace("\n", "<br/>")
-            self.elements.append(Paragraph(safe_text, style))
+        preserve_newlines = escape_html
+        self.elements.append(self._paragraph_with_inline_emoji(text, style_name, preserve_newlines=preserve_newlines))
     
     def _add_title_page(self):
         """Add the title page with trip name and overview map."""
@@ -678,98 +1067,105 @@ class PDFBuilder:
         label = weather_labels.get(condition, "Weather")
         return f"{label}, {temperature:.0f}°C"
     
-    def _create_photo_grid(self, photos: list, max_photos: int = 6) -> Optional[Table]:
-        """Create an adaptive photo grid layout."""
+    def _create_photo_grid(self, photos: list, max_photos: int = 6) -> Optional[RLImage]:
+        """Create a packed photo wall based on individual image aspect ratios."""
         if not photos:
             return None
-        
-        # Limit photos per step
+
+        max_photos = int(self.config.get("max_photos_per_step", max_photos))
         photos_to_show = photos[:max_photos]
-        num_photos = len(photos_to_show)
-        
-        # Determine grid layout
-        if num_photos == 1:
-            cols, rows = 1, 1
-            img_width = self.CONTENT_WIDTH * 0.8
-        elif num_photos == 2:
-            cols, rows = 2, 1
-            img_width = (self.CONTENT_WIDTH - 5*mm) / 2
-        elif num_photos <= 4:
-            cols, rows = 2, 2
-            img_width = (self.CONTENT_WIDTH - 5*mm) / 2
-        else:
-            cols, rows = 3, 2
-            img_width = (self.CONTENT_WIDTH - 10*mm) / 3
-        
-        # Calculate image height (4:3 aspect ratio default)
-        img_height = img_width * 0.75
-        
-        # Create table data
-        table_data = []
-        row = []
-        
-        for i, photo_path in enumerate(photos_to_show):
+
+        # Wall configuration (points ~ pixels at 72 DPI)
+        target_width = int(self.CONTENT_WIDTH)
+        gap = int(self.config.get("photo_wall_gap", 6))
+        target_row_height = int(self.config.get("photo_wall_row_height", 140))
+        min_row_height = int(self.config.get("photo_wall_min_row_height", 90))
+        max_row_height = int(self.config.get("photo_wall_max_row_height", 220))
+
+        # Build list of (path, aspect)
+        items = []
+        for photo_path in photos_to_show:
             try:
-                # Open and resize image
                 with Image.open(photo_path) as img:
-                    # Convert to RGB if necessary
-                    if img.mode in ("RGBA", "P"):
-                        img = img.convert("RGB")
-                    
-                    # Resize maintaining aspect ratio
-                    img.thumbnail((int(img_width * 2), int(img_height * 2)), Image.LANCZOS)
-                    
-                    # Save to bytes
-                    img_bytes = io.BytesIO()
-                    img.save(img_bytes, format="JPEG", quality=85)
-                    img_bytes.seek(0)
-                    
-                    # Create ReportLab image
-                    rl_img = RLImage(img_bytes)
-                    
-                    # Calculate actual dimensions maintaining aspect ratio
-                    orig_width, orig_height = img.size
-                    aspect = orig_width / orig_height
-                    
-                    if aspect > (img_width / img_height):
-                        rl_img.drawWidth = img_width
-                        rl_img.drawHeight = img_width / aspect
-                    else:
-                        rl_img.drawHeight = img_height
-                        rl_img.drawWidth = img_height * aspect
-                    
-                    row.append(rl_img)
+                    w, h = img.size
+                if h == 0:
+                    continue
+                aspect = float(w) / float(h)
+                items.append((photo_path, aspect))
             except Exception as e:
-                print(f"    Warning: Could not process image {photo_path}: {e}")
-                row.append("")
-            
-            # Start new row
-            if len(row) == cols:
-                table_data.append(row)
-                row = []
-        
-        # Add remaining photos
-        if row:
-            while len(row) < cols:
-                row.append("")
-            table_data.append(row)
-        
-        if not table_data:
+                print(f"    Warning: Could not read image {photo_path}: {e}")
+
+        if not items:
             return None
-        
-        # Create table
-        col_widths = [img_width + 2*mm] * cols
-        table = Table(table_data, colWidths=col_widths)
-        table.setStyle(TableStyle([
-            ("ALIGN", (0, 0), (-1, -1), "CENTER"),
-            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
-            ("LEFTPADDING", (0, 0), (-1, -1), 1*mm),
-            ("RIGHTPADDING", (0, 0), (-1, -1), 1*mm),
-            ("TOPPADDING", (0, 0), (-1, -1), 1*mm),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 1*mm),
-        ]))
-        
-        return table
+
+        # Row packing (justified layout)
+        rows = []
+        current = []
+        sum_aspect = 0.0
+
+        for idx, (path, aspect) in enumerate(items):
+            current.append((path, aspect))
+            sum_aspect += aspect
+
+            row_height = int(target_width / max(sum_aspect, 0.01))
+            is_last = idx == len(items) - 1
+
+            if row_height <= target_row_height or len(current) >= 3 or is_last:
+                # Clamp row height for aesthetics
+                if is_last and row_height > target_row_height * 1.2:
+                    row_height = target_row_height
+                row_height = max(min_row_height, min(row_height, max_row_height))
+                rows.append((list(current), row_height))
+                current = []
+                sum_aspect = 0.0
+
+        # Compute final wall size
+        total_height = 0
+        for row, row_h in rows:
+            total_height += row_h
+        total_height += gap * (len(rows) - 1) if len(rows) > 1 else 0
+
+        wall = Image.new("RGB", (target_width, max(total_height, 1)), (255, 255, 255))
+
+        y = 0
+        for row, row_h in rows:
+            # Compute widths scaled to fit target_width
+            raw_widths = [int(row_h * aspect) for _, aspect in row]
+            total_raw = sum(raw_widths)
+            available = target_width - gap * (len(row) - 1)
+            scale = float(available) / float(max(total_raw, 1))
+            widths = [max(1, int(w * scale)) for w in raw_widths]
+
+            # Adjust last width to fill any rounding error
+            if widths:
+                widths[-1] = max(1, available - sum(widths[:-1]))
+
+            x = 0
+            for (path, _aspect), w in zip(row, widths):
+                try:
+                    with Image.open(path) as img:
+                        if img.mode in ("RGBA", "P"):
+                            img = img.convert("RGB")
+                        fitted = ImageOps.fit(img, (w, row_h), method=Image.LANCZOS)
+                        wall.paste(fitted, (x, y))
+                except Exception as e:
+                    print(f"    Warning: Could not process image {path}: {e}")
+                x += w + gap
+
+            y += row_h + gap
+
+        # Convert wall to ReportLab image
+        img_bytes = io.BytesIO()
+        wall.save(img_bytes, format="JPEG", quality=88)
+        img_bytes.seek(0)
+
+        rl_img = RLImage(img_bytes)
+        rl_img.drawWidth = self.CONTENT_WIDTH
+        # Scale height to match the width
+        scale = self.CONTENT_WIDTH / float(wall.size[0])
+        rl_img.drawHeight = float(wall.size[1]) * scale
+
+        return rl_img
 
     def _flowables_height(self, flowables: list) -> float:
         """Estimate total height (in points) of a list of flowables by calling their
@@ -830,6 +1226,65 @@ class PDFBuilder:
                 file_url = str(video_path)
             link_text = f'<link href="{file_url}">{video_name}</link>'
             self.elements.append(Paragraph(link_text, self.styles["VideoLink"]))
+
+    def _build_description_flowables(self, text: str) -> list:
+        """Build nicely formatted flowables for step descriptions (paragraphs + bullet lists)."""
+        if not text:
+            return []
+
+        lines = text.splitlines()
+        blocks = []
+        current_para = []
+        current_list = []
+
+        def flush_para():
+            if current_para:
+                blocks.append(("para", "\n".join(current_para)))
+                current_para.clear()
+
+        def flush_list():
+            if current_list:
+                blocks.append(("list", list(current_list)))
+                current_list.clear()
+
+        for line in lines:
+            if not line.strip():
+                flush_para()
+                flush_list()
+                continue
+
+            if re.match(r"^\s*[-*]\s+", line):
+                flush_para()
+                item = re.sub(r"^\s*[-*]\s+", "", line)
+                current_list.append(item)
+            else:
+                flush_list()
+                current_para.append(line)
+
+        flush_para()
+        flush_list()
+
+        flowables = []
+        for kind, data in blocks:
+            if kind == "para":
+                flowables.append(self._paragraph_with_inline_emoji(data, "StepDescription", preserve_newlines=True))
+            else:
+                items = [
+                    ListItem(
+                        self._paragraph_with_inline_emoji(item, "StepDescription", preserve_newlines=False),
+                        leftIndent=12
+                    )
+                    for item in data
+                ]
+                flowables.append(
+                    ListFlowable(
+                        items,
+                        bulletType="bullet",
+                        leftIndent=12
+                    )
+                )
+
+        return flowables
     
     def _add_step(self, step: dict, step_number: int):
         """Add a step to the PDF."""
@@ -840,7 +1295,7 @@ class PDFBuilder:
         # Collect flowables for this step, then add as a single unit when possible
         step_flow = []
 
-        # Step title (always as Paragraph for consistent font sizing)
+        # Step title (legacy paragraph)
         display_name = step_data.get("display_name", f"Step {step_number}")
         safe_title = f"{step_number}. {display_name}".replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
         step_flow.append(Paragraph(safe_title, self.styles["StepTitle"]))
@@ -871,22 +1326,32 @@ class PDFBuilder:
             meta_text += f" • 📅 {date_str}"
         meta_text += weather_str
 
-        # Meta (always as Paragraph)
+        # Meta (legacy paragraph)
         safe_meta = meta_text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
         step_flow.append(Paragraph(safe_meta, self.styles["StepMeta"]))
 
         # Step map (small, inline)
-        lat = location.get("lat")
-        lon = location.get("lon")
+        lat = location.get("lat") or location.get("latitude") or location.get("Latitude")
+        lon = location.get("lon") or location.get("lng") or location.get("longitude") or location.get("Longitude")
 
-        if lat and lon:
+        try:
+            lat = float(lat) if lat is not None else None
+            lon = float(lon) if lon is not None else None
+        except Exception:
+            lat = None
+            lon = None
+
+        if lat is not None and lon is not None:
             try:
                 map_height_points = 60 * mm
-                map_bytes = self.map_generator.generate_step_map(
-                    lat, lon,
-                    zoom=12,
+                # generate map ensuring prev & next are visible and current is highlighted
+                        # use configured zoom-out and padding
+                map_bytes = self.map_generator.generate_step_map_for_step(
+                    self.trip_parser,
+                    step_number - 1,
                     width=int(self.CONTENT_WIDTH),
-                    height=int(map_height_points)
+                    height=int(map_height_points),
+                    padding=float(self.config.get('step_map_padding', getattr(self.map_generator, 'step_map_padding', 0.12)))
                 )
                 map_img = RLImage(io.BytesIO(map_bytes))
                 map_img.drawWidth = self.CONTENT_WIDTH
@@ -983,7 +1448,7 @@ class PDFBuilder:
         # Build PDF
         print("  Generating PDF file...")
         doc.build(self.elements)
-        print(f"  ✅ PDF created: {self.output_path}")
+        print(f"  PDF created: {self.output_path}")
 
 
 class CacheManager:
@@ -1430,10 +1895,10 @@ def prompt_loop(trips: list, cache_manager: CacheManager, script_dir: Path, conf
             
             # Clear cache
             if cmd_lower == 'clear-cache':
-                confirm = input("⚠️  Clear all rendered marks? (yes/no): ").strip().lower()
+                confirm = input("Clear all rendered marks? (yes/no): ").strip().lower()
                 if confirm in ('yes', 'y'):
                     cache_manager.clear_cache()
-                    print("✅ Cache cleared!")
+                    print("Cache cleared!")
                 else:
                     print("Cancelled.")
                 continue
@@ -1465,7 +1930,7 @@ def prompt_loop(trips: list, cache_manager: CacheManager, script_dir: Path, conf
                             cmd = 'r -a'
                             result = parse_render_command(cmd, trips, cache_manager)
                             if not result['valid']:
-                                print(f"❌ Error: {result['error']}")
+                                print(f"Error: {result['error']}")
                                 continue
                         elif lc in ('n', 'no'):
                             print("Cancelled. Returning to command prompt.")
@@ -1475,7 +1940,7 @@ def prompt_loop(trips: list, cache_manager: CacheManager, script_dir: Path, conf
                             cmd = user_choice
                             continue
                     else:
-                        print(f"❌ Error: {result['error']}")
+                        print(f"Error: {result['error']}")
                         continue
 
                 trips_to_render = result['trips']
@@ -1509,7 +1974,7 @@ def prompt_loop(trips: list, cache_manager: CacheManager, script_dir: Path, conf
                         if not user_input:
                             continue
                         if user_input.lower() == 'stop':
-                            print("\n⚠️  Stop signal received. Finishing current trip...")
+                            print("\nStop signal received. Finishing current trip...")
                             stop_flag.set()
                         else:
                             deferred_commands.append(user_input)
@@ -1533,9 +1998,9 @@ def prompt_loop(trips: list, cache_manager: CacheManager, script_dir: Path, conf
                 print()
                 print('=' * 70)
                 if stopped:
-                    print(f"⏹️  Stop requested. Completed: {success_count}/{len(trips_to_render)} trip(s) rendered.")
+                    print(f"Stop requested. Completed: {success_count}/{len(trips_to_render)} trip(s) rendered.")
                 else:
-                    print(f"✅ Completed! {success_count}/{len(trips_to_render)} trip(s) rendered.")
+                    print(f"Completed: {success_count}/{len(trips_to_render)} trip(s) rendered.")
                 print('=' * 70)
                 print()
 
@@ -1631,7 +2096,7 @@ def render_trip(trip_path: Path, script_dir: Path, config: dict, cache_manager: 
     try:
         # Check for stop signal
         if check_stop and check_stop():
-            print("  ⏹️  Stopped by user")
+            print("  Stopped by user")
             return False
         
         print(f"\nProcessing trip: {trip_path.name}")
@@ -1654,14 +2119,26 @@ def render_trip(trip_path: Path, script_dir: Path, config: dict, cache_manager: 
 
         output_path = pdfs_dir / f"{trip_name_safe}.pdf"
         
-        map_gen = MapGenerator(default_zoom=int(config.get("default_map_zoom", 12)))
+        map_gen = MapGenerator(
+            default_zoom=int(config.get("default_map_zoom", 12)),
+            min_zoom=int(config.get("min_map_zoom", 6)),
+            max_zoom=int(config.get("max_map_zoom", 16))
+        )
+        # optionally allow configuring thumbnail size and step-map behavior
+        try:
+            map_gen.marker_thumb_size = int(config.get("marker_thumb_size", map_gen.marker_thumb_size))
+            map_gen.step_map_zoom_out = int(config.get("step_map_zoom_out", map_gen.step_map_zoom_out))
+            map_gen.step_map_padding = float(config.get("step_map_padding", map_gen.step_map_padding))
+        except Exception:
+            pass
+
         pdf_builder = PDFBuilder(output_path, parser, map_gen, config=config)
         pdf_builder.build()
         
         # Mark as rendered
         cache_manager.mark_rendered(trip_path)
         
-        print(f"  ✅ Done! PDF saved to: {output_path}")
+        print(f"  Done. PDF saved to: {output_path}")
         return True
     except Exception as e:
         print(f"  ❌ Error rendering trip: {e}")
