@@ -4,6 +4,8 @@ Diese Liste dient als ausführliche Checkliste für noch zu implementierende Fea
 
 ---
 
+## General ###
+
 ## 🔧 Karten / Map Improvements
 - [x] **Höhere Auflösung** (Option in `config.json`, default höher auf 2× tiles)
   - Akzeptanzkriterien: Karte wird schärfer auf PDF-Titelseite und Schritt-Karten, kein sichtbares Kachel-Flimmern.

@@ -119,33 +119,49 @@ BSPData/
 
 ## Configuration
 
-Edit `config.json` to customize the PDF generation:
+Edit `config.toml` to customize the PDF generation (preferred). TOML supports comments and a clearer syntax. The script will look for `config.toml` first and will fall back to `config.json` (legacy) if present.
 
-```json
-{
-  "step_title_font_size": 18,
-  "step_text_font_size": 12,
-  "safety_margin_mm": 12,
-  "default_map_zoom": 12,
-  "min_map_zoom": 3,
-  "max_map_zoom": 16,
-  "map_render_scale": 2.0,
-  "marker_thumb_size": 40,
-  "step_map_zoom_out": 1,
-  "step_map_padding": 0.12,
-  "emoji_scale": 1.2,
-  "max_photos_per_step": 6,
-  "text_font_path": "C:/Windows/Fonts/SegoeUI.ttf",
-  "emoji_font_path": "C:/Windows/Fonts/seguiemj.ttf"
-}
+Example `config.toml`:
+
+```toml
+# Font Settings
+step_title_font_size = 18
+step_text_font_size = 12
+text_font_path = "C:/Windows/Fonts/SegoeUI.ttf"
+emoji_font_path = "C:/Windows/Fonts/seguiemj.ttf"
+emoji_scale = 1.2
+
+# Layout
+safety_margin_mm = 12
+max_photos_per_step = 6
+
+# Map settings
+map_style = "hybrid"  # "hybrid" (satellite) or "road" (streets); default: "hybrid"
+default_map_zoom = 12
+min_map_zoom = 6
+max_map_zoom = 16
+map_render_scale = 2.0
+marker_thumb_size = 40
+
+# Step map
+step_map_zoom_out = 0
+step_map_padding = 0.06
+step_map_auto_tighten = true
+step_map_tighten_scale_small = 0.8
+step_map_tighten_scale_medium = 0.6
+step_map_tighten_scale_large = 0.5
 ```
+
+Migration note:
+- The legacy `config.json` has been removed from the repository. If you still have a local `config.json`, the program will fall back to it, but you are encouraged to move your settings to `config.toml` (copying values and adding `#` comments as needed).
 
 ### Configuration Options
 
+- **map_style**: Map tiles to use — either `"hybrid"` (satellite imagery, default) or `"road"` (street tiles). (default: `"hybrid"`)
 - **step_title_font_size**: Font size for step titles (default: 18)
 - **step_text_font_size**: Font size for step descriptions (default: 12)
 - **default_map_zoom**: Default zoom level for maps (default: 12)
-- **min_map_zoom**: Minimum zoom level for maps (default: 3)
+- **min_map_zoom**: Minimum zoom level for maps (default: 6)
 - **max_map_zoom**: Maximum zoom level for maps (default: 16)
 - **map_render_scale**: Render maps at higher pixel density (default: 2.0)
 - **marker_thumb_size**: Base size of thumbnail markers on maps in pixels (default: 40)
@@ -155,8 +171,8 @@ Edit `config.json` to customize the PDF generation:
 - **step_map_tighten_scale_small**: Padding scale for 21-40 steps (default: 0.8 — applied as pad_frac * scale)
 - **step_map_tighten_scale_medium**: Padding scale for 41-80 steps (default: 0.6)
 - **step_map_tighten_scale_large**: Padding scale for >80 steps (default: 0.5)
-- **step_map_neighbor_max_km**: Ignore prev/next neighbors farther than this when fitting step maps (default: 180 km; prevents huge zoom-out on long trips)
-- **step_map_neighbor_limit_steps_threshold**: Minimum step count before neighbor distance limiting applies (default: 20; set 0 to always apply)
+- **step_map_neighbor_max_km**: Ignore prev/next neighbors farther than this when fitting step maps (default: 600 km)
+- **step_map_neighbor_limit_steps_threshold**: Minimum step count before neighbor distance limiting applies (default: 5)
 - **step_map_max_pad_km**: Maximum absolute padding applied to step maps (km). Caps how much padding can be added even on wide spans (default: 25 km).
 - **max_photos_per_step**: Maximum photos per step page (default: 6)
 
