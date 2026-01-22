@@ -983,8 +983,9 @@ class MapGenerator:
             max_km = 0.0
         if max_km > 0:
             zoom_max_width = self._zoom_for_horizontal_km(max_km, center_lat_for_km, w, prefer="at_most")
-            # If zoom is so far out that it exceeds max_km, we can zoom in, but never beyond zoom_fit.
-            zoom = min(int(zoom_fit), max(int(zoom), int(zoom_max_width)))
+            # If current zoom exceeds max_km (is too wide), force zooming in.
+            # This prioritizes max width and may crop distant neighbors.
+            zoom = max(int(zoom), int(zoom_max_width))
             zoom = max(self.min_zoom, min(self.max_zoom, int(zoom)))
 
         # Centering: weighted towards current step, but clamped so prev/current/next remain visible.
@@ -2802,8 +2803,13 @@ Examples:
     try:
         if config_path.exists():
             with open(config_path, "r", encoding="utf-8") as cf:
-                config = json.load(cf)
-    except Exception:
+                content = cf.read()
+                # Remove comments // ... and /* ... */ to allow commented JSON
+                content = re.sub(r"//.*", "", content)
+                content = re.sub(r"/\*.*?\*/", "", content, flags=re.DOTALL)
+                config = json.loads(content)
+    except Exception as e:
+        print(f"Warning: could not load config.json: {e}")
         config = {}
     
     # Initialize cache manager
