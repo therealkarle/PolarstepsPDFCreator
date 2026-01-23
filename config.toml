@@ -32,7 +32,52 @@ map_render_scale = 2.0
 # Size of the circular photo markers in pixels (before scaling)
 marker_thumb_size = 40
 
-# --- Step Map Zoom/Padding (Advanced) ---
+# ==============================================================================
+# NEW GEOGRAPHIC BOUNDING BOX MAP SETTINGS
+# ==============================================================================
+# This new system uses a deterministic "Geographic Bounding Box" approach:
+# 1. Calculate bounds from required points
+# 2. Apply padding
+# 3. Enforce min/max width constraints
+# 4. Expand to 16:9 aspect ratio (never shrink)
+# 5. Convert to center/zoom for static map API
+
+[maps]
+# --- Common Settings ---
+# Aspect ratio for all maps (width:height). Bounds are expanded to fit.
+aspect_ratio = "16:9"
+
+# Logical viewport dimensions in pixels (before render_scale is applied).
+# Geographic coverage is computed from these; render_scale only affects resolution.
+viewport_width_px = 800
+viewport_height_px = 450
+
+# --- Overview Map ---
+[maps.overview]
+# Padding factor around all steps (0.10 = 10% on each side)
+padding_factor = 0.10
+# Minimum width in km (expands if all steps are very close)
+min_width_km = 10.0
+
+# --- Step Map ---
+[maps.step]
+# Padding factor around included steps
+padding_factor = 0.10
+# Minimum map width in km (prevents over-zoom on single points)
+min_width_km = 2.0
+# Maximum map width in km. If neighbors don't fit, remove farthest first.
+max_width_km = 100.0
+# Cluster distance: if a neighbor is within this distance, include it
+# (used to group nearby steps together)
+cluster_distance_km = 5.0
+
+# ==============================================================================
+# LEGACY MAP SETTINGS (deprecated, kept for backwards compatibility)
+# ==============================================================================
+# These settings are ignored when the new bounding-box system is active.
+# They will be removed in a future version.
+
+# --- Step Map Zoom/Padding (LEGACY) ---
 # Number of Zoom levels to zoom out from the calculated fit (0 = exact fit)
 step_map_zoom_out = 0
 # Fraction of padding around the step bounds (0.06 = 6% margin)
@@ -47,7 +92,7 @@ step_map_tighten_scale_medium = 0.5
 # Padding scale for long trips (>80 steps)
 step_map_tighten_scale_large = 0.5
 
-# --- Step Map Constraints ---
+# --- Step Map Constraints (LEGACY) ---
 # Ignore prev/next steps if they are further away than this (km)
 step_map_neighbor_max_km = 600.0
 # Only apply neighbor limit if trip has more than N steps
@@ -64,7 +109,7 @@ step_cluster_radius_km = 4.0
 step_center_weight_current = 2.0
 step_center_weight_other = 1.0
 
-# --- Overview Map Constraints ---
+# --- Overview Map Constraints (LEGACY) ---
 # Padding fraction for the full trip overview map
 overview_map_padding = 0.02
 overview_padding_percent = 0.01
