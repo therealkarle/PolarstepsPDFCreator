@@ -66,6 +66,7 @@ Notes:
 | `-ur`, `--unrendered` | Only unrendered trips (use to restrict) |
 | `-y YEAR` | Filter by year (e.g., `-y 2025`) |
 | `-d START;END` | Date range in dd.mm.yyyy format |
+| `-config(KEY=VALUE,...)` | Override config for this render (e.g., `-config(map_style="road", max_photos_per_step=4)`) |
 
 ### Selection Formats
 
@@ -78,6 +79,19 @@ Notes:
 | `l-1` | Second to last trip |
 
 ### Examples
+
+Examples:
+
+```
+# Always provide either a selection or -a/-ur
+r -a                      Render all trips (including rendered)
+r -ur -y 2025             Render unrendered trips from 2025
+r -d 01.01.2025;01.06.2025 -ur   Render trips in date range (only unrendered)
+r 1;4                     Render trips 1 through 4
+r -a l                    Render last trip (even if rendered)
+r 1,3,5                   Render trips 1, 3, and 5
+r 67 -config(map_style="road", max_photos_per_step=4)  Render trip 67 with overrides
+```
 
 ```bash
 Command> r -a                # Render all trips (explicit -a required if you mean all)

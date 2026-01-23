@@ -2325,7 +2325,8 @@ def parse_render_command(cmd_str: str, trips: list, cache_manager: CacheManager)
         'year': None,
         'start_date': None,
         'end_date': None,
-        'selection': None
+        'selection': None,
+        'config_overrides': {}
     }
 
     # Remove 'render' or 'r' prefix
@@ -2408,6 +2409,94 @@ def parse_render_command(cmd_str: str, trips: list, cache_manager: CacheManager)
             else:
                 result['error'] = "-d requires a date range"
                 return result
+        elif p.startswith('-config'):
+            # Support -config(key=value, key2=value2)
+            # The token may contain spaces; gather until matching ')'
+            mode_specified = True
+            token = p
+            inner = ''
+            # If '(' is in current token, start collecting after it
+            if '(' in token:
+                after = token[token.find('(') + 1:]
+                if ')' in after:
+                    inner = after.split(')', 1)[0]
+                    i += 1
+                else:
+                    inner = after
+                    j = i + 1
+                    found = False
+                    while j < len(parts):
+                        inner += ' ' + parts[j]
+                        if ')' in parts[j]:
+                            inner = inner.split(')', 1)[0]
+                            i = j + 1
+                            found = True
+                            break
+                        j += 1
+                    if not found:
+                        result['error'] = "-config requires parentheses enclosing key=value pairs"
+                        return result
+            else:
+                result['error'] = "Invalid -config usage. Use -config(key=value, ...)"
+                return result
+
+            # Parse comma-separated key=value pairs (ignoring commas inside strings)
+            import ast
+            def _split_top_level_commas(s: str) -> list:
+                items = []
+                cur = ''
+                in_str = None
+                esc = False
+                for ch in s:
+                    if esc:
+                        cur += ch
+                        esc = False
+                        continue
+                    if ch == '\\':
+                        cur += ch
+                        esc = True
+                        continue
+                    if ch in ('"', "'"):
+                        if in_str is None:
+                            in_str = ch
+                        elif in_str == ch:
+                            in_str = None
+                        cur += ch
+                        continue
+                    if ch == ',' and in_str is None:
+                        items.append(cur)
+                        cur = ''
+                    else:
+                        cur += ch
+                if cur.strip():
+                    items.append(cur)
+                return items
+
+            overrides = {}
+            for item in _split_top_level_commas(inner):
+                if '=' not in item:
+                    continue
+                k, v = item.split('=', 1)
+                key = k.strip()
+                val_s = v.strip()
+                try:
+                    val = ast.literal_eval(val_s)
+                except Exception:
+                    # Fallback: barewords as strings or booleans/numbers
+                    val = val_s.strip('"').strip("'")
+                    if val.lower() in ('true', 'false'):
+                        val = True if val.lower() == 'true' else False
+                    else:
+                        try:
+                            if '.' in val:
+                                val = float(val)
+                            else:
+                                val = int(val)
+                        except Exception:
+                            pass
+                overrides[key] = val
+
+            result['config_overrides'] = overrides
         else:
             # Not a flag, must be selection
             # Collect remaining parts as selection
@@ -2431,12 +2520,87 @@ def parse_render_command(cmd_str: str, trips: list, cache_manager: CacheManager)
         result['error'] = "No trips match the specified filters"
         return result
 
-    # Apply selection
+    # Apply selection (selection_str may include a trailing -config(...) override)
     if selection_str:
-        result['selection'] = selection_str
-        indices = parse_selection(selection_str, len(filtered_trips))
+        # Extract -config(...) if it was appended to the selection (e.g., '67 -config(...)')
+        sel = selection_str
+        if '-config' in sel:
+            cfg_idx = sel.find('-config')
+            cfg_part = sel[cfg_idx:]
+            sel = sel[:cfg_idx].strip()
+
+            # parse cfg_part similar to flag parsing
+            if cfg_part.startswith('-config') and '(' in cfg_part:
+                inner = ''
+                after = cfg_part[cfg_part.find('(') + 1:]
+                if ')' in after:
+                    inner = after.split(')', 1)[0]
+                else:
+                    # attempt to find closing paren (unlikely here), otherwise ignore
+                    inner = after
+                # parse pairs
+                import ast
+                def _split_top_level_commas(s: str) -> list:
+                    items = []
+                    cur = ''
+                    in_str = None
+                    esc = False
+                    for ch in s:
+                        if esc:
+                            cur += ch
+                            esc = False
+                            continue
+                        if ch == '\\':
+                            cur += ch
+                            esc = True
+                            continue
+                        if ch in ('"', "'"):
+                            if in_str is None:
+                                in_str = ch
+                            elif in_str == ch:
+                                in_str = None
+                            cur += ch
+                            continue
+                        if ch == ',' and in_str is None:
+                            items.append(cur)
+                            cur = ''
+                        else:
+                            cur += ch
+                    if cur.strip():
+                        items.append(cur)
+                    return items
+
+                overrides = {}
+                for item in _split_top_level_commas(inner):
+                    if '=' not in item:
+                        continue
+                    k, v = item.split('=', 1)
+                    key = k.strip()
+                    val_s = v.strip()
+                    try:
+                        val = ast.literal_eval(val_s)
+                    except Exception:
+                        # Fallback: barewords as strings or booleans/numbers
+                        val = val_s.strip('"').strip("'")
+                        if val.lower() in ('true', 'false'):
+                            val = True if val.lower() == 'true' else False
+                        else:
+                            try:
+                                if '.' in val:
+                                    val = float(val)
+                                else:
+                                    val = int(val)
+                            except Exception:
+                                pass
+                    overrides[key] = val
+
+                result['config_overrides'] = overrides
+
+        # Use selection without inline config for parsing
+        result['selection'] = sel
+        indices = parse_selection(sel, len(filtered_trips))
         if not indices:
-            result['error'] = f"Invalid selection: {selection_str}"
+            result['error'] = f"Invalid selection: {sel}"
             return result
         result['trips'] = [filtered_trips[i - 1] for i in indices]
     else:
@@ -2489,6 +2653,7 @@ def print_command_help():
       -ur, --unrendered   Only unrendered trips (use to restrict)
       -y YEAR             Filter by year (e.g., -y 2025)
       -d START;END        Date range (dd.mm.yyyy;dd.mm.yyyy)
+      -config(KEY=VALUE,...)  Override config for this render (e.g., -config(map_style="road", max_photos_per_step=4))
 
     Selection formats:
       1           Single trip
@@ -2505,6 +2670,7 @@ def print_command_help():
     r 1;4                     Render trips 1 through 4
     r -a l                    Render last trip (even if rendered)
     r 1,3,5                   Render trips 1, 3, and 5
+    r 67 -config(map_style="street", max_photos_per_step=4)  Render trip 67 with overrides
 """)
     print(f"{'='*70}\n")
 
@@ -2616,6 +2782,10 @@ def prompt_loop(trips: list, cache_manager: CacheManager, script_dir: Path, conf
                 # Start rendering immediately
                 print(f"\n💡 Type 'stop' + Enter to abort after current trip.\n")
 
+                # Apply config overrides for this render (if any)
+                merged_config = dict(config)
+                merged_config.update(result.get('config_overrides', {}))
+
                 # Setup stop mechanism
                 stop_flag = threading.Event()
 
@@ -2649,7 +2819,7 @@ def prompt_loop(trips: list, cache_manager: CacheManager, script_dir: Path, conf
 
                     print(f"\n{'='*70}")
                     print(f"[{i}/{len(trips_to_render)}]", end=" ")
-                    if render_trip(trip, script_dir, config, cache_manager, check_stop):
+                    if render_trip(trip, script_dir, merged_config, cache_manager, check_stop):
                         success_count += 1
                     drain_input_for_stop()
 
@@ -2779,9 +2949,16 @@ def render_trip(trip_path: Path, script_dir: Path, config: dict, cache_manager: 
         output_path = pdfs_dir / f"{trip_name_safe}.pdf"
         
         # Determine map URL + hybrid labels
-        map_style = str(config.get("map_style", "hybrid")).lower()
+        map_style = str(config.get("map_style", "hybrid")).lower().strip()
+        # Accept common synonyms for convenience
+        if map_style in ("street", "streets"):
+            map_style = "road"
+        if map_style in ("sat",):
+            map_style = "satellite"
+
         label_overlay_url = None
         label_overlay_opacity = float(config.get("hybrid_labels_opacity", 0.7))
+        print(f"  Map style: {map_style}")
         if map_style == "road":
             map_url = ESRI_ROAD_URL
         elif map_style == "satellite":
@@ -2890,12 +3067,7 @@ Available commands (at the prompt):
       -ur, --unrendered   Only unrendered trips (use to restrict)
       -y YEAR             Filter by year (e.g., -y 2025)
       -d START;END        Date range (dd.mm.yyyy;dd.mm.yyyy)
-
-    Selection:
-      1           Single trip
-      1;4         Range of trips (1 to 4)
-      1,5,6       Multiple trips
-      l or last   Last trip
+      -config(KEY=VALUE,...)  Override config for this render (e.g., -config(map_style="road", max_photos_per_step=4))
       l-1         Second to last trip
 
 Examples:
