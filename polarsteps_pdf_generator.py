@@ -255,10 +255,12 @@ except Exception:
     Line = None
     IconMarker = None
 
-# ESRI World Imagery tile template (Satellite/Hybrid)
+# ESRI World Imagery tile template (Satellite)
 ESRI_SATELLITE_URL = "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
 # ESRI World Street Map tile template (Road)
 ESRI_ROAD_URL = "https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}"
+# ESRI Reference labels (transparent overlay for hybrid-style maps)
+ESRI_LABELS_URL = "https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}"
 # Map colors
 ROUTE_COLOR = "#FFFFFF"  # white
 # Outline color/width for the route line to ensure visibility over satellite tiles
@@ -302,7 +304,7 @@ class MapGenerator:
       - marker_thumb_size: base marker thumbnail size in pixels
     """
 
-    def __init__(self, width: int = 800, height: int = 600, default_zoom: int = 12, min_zoom: int = 6, max_zoom: int = 16, render_scale: float = 1.0, marker_thumb_size: int = 40, url_template: str = ESRI_SATELLITE_URL):
+    def __init__(self, width: int = 800, height: int = 600, default_zoom: int = 12, min_zoom: int = 6, max_zoom: int = 16, render_scale: float = 1.0, marker_thumb_size: int = 40, url_template: str = ESRI_SATELLITE_URL, label_overlay_url: str = None, label_overlay_opacity: float = 0.7):
         self.width = width
         self.height = height
         self.default_zoom = default_zoom
@@ -310,6 +312,9 @@ class MapGenerator:
         self.max_zoom = max_zoom
         self.render_scale = max(1.0, float(render_scale))
         self.url_template = url_template
+        self.label_overlay_url = label_overlay_url
+        self.label_overlay_opacity = float(label_overlay_opacity) if label_overlay_opacity is not None else 0.7
+        self._tile_cache = {}
         # maximum thumbnail size used for markers
         self.marker_thumb_size = marker_thumb_size
         # how many zoom levels to step out for step maps (helps to show prev/current/next comfortably)
@@ -353,6 +358,84 @@ class MapGenerator:
         # Weighting for centering (current step is favored)
         self.step_center_weight_current = 2.0
         self.step_center_weight_other = 1.0
+
+    @staticmethod
+    def _lonlat_to_pixel(lon: float, lat: float, zoom: int, tile_size: int = 256) -> tuple:
+        """Convert lon/lat to global pixel coordinates for the given zoom (Web Mercator)."""
+        import math
+        lat = max(-85.05112878, min(85.05112878, float(lat)))
+        lon = float(lon)
+        n = 2 ** int(zoom)
+        x = (lon + 180.0) / 360.0 * tile_size * n
+        sin_lat = math.sin(math.radians(lat))
+        y = (0.5 - math.log((1 + sin_lat) / (1 - sin_lat)) / (4 * math.pi)) * tile_size * n
+        return (x, y)
+
+    def _render_label_overlay(self, width_px: int, height_px: int, zoom: int, center: tuple, url_template: str, opacity: float = 0.7) -> Optional[Image.Image]:
+        """Render a transparent overlay image from label tiles."""
+        if not url_template:
+            return None
+        try:
+            zoom = int(zoom)
+            center_lon, center_lat = center
+            center_px = self._lonlat_to_pixel(center_lon, center_lat, zoom)
+            left_px = center_px[0] - (width_px / 2.0)
+            top_px = center_px[1] - (height_px / 2.0)
+
+            tile_size = 256
+            world_tiles = 2 ** zoom
+            x_start = int((left_px) // tile_size)
+            y_start = int((top_px) // tile_size)
+            x_end = int((left_px + width_px - 1) // tile_size)
+            y_end = int((top_px + height_px - 1) // tile_size)
+
+            overlay = Image.new("RGBA", (int(width_px), int(height_px)), (0, 0, 0, 0))
+            for ty in range(y_start, y_end + 1):
+                if ty < 0 or ty >= world_tiles:
+                    continue
+                for tx in range(x_start, x_end + 1):
+                    tx_wrapped = tx % world_tiles
+                    url = url_template.format(z=zoom, x=tx_wrapped, y=ty)
+
+                    tile = None
+                    try:
+                        tile = self._tile_cache.get(url)
+                        if tile is None:
+                            r = requests.get(url, timeout=6)
+                            if r.status_code == 200:
+                                tile = Image.open(io.BytesIO(r.content)).convert("RGBA")
+                                self._tile_cache[url] = tile
+                    except Exception:
+                        tile = None
+
+                    if tile is None:
+                        continue
+
+                    if opacity < 1.0:
+                        alpha = tile.split()[-1].point(lambda a: int(a * opacity))
+                        tile = tile.copy()
+                        tile.putalpha(alpha)
+
+                    px = int(tx * tile_size - left_px)
+                    py = int(ty * tile_size - top_px)
+                    overlay.alpha_composite(tile, dest=(px, py))
+
+            return overlay
+        except Exception:
+            return None
+
+    def _apply_label_overlay(self, base_image: Image.Image, zoom: int, center: tuple) -> Image.Image:
+        if not self.label_overlay_url:
+            return base_image
+        try:
+            overlay = self._render_label_overlay(base_image.width, base_image.height, zoom, center, self.label_overlay_url, self.label_overlay_opacity)
+            if overlay is None:
+                return base_image
+            base = base_image.convert("RGBA")
+            base.alpha_composite(overlay)
+            return base
+        except Exception:
+            return base_image
 
 
     @staticmethod
@@ -519,15 +602,33 @@ class MapGenerator:
         return (cen_lon, cen_lat)
 
 
+    def _is_tile_available(self, url_template: str) -> bool:
+        """Quickly check whether a tile can be retrieved from the given URL template."""
+        try:
+            test_url = url_template.format(z=max(2, int(self.default_zoom)), x=1, y=1)
+            r = requests.get(test_url, timeout=5)
+            ctype = r.headers.get("content-type", "")
+            return r.status_code == 200 and ctype.startswith("image")
+        except Exception:
+            return False
+
     def _create_map(self, width: int = None, height: int = None) -> "object":
-        """Create a StaticMap with configured tiles."""
+        """Create a StaticMap with configured tiles. If the configured tile provider
+        is unavailable, fall back to road tiles to keep map generation working."""
         if StaticMap is None:
             raise RuntimeError("staticmap not available: install the 'staticmap' package to enable map generation")
         w = int(round((width or self.width) * self.render_scale))
         h = int(round((height or self.height) * self.render_scale))
+
+        url = self.url_template
+        # If satellite/hybrid fails, try road tiles as a fallback (keeps generation usable)
+        if url == ESRI_SATELLITE_URL and not self._is_tile_available(url):
+            print("Warning: Satellite tiles not available; falling back to road tiles for this run.")
+            url = ESRI_ROAD_URL
+
         return StaticMap(
             w, h,
-            url_template=self.url_template,
+            url_template=url,
             tile_size=256
         )
 
@@ -682,6 +783,8 @@ class MapGenerator:
 
             center = ((min_lon_p + max_lon_p) / 2.0, (min_lat_p + max_lat_p) / 2.0)
             image = m.render(zoom=zoom, center=center)
+            # Apply label overlay for hybrid maps (if configured)
+            image = self._apply_label_overlay(image, zoom, center)
         else:
             image = m.render()
 
@@ -1089,6 +1192,8 @@ class MapGenerator:
                 pass
 
         image = m.render(zoom=zoom, center=center)
+        # Apply label overlay for hybrid maps (if configured)
+        image = self._apply_label_overlay(image, zoom, center)
         img_bytes = io.BytesIO()
         image.save(img_bytes, format="PNG")
         img_bytes.seek(0)
@@ -2673,12 +2778,18 @@ def render_trip(trip_path: Path, script_dir: Path, config: dict, cache_manager: 
 
         output_path = pdfs_dir / f"{trip_name_safe}.pdf"
         
-        # Determine map URL
-        map_style = config.get("map_style", "hybrid").lower()
+        # Determine map URL + hybrid labels
+        map_style = str(config.get("map_style", "hybrid")).lower()
+        label_overlay_url = None
+        label_overlay_opacity = float(config.get("hybrid_labels_opacity", 0.7))
         if map_style == "road":
             map_url = ESRI_ROAD_URL
-        else:
+        elif map_style == "satellite":
             map_url = ESRI_SATELLITE_URL
+        else:
+            # Hybrid: satellite base with label overlay
+            map_url = ESRI_SATELLITE_URL
+            label_overlay_url = ESRI_LABELS_URL
 
         map_gen = MapGenerator(
             default_zoom=int(config.get("default_map_zoom", 12)),
@@ -2686,7 +2797,9 @@ def render_trip(trip_path: Path, script_dir: Path, config: dict, cache_manager: 
             max_zoom=int(config.get("max_map_zoom", 16)),
             render_scale=float(config.get("map_render_scale", 1.0)),
             marker_thumb_size=int(config.get("marker_thumb_size", 40)),
-            url_template=map_url
+            url_template=map_url,
+            label_overlay_url=label_overlay_url,
+            label_overlay_opacity=label_overlay_opacity
         )
         # optionally allow configuring thumbnail size and step-map behavior
         try:

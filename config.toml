@@ -17,8 +17,10 @@ safety_margin_mm = 12
 max_photos_per_step = 6
 
 # --- General Map Settings ---
-# Map style: "hybrid" (satellite) or "road" (streets)
+# Map style: "hybrid" (satellite + labels), "satellite" (imagery only) or "road" (streets)
 map_style = "hybrid"
+# Opacity for hybrid label overlay (0.0-1.0)
+hybrid_labels_opacity = 1
 # Default zoom level if no specific bounds are calculated
 default_map_zoom = 12
 # Minimum allowed zoom level (prevents zooming out too far)
@@ -39,9 +41,9 @@ step_map_padding = 0.06
 # Auto-tighten padding for trips with many steps
 step_map_auto_tighten = true
 # Padding scale for short trips (21-40 steps)
-step_map_tighten_scale_small = 0.8
+step_map_tighten_scale_small = 0.5
 # Padding scale for medium trips (41-80 steps)
-step_map_tighten_scale_medium = 0.6
+step_map_tighten_scale_medium = 0.5
 # Padding scale for long trips (>80 steps)
 step_map_tighten_scale_large = 0.5
 
