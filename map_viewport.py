@@ -356,22 +356,104 @@ def compute_zoom_for_bounds(
     return max(0, min(19, int(math.floor(zoom))))
 
 
+def _compute_zoom_for_radius_km(
+    radius_km: float,
+    center_lat: float,
+    viewport_width_px: int,
+    viewport_height_px: int,
+    aspect_ratio: float = ASPECT_RATIO,
+    tile_size: int = TILE_SIZE_PX,
+) -> int:
+    """
+    Compute zoom level that guarantees a circle of radius_km fits in viewport.
+    
+    This is the core of the new RADIUS-BASED fitting algorithm:
+    - We want all points within radius_km of center to be visible
+    - The viewport has a certain aspect ratio
+    - We compute the zoom where the SMALLER dimension (height for 16:9)
+      can contain 2*radius_km
+    
+    This guarantees points won't be cut off because we fit to the
+    constraining dimension.
+    """
+    if radius_km <= 0:
+        return 15
+    
+    # Convert radius to degrees at the center latitude
+    # For latitude: 1 degree ≈ 111 km
+    radius_lat_deg = radius_km / 111.0
+    
+    # For longitude: depends on latitude
+    cos_lat = max(0.01, abs(math.cos(math.radians(center_lat))))
+    radius_lon_deg = radius_km / (111.0 * cos_lat)
+    
+    # The viewport shows a certain span at each zoom level
+    # At zoom z, the world is 256 * 2^z pixels wide (360 degrees)
+    # degrees_per_pixel_lon = 360 / (256 * 2^z)
+    # We need: (2 * radius_lon_deg) / degrees_per_pixel_lon <= viewport_width_px
+    # Solving: 2^z >= (2 * radius_lon_deg * 256) / (360 * viewport_width_px / tile_size)
+    
+    # For longitude constraint:
+    if radius_lon_deg > 0:
+        span_lon = 2 * radius_lon_deg
+        zoom_lon = math.log2(360 * viewport_width_px / (span_lon * tile_size))
+    else:
+        zoom_lon = 19
+    
+    # For latitude constraint (using Mercator projection):
+    if radius_lat_deg > 0:
+        # Mercator Y for lat
+        def lat_to_merc_y(lat: float) -> float:
+            lat_rad = math.radians(clamp_lat(lat))
+            return math.log(math.tan(math.pi / 4 + lat_rad / 2))
+        
+        north_lat = clamp_lat(center_lat + radius_lat_deg)
+        south_lat = clamp_lat(center_lat - radius_lat_deg)
+        y_span = abs(lat_to_merc_y(north_lat) - lat_to_merc_y(south_lat))
+        
+        if y_span > 0:
+            zoom_lat = math.log2(2 * math.pi * viewport_height_px / (y_span * tile_size))
+        else:
+            zoom_lat = 19
+    else:
+        zoom_lat = 19
+    
+    # Use the MORE RESTRICTIVE zoom (smaller = more zoomed out = safer)
+    zoom = min(zoom_lon, zoom_lat)
+    
+    # Floor and clamp
+    return max(0, min(19, int(math.floor(zoom))))
+
+
 def compute_overview_viewport(
     steps: List[StepLocation],
     padding_factor: float = 0.10,
     min_width_km: float = 5.0,
     viewport_width_px: int = 800,
     viewport_height_px: int = 450,  # 16:9 at 800px width
+    aspect_ratio: float = ASPECT_RATIO,
+    extra_padding_px: float = 0.0,
 ) -> MapViewport:
     """
     Compute viewport for trip overview map showing all steps.
     
+    NEW RADIUS-BASED ALGORITHM:
+    1. Compute geographic center of all points
+    2. Find maximum distance from center to ANY point
+    3. Add padding margin to that radius
+    4. Compute zoom that guarantees that radius fits in viewport
+    
+    This ensures all markers are visible because we explicitly ensure
+    the furthest point (plus margin) fits within the viewport.
+    
     Args:
         steps: List of all step locations
-        padding_factor: Padding around steps (0.10 = 10% on each side)
+        padding_factor: Padding around steps (0.10 = 10% extra radius)
         min_width_km: Minimum map width in kilometers
         viewport_width_px: Logical viewport width (not render-scaled)
         viewport_height_px: Logical viewport height (not render-scaled)
+        aspect_ratio: Target aspect ratio (width:height)
+        extra_padding_px: Extra pixel padding for markers (added to radius)
     
     Returns:
         MapViewport ready for static map generation
@@ -379,26 +461,56 @@ def compute_overview_viewport(
     if not steps:
         raise ValueError("Cannot compute viewport for empty step list")
     
-    # Convert to point tuples
+    # Convert to point tuples (lat, lon)
     points = [(s.lat, s.lon) for s in steps]
     
-    # Create initial bounds from all points
+    # Step 1: Compute geographic center
+    center_lat, center_lon = geographic_midpoint(points)
+    
+    # Step 2: Find maximum distance from center to any point
+    max_radius_km = 0.0
+    for lat, lon in points:
+        dist = haversine_km(center_lat, center_lon, lat, lon)
+        if dist > max_radius_km:
+            max_radius_km = dist
+    
+    # Step 3: Apply padding factor (e.g., 0.10 = 10% extra)
+    # Use a minimum padding of 30% to ensure markers don't touch edges
+    effective_padding = max(0.30, padding_factor)
+    padded_radius_km = max_radius_km * (1.0 + effective_padding)
+    
+    # Step 4: Apply extra pixel-based padding converted to km
+    # Approximate: at equator, 1 pixel at zoom 15 ≈ 4.78 meters
+    # This is rough but adds safety margin
+    try:
+        pad_px = float(extra_padding_px)
+    except Exception:
+        pad_px = 0.0
+    if pad_px > 0 and viewport_width_px > 0:
+        # Assume we need this many pixels of margin, convert to fraction of viewport
+        # and then to fraction of radius
+        pixel_margin_fraction = (2 * pad_px) / viewport_width_px
+        padded_radius_km *= (1.0 + pixel_margin_fraction)
+    
+    # Step 5: Enforce minimum width (radius = width/2)
+    min_radius_km = min_width_km / 2.0
+    if padded_radius_km < min_radius_km:
+        padded_radius_km = min_radius_km
+    
+    # Step 6: Compute zoom using radius-based algorithm
+    zoom = _compute_zoom_for_radius_km(
+        padded_radius_km,
+        center_lat,
+        viewport_width_px,
+        viewport_height_px,
+        aspect_ratio,
+    )
+    
+    # Create bounds for compatibility (used for debugging/display)
+    # This is approximate - the actual viewport may differ slightly
     bounds = GeoBounds.from_points(points)
-    
-    # Apply padding
-    bounds = bounds.expand_by_factor(padding_factor)
-    
-    # Ensure minimum width
-    bounds = bounds.expand_to_min_width_km(min_width_km)
-    
-    # Enforce 16:9 aspect ratio
-    bounds = bounds.expand_to_aspect_ratio(ASPECT_RATIO)
-    
-    # Calculate zoom
-    zoom = compute_zoom_for_bounds(bounds, viewport_width_px, viewport_height_px)
-    
-    # Get center
-    center_lat, center_lon = bounds.center
+    bounds = bounds.expand_by_factor(effective_padding)
+    bounds = bounds.expand_to_aspect_ratio(aspect_ratio)
     
     return MapViewport(
         center_lat=center_lat,
@@ -420,27 +532,23 @@ def compute_step_viewport(
     padding_factor: float = 0.10,
     viewport_width_px: int = 800,
     viewport_height_px: int = 450,
+    aspect_ratio: float = ASPECT_RATIO,
+    extra_padding_px: float = 0.0,
 ) -> MapViewport:
     """
     Compute viewport for individual step map with smart neighbor inclusion.
     
-    Logic:
-    1. Always include the current step
-    2. Include prev/next step only if they are the immediate neighbors (n=1)
-    3. Exception: If a neighbor is within cluster_distance_km, include subsequent
-       neighbors in the same direction as long as they remain clustered
-    4. If including a neighbor would exceed max_width_km, exclude it
-       (remove farthest from current first)
+    NEW RADIUS-BASED ALGORITHM:
+    1. Always center on current step
+    2. Include neighbors if within max_width_km
+    3. Find maximum distance from current step to any included point
+    4. Add substantial padding margin to that radius
+    5. Compute zoom that guarantees that radius fits in viewport
     
-    The max_width_km check is based on the LARGER of:
-    - The horizontal span (width) of all included points
-    - The diagonal distance from current step to the farthest included point
-    
-    This ensures that even if a neighbor is far away in latitude (north-south),
-    it will be excluded if the resulting map would be too large.
+    This ensures the current step marker (and neighbors) are always visible.
     
     Args:
-        current_step: The current step location (always included)
+        current_step: The current step location (always included, always centered)
         prev_step: Previous step (Sn-1), or None if this is the first step
         next_step: Next step (Sn+1), or None if this is the last step
         max_width_km: Maximum map width in kilometers
@@ -449,11 +557,17 @@ def compute_step_viewport(
         padding_factor: Padding around included steps
         viewport_width_px: Logical viewport width
         viewport_height_px: Logical viewport height
+        aspect_ratio: Target aspect ratio (width:height)
+        extra_padding_px: Extra pixel padding for markers
     
     Returns:
         MapViewport ready for static map generation
     """
-    # Start with current step
+    # CENTER IS ALWAYS THE CURRENT STEP - this is the key change
+    center_lat = current_step.lat
+    center_lon = current_step.lon
+    
+    # Collect all points to include (for radius calculation)
     included_points = [(current_step.lat, current_step.lon)]
     
     # Calculate distances to neighbors
@@ -472,73 +586,63 @@ def compute_step_viewport(
             next_step.lat, next_step.lon
         )
     
-    # Determine which neighbors to include
-    candidates = []
+# Include neighbors based on distance to the current step (radius rule)
+    # max_width_km is treated as full diameter -> max allowed distance from current step
+    max_distance_km = float(max_width_km) / 2.0
+
+    if prev_step and prev_distance is not None and prev_distance <= max_distance_km:
+        included_points.append((prev_step.lat, prev_step.lon))
+
+    if next_step and next_distance is not None and next_distance <= max_distance_km:
+        included_points.append((next_step.lat, next_step.lon))
+
+    # If no neighbors were included but there are neighbors within a soft cluster distance,
+    # include them to provide context (preserve earlier cluster behavior)
+    if len(included_points) == 1:
+        if prev_step and prev_distance is not None and prev_distance <= cluster_distance_km:
+            included_points.append((prev_step.lat, prev_step.lon))
+        if next_step and next_distance is not None and next_distance <= cluster_distance_km:
+            included_points.append((next_step.lat, next_step.lon))
     
-    if prev_step and prev_distance is not None:
-        candidates.append({
-            'step': prev_step,
-            'distance': prev_distance,
-            'is_cluster': prev_distance <= cluster_distance_km,
-        })
+    # Find maximum distance from CENTER (current_step) to any included point
+    max_dist_km = 0.0
+    for lat, lon in included_points:
+        dist = haversine_km(center_lat, center_lon, lat, lon)
+        if dist > max_dist_km:
+            max_dist_km = dist
     
-    if next_step and next_distance is not None:
-        candidates.append({
-            'step': next_step,
-            'distance': next_distance,
-            'is_cluster': next_distance <= cluster_distance_km,
-        })
+    # Apply padding - use generous padding to keep markers inside
+    # Minimum 40% padding for step maps to ensure current marker is well within bounds
+    effective_padding = max(0.40, padding_factor)
+    padded_radius_km = max_dist_km * (1.0 + effective_padding)
     
-    # Sort by distance (closest first) so we can remove farthest if needed
-    candidates.sort(key=lambda x: x['distance'])
+    # Apply extra pixel-based padding
+    try:
+        pad_px = float(extra_padding_px)
+    except Exception:
+        pad_px = 0.0
+    if pad_px > 0 and viewport_width_px > 0:
+        pixel_margin_fraction = (2 * pad_px) / viewport_width_px
+        padded_radius_km *= (1.0 + pixel_margin_fraction)
     
-    # Try to include neighbors, respecting max_width constraint
-    for candidate in candidates:
-        # Calculate the effective "span" if we include this neighbor
-        # Use the maximum of:
-        # 1. The distance from current step to this neighbor (directly)
-        # 2. The width of the bounding box of all included points
-        # 3. The height of the bounding box (for 16:9, height matters too)
-        
-        test_points = included_points + [(candidate['step'].lat, candidate['step'].lon)]
-        test_bounds = GeoBounds.from_points(test_points)
-        
-        # Check max extent: use the larger of width and scaled height
-        # For 16:9 aspect ratio, the height will be scaled to match width
-        effective_width = max(
-            test_bounds.width_km(),
-            test_bounds.height_km() * ASPECT_RATIO,  # Height scaled to match 16:9
-            candidate['distance'] * 2  # Diameter around current step
-        )
-        
-        # Apply padding factor to get the final effective width
-        padded_effective_width = effective_width * (1 + padding_factor * 2)
-        
-        # Check if adding this point would exceed max width
-        if padded_effective_width <= max_width_km:
-            included_points.append((candidate['step'].lat, candidate['step'].lon))
-        else:
-            # Skip this neighbor - it would make the map too wide
-            # Since we sorted by distance, farther ones are removed first
-            pass
+    # Enforce minimum radius (width/2)
+    min_radius_km = min_width_km / 2.0
+    if padded_radius_km < min_radius_km:
+        padded_radius_km = min_radius_km
     
-    # Create bounds from included points
+    # Compute zoom using radius-based algorithm
+    zoom = _compute_zoom_for_radius_km(
+        padded_radius_km,
+        center_lat,
+        viewport_width_px,
+        viewport_height_px,
+        aspect_ratio,
+    )
+    
+    # Create bounds for compatibility
     bounds = GeoBounds.from_points(included_points)
-    
-    # Apply padding
-    bounds = bounds.expand_by_factor(padding_factor)
-    
-    # Ensure minimum width
-    bounds = bounds.expand_to_min_width_km(min_width_km)
-    
-    # Enforce 16:9 aspect ratio
-    bounds = bounds.expand_to_aspect_ratio(ASPECT_RATIO)
-    
-    # Calculate zoom
-    zoom = compute_zoom_for_bounds(bounds, viewport_width_px, viewport_height_px)
-    
-    # Center on the geographic midpoint of included points
-    center_lat, center_lon = geographic_midpoint(included_points)
+    bounds = bounds.expand_by_factor(effective_padding)
+    bounds = bounds.expand_to_aspect_ratio(aspect_ratio)
     
     return MapViewport(
         center_lat=center_lat,

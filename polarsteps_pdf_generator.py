@@ -21,7 +21,7 @@ try:
     import tomllib as _tomllib
 except Exception:
     try:
-        import toml as _tomllib
+        import toml as _tomllib  # type: ignore - optional runtime dependency
     except Exception:
         _tomllib = None
 
@@ -320,32 +320,40 @@ class MapGenerator:
     Geographic coverage is independent of render_scale (resolution only).
 
     Config keys used (new [maps] section):
-      - maps.viewport_width_px: logical viewport width
-      - maps.viewport_height_px: logical viewport height  
+      - maps.vertical_resolution_px: vertical output resolution in pixels (affects image res)
+            - maps.aspect_ratio: default aspect ratio (width:height) for maps
+            - maps.overview.aspect_ratio: aspect ratio for overview maps
       - maps.overview.padding_factor: padding for overview maps
       - maps.overview.min_width_km: minimum width for overview
+            - maps.step.aspect_ratio: aspect ratio for step maps
       - maps.step.padding_factor: padding for step maps
       - maps.step.min_width_km: minimum width for step maps
       - maps.step.max_width_km: maximum width for step maps
       - maps.step.cluster_distance_km: cluster distance for neighbors
       
-    Legacy config keys (still supported):
-      - default_map_zoom, min_map_zoom, max_map_zoom
-      - map_render_scale, marker_thumb_size
+    Other supported keys:
+      - marker_thumb_size (base size in pixels)
     """
 
-    def __init__(self, width: int = 800, height: int = 450, default_zoom: int = 12, 
-                 min_zoom: int = 6, max_zoom: int = 16, render_scale: float = 1.0, 
-                 marker_thumb_size: int = 40, url_template: str = ESRI_SATELLITE_URL, 
-                 label_overlay_url: str = None, label_overlay_opacity: float = 0.7):
+    def __init__(self, width: int = 800, height: int = 450, marker_thumb_size: int = 40, url_template: str = ESRI_SATELLITE_URL, label_overlay_url: str = None, label_overlay_opacity: float = 0.7):
         # Logical viewport dimensions (16:9 default)
         self.width = width
         self.height = height
-        self.default_zoom = default_zoom
-        self.min_zoom = min_zoom
-        self.max_zoom = max_zoom
+        # Per-map dimensions (can be overridden from config)
+        self.overview_width = width
+        self.overview_height = height
+        self.step_width = width
+        self.step_height = height
+        # Per-map aspect ratios (default to current width/height)
+        default_aspect = float(width) / float(height) if height else (16.0 / 9.0)
+        self.overview_aspect_ratio = default_aspect
+        self.step_aspect_ratio = default_aspect
+
         # render_scale only affects resolution, NOT geographic coverage
-        self.render_scale = max(1.0, float(render_scale))
+        # _pixel_scale is derived from the configured vertical_resolution_px and
+        # is used only for pixel-scaling (marker sizes, overlay thickness). Geographic
+        # coverage is determined by logical width/height and is independent of this.
+        self._pixel_scale = 1.0
         self.url_template = url_template
         self.label_overlay_url = label_overlay_url
         self.label_overlay_opacity = float(label_overlay_opacity) if label_overlay_opacity is not None else 0.7
@@ -366,29 +374,17 @@ class MapGenerator:
         self.step_min_width_km = 2.0
         self.step_max_width_km = 100.0
         self.step_cluster_distance_km = 5.0
+        # Minimum zoom for step maps (clamp computed zoom to this value)
+        # Increase if step maps appear too zoomed-out / low-detail
+        self.step_min_zoom = 13
+        # Supersampling render scale for step maps (higher = sharper tiles)
+        # 1.0 = normal; 2.0 = render at 2x resolution and downscale in PDF
+        self.step_render_scale = 2.0
         
         # Debug flag
         self.debug_map = False
         
-        # ========== LEGACY CONFIG (deprecated, kept for compatibility) ==========
-        # These are ignored by the new bounding-box system but kept for
-        # backwards compatibility if someone disables the new system.
-        self.step_map_zoom_out = 0
-        self.step_map_padding = 0.06
-        self.step_map_auto_tighten = True
-        self.step_map_tighten_scale_small = 0.8
-        self.step_map_tighten_scale_medium = 0.6
-        self.step_map_tighten_scale_large = 0.5
-        self.step_map_neighbor_max_km = 180.0
-        self.step_map_neighbor_limit_steps_threshold = 20
-        self.step_map_max_pad_km = 25.0
-        self.overview_map_padding = 0.06
-        self.overview_min_pad_px = 12
-        self.step_map_min_width_km = 12.0
-        self.step_map_max_width_km = 120.0
-        self.step_cluster_radius_km = 4.0
-        self.step_center_weight_current = 2.0
-        self.step_center_weight_other = 1.0
+
 
     @staticmethod
     def _lonlat_to_pixel(lon: float, lat: float, zoom: int, tile_size: int = 256) -> tuple:
@@ -549,7 +545,7 @@ class MapGenerator:
                     dist = self._haversine_km(cur_lon, cur_lat, lon, lat)
                 except Exception:
                     dist = None
-                if dist is not None and dist >= float(self.step_cluster_radius_km):
+                if dist is not None and dist >= float(getattr(self, 'step_cluster_distance_km', 5.0)):
                     return i
             i += direction
 
@@ -571,7 +567,7 @@ class MapGenerator:
         width_deg = width_km / km_per_deg_lon
         dpp = width_deg / float(max(width_px, 1))
         if dpp <= 0:
-            return self.default_zoom
+            return 12
         z = math.log2(360.0 / (256.0 * dpp))
         if prefer == "at_most":
             return int(math.ceil(z))
@@ -636,7 +632,7 @@ class MapGenerator:
     def _is_tile_available(self, url_template: str) -> bool:
         """Quickly check whether a tile can be retrieved from the given URL template."""
         try:
-            test_url = url_template.format(z=max(2, int(self.default_zoom)), x=1, y=1)
+            test_url = url_template.format(z=2, x=1, y=1)
             r = requests.get(test_url, timeout=5)
             ctype = r.headers.get("content-type", "")
             return r.status_code == 200 and ctype.startswith("image")
@@ -648,8 +644,8 @@ class MapGenerator:
         is unavailable, fall back to road tiles to keep map generation working."""
         if StaticMap is None:
             raise RuntimeError("staticmap not available: install the 'staticmap' package to enable map generation")
-        w = int(round((width or self.width) * self.render_scale))
-        h = int(round((height or self.height) * self.render_scale))
+        w = int(round((width or self.width)))
+        h = int(round((height or self.height)))
 
         url = self.url_template
         # If satellite/hybrid fails, try road tiles as a fallback (keeps generation usable)
@@ -668,10 +664,17 @@ class MapGenerator:
         
         Uses the new Geographic Bounding Box system:
         1. Collect all step locations
-        2. Compute bounds with padding and 16:9 aspect ratio
+        2. Compute bounds with padding and configured aspect ratio
         3. Render map at computed center/zoom
         """
-        m = self._create_map()
+        w = int(round(getattr(self, "overview_width", self.width)))
+        h = int(round(getattr(self, "overview_height", self.height)))
+        m = self._create_map(w, h)
+
+        # Marker size (pixels) for padding calculations
+        pixel_scale = float(w) / float(max(1, getattr(self, 'overview_width', self.width)))
+        marker_px = max(8, int(round(self.marker_thumb_size * pixel_scale)))
+        extra_pad_px = max(6, int(round(marker_px * 0.6)))
 
         # Collect step locations for viewport calculation
         step_locations: List[StepLocation] = []
@@ -688,10 +691,12 @@ class MapGenerator:
                     steps=step_locations,
                     padding_factor=float(getattr(self, 'overview_padding_factor', 0.10)),
                     min_width_km=float(getattr(self, 'overview_min_width_km', 10.0)),
-                    viewport_width_px=self.width,
-                    viewport_height_px=self.height,
+                    viewport_width_px=w,
+                    viewport_height_px=h,
+                    aspect_ratio=float(getattr(self, "overview_aspect_ratio", MAP_ASPECT_RATIO)),
+                    extra_padding_px=extra_pad_px,
                 )
-                zoom = max(self.min_zoom, min(self.max_zoom, viewport.zoom))
+                zoom = max(0, min(19, viewport.zoom))
                 center = (viewport.center_lon, viewport.center_lat)
                 
                 if getattr(self, 'debug_map', False):
@@ -701,10 +706,10 @@ class MapGenerator:
             except Exception as e:
                 if getattr(self, 'debug_map', False):
                     print(f"Overview viewport calc failed: {e}, using defaults")
-                zoom = self.default_zoom
+                zoom = 12
                 center = None
         else:
-            zoom = self.default_zoom
+            zoom = 12
             center = None
 
         # Add route line (white only for overview; outline omitted to keep map clean)
@@ -731,7 +736,7 @@ class MapGenerator:
 
                 if lat is not None and lon is not None:
                     # create thumbnail (white ring); prefer IconMarker when available
-                    marker_px = max(8, int(round(self.marker_thumb_size * self.render_scale)))
+                    # marker_px is absolute pixels (configured by marker_thumb_size) scaled by render pixel scale
                     thumb = self._get_step_thumbnail(step, size=marker_px, ring_color=(255,255,255,230))
                     if thumb and IconMarker is not None:
                         off_x = int(marker_px / 2)
@@ -744,7 +749,8 @@ class MapGenerator:
 
                     # fallback to circle marker (no red in overview map)
                     color = MARKER_COLOR_START if i == 0 else MARKER_COLOR_STEP
-                    marker_radius = max(4, int(round(12 * self.render_scale)))
+                    # Use an absolute radius proportional to thumbnail size
+                    marker_radius = max(4, int(round(marker_px * 0.3)))
                     m.add_marker(CircleMarker((lon, lat), color, marker_radius))
 
         # Render map
@@ -916,11 +922,11 @@ class MapGenerator:
             lon_span = max_lon - min_lon
             lat_span = max_lat - min_lat
             if lon_span <= 0:
-                return self.default_zoom
+                return 12
 
             # degrees per pixel needed for lon
             dpp_lon = lon_span / float(max(width_px, 1))
-            z_lon = math.log2(360.0 / (256.0 * dpp_lon)) if dpp_lon > 0 else self.default_zoom
+            z_lon = math.log2(360.0 / (256.0 * dpp_lon)) if dpp_lon > 0 else 12
 
             # account for latitude using cosine of center lat
             center_lat = (min_lat + max_lat) / 2.0
@@ -931,13 +937,13 @@ class MapGenerator:
 
             z = int(min(z_lon, z_lat))
         except Exception:
-            z = self.default_zoom
+            z = 12
 
-        # clamp
-        z = max(self.min_zoom, min(self.max_zoom, z))
+        # clamp to global allowed zoom range (0..19)
+        z = max(0, min(19, z))
         return z
 
-    def generate_step_map_for_step(self, trip_parser: TripParser, step_index: int, width: int = 0, height: int = 0, padding: float = 0.1) -> bytes:
+    def generate_step_map_for_step(self, trip_parser: TripParser, step_index: int, width: int = 0, height: int = 0) -> bytes:
         """Generate a map for a specific step using Geographic Bounding Box approach.
         
         NEW BOUNDING-BOX SYSTEM (2026):
@@ -945,7 +951,7 @@ class MapGenerator:
         2. Include immediate prev/next neighbor (n=1) if within max_width_km
         3. Exception: Include clustered neighbors (within cluster_distance_km)
         4. If neighbor doesn't fit in max_width_km, exclude it (remove farthest first)
-        5. Apply padding, min_width, and 16:9 aspect ratio
+        5. Apply padding, min_width, and configured aspect ratio
         6. ALWAYS draw path from prev -> current -> next (regardless of viewport bounds)
 
         Args:
@@ -958,8 +964,8 @@ class MapGenerator:
         if StaticMap is None:
             raise RuntimeError("staticmap not available: install the 'staticmap' package to enable step maps")
 
-        w = width or self.width
-        h = height or self.height
+        w = width or getattr(self, "step_width", self.width)
+        h = height or getattr(self, "step_height", self.height)
 
         # Extract current step coordinates
         current_coord = self._extract_lon_lat(trip_parser.steps[step_index]) if (0 <= step_index < len(trip_parser.steps)) else None
@@ -982,6 +988,11 @@ class MapGenerator:
         prev_step = StepLocation(lat=prev_coord[1], lon=prev_coord[0], step_id=str(prev_idx)) if prev_coord else None
         next_step = StepLocation(lat=next_coord[1], lon=next_coord[0], step_id=str(next_idx)) if next_coord else None
 
+        # Marker size (pixels) for padding calculations
+        pixel_scale = float(w) / float(max(1, getattr(self, 'step_width', self.width)))
+        marker_px = max(8, int(round(self.marker_thumb_size * pixel_scale)))
+        extra_pad_px = max(6, int(round(marker_px * 0.6)))
+
         # Compute viewport using new bounding-box system
         try:
             viewport = compute_step_viewport(
@@ -994,8 +1005,16 @@ class MapGenerator:
                 padding_factor=float(getattr(self, 'step_padding_factor', 0.10)),
                 viewport_width_px=w,
                 viewport_height_px=h,
+                aspect_ratio=float(getattr(self, "step_aspect_ratio", MAP_ASPECT_RATIO)),
+                extra_padding_px=extra_pad_px,
             )
-            zoom = max(self.min_zoom, min(self.max_zoom, viewport.zoom))
+            zoom = max(0, min(19, viewport.zoom))
+            # Enforce a minimum zoom to avoid excessively zoomed-out step maps
+            min_z = int(getattr(self, 'step_min_zoom', 13))
+            if zoom < min_z:
+                if getattr(self, 'debug_map', False):
+                    print(f"Step {step_index} zoom {zoom} increased to min_zoom {min_z}")
+                zoom = min_z
             center = (viewport.center_lon, viewport.center_lat)
             
             if getattr(self, 'debug_map', False):
@@ -1005,7 +1024,7 @@ class MapGenerator:
         except Exception as e:
             if getattr(self, 'debug_map', False):
                 print(f"Step viewport calc failed: {e}, using defaults")
-            zoom = self.default_zoom
+            zoom = 12
             center = (current_coord[0], current_coord[1])
 
         m = self._create_map(w, h)
@@ -1020,8 +1039,8 @@ class MapGenerator:
             m.add_line(line)
 
         # Add all step markers; draw current last so it's always on top.
-        marker_px = max(8, int(round(self.marker_thumb_size * self.render_scale)))
-        marker_radius = max(4, int(round(12 * self.render_scale)))
+        # marker_px and marker_radius are absolute pixels (configured by marker_thumb_size) scaled by render pixel scale
+        marker_radius = max(4, int(round(marker_px * 0.3)))
         normal_indices = [i for i in range(len(trip_parser.steps)) if i != step_index]
         draw_order = normal_indices + ([step_index] if 0 <= step_index < len(trip_parser.steps) else [])
         
@@ -1058,7 +1077,8 @@ class MapGenerator:
                             overlay = self._get_ring_overlay(
                                 marker_px + 8, 
                                 color=MISSING_PHOTO_COLOR, 
-                                thickness=max(2, int(round(self.render_scale * 2)))
+                                # thickness in absolute pixels (small fraction of marker size)
+                                thickness=max(2, int(round(marker_px * 0.05)))
                             )
                             if overlay:
                                 off_xo = int((marker_px + 8) / 2)
@@ -1544,7 +1564,9 @@ class PDFBuilder:
 
             if map_img:
                 # Scale to fit page width
-                aspect = float(self.map_generator.width) / float(self.map_generator.height)
+                aspect = float(getattr(self.map_generator, "overview_width", self.map_generator.width)) / float(
+                    getattr(self.map_generator, "overview_height", self.map_generator.height)
+                )
                 map_width = self.CONTENT_WIDTH
                 map_height = map_width / aspect
 
@@ -1850,14 +1872,17 @@ class PDFBuilder:
 
         # Always attempt to generate a step map (MapGenerator has fallbacks if coords are missing)
         try:
-            map_height_points = 60 * mm
             # generate map ensuring prev & next are visible and current is highlighted
+            # Generate at a higher resolution (supersampling) for sharper step maps
+            render_scale = float(getattr(self.map_generator, "step_render_scale", 1.0))
+            render_scale = max(1.0, min(4.0, render_scale))
+            step_width = int(getattr(self.map_generator, "step_width", self.map_generator.width))
+            step_height = int(getattr(self.map_generator, "step_height", self.map_generator.height))
             map_bytes = self.map_generator.generate_step_map_for_step(
                 self.trip_parser,
                 step_number - 1,
-                width=int(self.CONTENT_WIDTH),
-                height=int(map_height_points),
-                padding=float(self.config.get('step_map_padding', getattr(self.map_generator, 'step_map_padding', 0.12)))
+                width=int(step_width * render_scale),
+                height=int(step_height * render_scale)
             )
             if getattr(self.map_generator, 'debug_map', False):
                 try:
@@ -1883,8 +1908,12 @@ class PDFBuilder:
                         map_img = None
 
                 if map_img:
-                    map_img.drawWidth = self.CONTENT_WIDTH
-                    map_img.drawHeight = map_height_points
+                    # Preserve map aspect ratio and fit into content width with a max height
+                    orig_aspect = float(step_width) / float(step_height) if step_height else (16.0 / 9.0)
+                    map_width = self.CONTENT_WIDTH
+                    map_height = map_width / orig_aspect
+                    map_img.drawWidth = map_width
+                    map_img.drawHeight = map_height
                     step_flow.append(map_img)
         except Exception as e:
             print(f"    Warning: Could not generate step map: {e}")
@@ -2809,6 +2838,28 @@ def prompt_loop(trips: list, cache_manager: CacheManager, script_dir: Path, conf
                 return None
 
 
+def _parse_aspect_ratio(value, fallback: float = MAP_ASPECT_RATIO) -> float:
+    """Parse aspect ratio from string (e.g., "16:9") or numeric value."""
+    if value is None:
+        return float(fallback)
+    try:
+        if isinstance(value, (int, float)):
+            return float(value)
+        text = str(value).strip()
+        if ":" in text:
+            left, right = text.split(":", 1)
+            left_v = float(left)
+            right_v = float(right)
+            if right_v == 0:
+                return float(fallback)
+            ratio = left_v / right_v
+            return ratio if ratio > 0 else float(fallback)
+        ratio = float(text)
+        return ratio if ratio > 0 else float(fallback)
+    except Exception:
+        return float(fallback)
+
+
 def render_trip(trip_path: Path, script_dir: Path, config: dict, cache_manager: CacheManager, check_stop=None) -> bool:
     """Render a single trip to PDF. Returns True if successful, False if error or stopped."""
     try:
@@ -2858,10 +2909,6 @@ def render_trip(trip_path: Path, script_dir: Path, config: dict, cache_manager: 
             label_overlay_url = ESRI_LABELS_URL
 
         map_gen = MapGenerator(
-            default_zoom=int(config.get("default_map_zoom", 12)),
-            min_zoom=int(config.get("min_map_zoom", 6)),
-            max_zoom=int(config.get("max_map_zoom", 16)),
-            render_scale=float(config.get("map_render_scale", 1.0)),
             marker_thumb_size=int(config.get("marker_thumb_size", 40)),
             url_template=map_url,
             label_overlay_url=label_overlay_url,
@@ -2874,13 +2921,37 @@ def render_trip(trip_path: Path, script_dir: Path, config: dict, cache_manager: 
         overview_config = maps_config.get("overview", {})
         step_config = maps_config.get("step", {})
         
-        # Viewport dimensions (affects logical size, not resolution)
-        map_gen.width = int(maps_config.get("viewport_width_px", 800))
-        map_gen.height = int(maps_config.get("viewport_height_px", 450))
+        # Vertical resolution controls pixel output and marker sizing. Geographic
+        # coverage is computed from vertical resolution using the configured aspect ratio.
+        default_vertical_px = int(maps_config.get("vertical_resolution_px", 450))
+        overview_vertical_px = int(overview_config.get("vertical_resolution_px", default_vertical_px))
+        step_vertical_px = int(step_config.get("vertical_resolution_px", default_vertical_px))
+
+        default_ratio = _parse_aspect_ratio(maps_config.get("aspect_ratio"), MAP_ASPECT_RATIO)
+        overview_ratio = _parse_aspect_ratio(overview_config.get("aspect_ratio", default_ratio), default_ratio)
+        step_ratio = _parse_aspect_ratio(step_config.get("aspect_ratio", default_ratio), default_ratio)
+
+        map_gen.height = default_vertical_px
+        map_gen.width = int(round(default_vertical_px * default_ratio))
+        map_gen.overview_height = overview_vertical_px
+        map_gen.overview_width = int(round(overview_vertical_px * overview_ratio))
+        map_gen.step_height = step_vertical_px
+        map_gen.step_width = int(round(step_vertical_px * step_ratio))
+        map_gen.overview_aspect_ratio = overview_ratio
+        map_gen.step_aspect_ratio = step_ratio
+        # Internal pixel scale relative to legacy 450px height (used for markers)
+        map_gen._pixel_scale = float(default_vertical_px) / 450.0
         
         # Overview map settings
         map_gen.overview_padding_factor = float(overview_config.get("padding_factor", 0.10))
         map_gen.overview_min_width_km = float(overview_config.get("min_width_km", 10.0))
+        # Step-specific config
+        map_gen.step_padding_factor = float(step_config.get("padding_factor", map_gen.step_padding_factor))
+        map_gen.step_min_width_km = float(step_config.get("min_width_km", map_gen.step_min_width_km))
+        map_gen.step_max_width_km = float(step_config.get("max_width_km", map_gen.step_max_width_km))
+        map_gen.step_cluster_distance_km = float(step_config.get("cluster_distance_km", map_gen.step_cluster_distance_km))
+        map_gen.step_min_zoom = int(step_config.get("min_zoom", map_gen.step_min_zoom))
+        map_gen.step_render_scale = float(step_config.get("render_scale", map_gen.step_render_scale))
         
         # Step map settings
         map_gen.step_padding_factor = float(step_config.get("padding_factor", 0.10))
@@ -2891,31 +2962,7 @@ def render_trip(trip_path: Path, script_dir: Path, config: dict, cache_manager: 
         # Debug flag
         map_gen.debug_map = bool(config.get("debug_map", False))
         
-        # ========== LEGACY CONFIG (kept for backwards compatibility) ==========
-        # These are ignored by the new bounding-box system but loaded for completeness
-        try:
-            map_gen.marker_thumb_size = int(config.get("marker_thumb_size", map_gen.marker_thumb_size))
-            map_gen.render_scale = max(1.0, float(config.get("map_render_scale", map_gen.render_scale)))
-            map_gen.step_map_zoom_out = int(config.get("step_map_zoom_out", map_gen.step_map_zoom_out))
-            map_gen.step_map_padding = float(config.get("step_map_padding", map_gen.step_map_padding))
-            map_gen.overview_map_padding = float(config.get("overview_map_padding", map_gen.overview_map_padding))
-            map_gen.overview_padding_percent = float(config.get("overview_padding_percent", getattr(map_gen, 'overview_padding_percent', 0.0)))
-            map_gen.overview_force_zoom_out_when_padding = bool(config.get("overview_force_zoom_out_when_padding", getattr(map_gen, 'overview_force_zoom_out_when_padding', False)))
-            map_gen.overview_min_pad_px = float(config.get("overview_min_pad_px", getattr(map_gen, 'overview_min_pad_px', 12)))
-            map_gen.step_map_min_width_km = float(config.get("step_map_min_width_km", map_gen.step_map_min_width_km))
-            map_gen.step_map_max_width_km = float(config.get("step_map_max_width_km", map_gen.step_map_max_width_km))
-            map_gen.step_cluster_radius_km = float(config.get("step_cluster_radius_km", map_gen.step_cluster_radius_km))
-            map_gen.step_center_weight_current = float(config.get("step_center_weight_current", map_gen.step_center_weight_current))
-            map_gen.step_center_weight_other = float(config.get("step_center_weight_other", map_gen.step_center_weight_other))
-            map_gen.step_map_auto_tighten = bool(config.get("step_map_auto_tighten", map_gen.step_map_auto_tighten))
-            map_gen.step_map_tighten_scale_small = float(config.get("step_map_tighten_scale_small", getattr(map_gen, 'step_map_tighten_scale_small', 0.8)))
-            map_gen.step_map_tighten_scale_medium = float(config.get("step_map_tighten_scale_medium", getattr(map_gen, 'step_map_tighten_scale_medium', 0.6)))
-            map_gen.step_map_tighten_scale_large = float(config.get("step_map_tighten_scale_large", getattr(map_gen, 'step_map_tighten_scale_large', 0.5)))
-            map_gen.step_map_neighbor_max_km = float(config.get("step_map_neighbor_max_km", getattr(map_gen, 'step_map_neighbor_max_km', 250.0)))
-            map_gen.step_map_neighbor_limit_steps_threshold = int(config.get("step_map_neighbor_limit_steps_threshold", getattr(map_gen, 'step_map_neighbor_limit_steps_threshold', 20)))
-            map_gen.step_map_max_pad_km = float(config.get("step_map_max_pad_km", getattr(map_gen, 'step_map_max_pad_km', 25.0)))
-        except Exception:
-            pass
+        # No legacy config loading - the new [maps] section is authoritative for map sizing and padding.
 
         pdf_builder = PDFBuilder(output_path, parser, map_gen, config=config)
         pdf_builder.build()

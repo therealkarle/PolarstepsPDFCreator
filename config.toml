@@ -21,16 +21,11 @@ max_photos_per_step = 6
 map_style = "hybrid"
 # Opacity for hybrid label overlay (0.0-1.0)
 hybrid_labels_opacity = 1
-# Default zoom level if no specific bounds are calculated
-default_map_zoom = 12
-# Minimum allowed zoom level (prevents zooming out too far)
-min_map_zoom = 6
-# Maximum allowed zoom level (prevents zooming in too close)
-max_map_zoom = 16
-# Resolution scale for map tiles (2.0 = high dpi / retina quality)
-map_render_scale = 2.0
-# Size of the circular photo markers in pixels (before scaling)
-marker_thumb_size = 40
+
+# Base size of the circular photo markers in pixels. This is scaled by the map's
+# vertical resolution and any supersampling/render scale so markers keep consistent
+# appearance when rendering at higher resolutions.
+marker_thumb_size = 80
 
 # ==============================================================================
 # NEW GEOGRAPHIC BOUNDING BOX MAP SETTINGS
@@ -44,77 +39,41 @@ marker_thumb_size = 40
 
 [maps]
 # --- Common Settings ---
-# Aspect ratio for all maps (width:height). Bounds are expanded to fit.
-aspect_ratio = "16:9"
-
-# Logical viewport dimensions in pixels (before render_scale is applied).
-# Geographic coverage is computed from these; render_scale only affects resolution.
-viewport_width_px = 800
-viewport_height_px = 450
+# Geographic coverage is computed from the vertical resolution using the configured aspect ratio.
 
 # --- Overview Map ---
 [maps.overview]
+# Vertical output resolution in pixels (affects image resolution and marker sizing)
+vertical_resolution_px = 720
+# Aspect ratio for overview maps (width:height). Bounds are expanded to fit.
+aspect_ratio = "16:9"
 # Padding factor around all steps (0.10 = 10% on each side)
-padding_factor = 0.10
+padding_factor = 0.05
 # Minimum width in km (expands if all steps are very close)
-min_width_km = 10.0
+min_width_km = 25.0
 
 # --- Step Map ---
 [maps.step]
+# Vertical output resolution in pixels (affects image resolution and marker sizing)
+vertical_resolution_px = 360
+# Aspect ratio for step maps (width:height). Bounds are expanded to fit.
+aspect_ratio = "32:9"
 # Padding factor around included steps
-padding_factor = 0.10
+padding_factor = 0.2
 # Minimum map width in km (prevents over-zoom on single points)
-min_width_km = 2.0
+min_width_km = 12.0
 # Maximum map width in km. If neighbors don't fit, remove farthest first.
-max_width_km = 100.0
+max_width_km = 150.0
 # Cluster distance: if a neighbor is within this distance, include it
 # (used to group nearby steps together)
-cluster_distance_km = 5.0
+cluster_distance_km = 2.0
+# Minimum zoom for step maps (higher = more detail, less context)
+min_zoom = 13
+# Supersampling render scale for step maps (higher = sharper tiles)
+# 1.0 = normal, 2.0 = render at 2x resolution and downscale in PDF
+render_scale = 1.0
 
-# ==============================================================================
-# LEGACY MAP SETTINGS (deprecated, kept for backwards compatibility)
-# ==============================================================================
-# These settings are ignored when the new bounding-box system is active.
-# They will be removed in a future version.
 
-# --- Step Map Zoom/Padding (LEGACY) ---
-# Number of Zoom levels to zoom out from the calculated fit (0 = exact fit)
-step_map_zoom_out = 0
-# Fraction of padding around the step bounds (0.06 = 6% margin)
-step_map_padding = 0.06
-
-# Auto-tighten padding for trips with many steps
-step_map_auto_tighten = true
-# Padding scale for short trips (21-40 steps)
-step_map_tighten_scale_small = 0.5
-# Padding scale for medium trips (41-80 steps)
-step_map_tighten_scale_medium = 0.5
-# Padding scale for long trips (>80 steps)
-step_map_tighten_scale_large = 0.5
-
-# --- Step Map Constraints (LEGACY) ---
-# Ignore prev/next steps if they are further away than this (km)
-step_map_neighbor_max_km = 600.0
-# Only apply neighbor limit if trip has more than N steps
-step_map_neighbor_limit_steps_threshold = 5
-# Maximum absolute padding in km (limits padding on wide maps)
-step_map_max_pad_km = 25.0
-step_map_min_width_km = 50.0
-# Maximum width of the map area in km (forces zoom-in if route is wider)
-step_map_max_width_km = 750
-# Cluster nearby steps: if neighbors are within X km, skip them for bounds calculation
-step_cluster_radius_km = 4.0
-
-# Weight centering towards current step (vs neighbors)
-step_center_weight_current = 2.0
-step_center_weight_other = 1.0
-
-# --- Overview Map Constraints (LEGACY) ---
-# Padding fraction for the full trip overview map
-overview_map_padding = 0.02
-overview_padding_percent = 0.01
-overview_force_zoom_out_when_padding = false
-overview_min_pad_px = 12
 
 # --- App Behavior ---
 # List already rendered trips in the CLI menu

@@ -151,11 +151,20 @@ max_photos_per_step = 6
 
 # Map settings
 map_style = "hybrid"  # "hybrid" (satellite) or "road" (streets); default: "hybrid"
-default_map_zoom = 12
-min_map_zoom = 6
-max_map_zoom = 16
-map_render_scale = 2.0
 marker_thumb_size = 40
+
+# New bounding-box map settings
+maps.vertical_resolution_px = 720  # vertical image resolution in pixels (affects marker sizes)
+[maps.overview]
+padding_factor = 0.10
+min_width_km = 10.0
+[maps.step]
+padding_factor = 0.10
+min_width_km = 2.0
+max_width_km = 100.0
+cluster_distance_km = 5.0
+min_zoom = 13
+render_scale = 2.0
 
 # Step map
 step_map_zoom_out = 0
@@ -174,11 +183,10 @@ Migration note:
 - **map_style**: Map tiles to use — either `"hybrid"` (satellite imagery, default) or `"road"` (street tiles). (default: `"hybrid"`)
 - **step_title_font_size**: Font size for step titles (default: 18)
 - **step_text_font_size**: Font size for step descriptions (default: 12)
-- **default_map_zoom**: Default zoom level for maps (default: 12)
-- **min_map_zoom**: Minimum zoom level for maps (default: 6)
-- **max_map_zoom**: Maximum zoom level for maps (default: 16)
-- **map_render_scale**: Render maps at higher pixel density (default: 2.0)
-- **marker_thumb_size**: Base size of thumbnail markers on maps in pixels (default: 40)
+- **marker_thumb_size**: Base size of thumbnail markers on maps in pixels (default: 40). This value is a base size and is automatically scaled by the configured map vertical resolution and any supersampling (`maps.step.render_scale`) used when rendering maps.
+- **maps.vertical_resolution_px**: Vertical output resolution in pixels used for rendering maps; geographic coverage is determined from this using a fixed 16:9 ratio (example: 720)
+- **maps.step.min_zoom**: Minimum zoom for step maps (higher = more detail, default: 13)
+- **maps.step.render_scale**: Supersampling render scale for step maps (higher = sharper tiles, default: 2.0)
 - **step_map_zoom_out**: Zoom out by N levels on step maps (default: 0 — set >0 to show more context)
 - **step_map_padding**: Padding around bounds on step maps (default: 0.06 — smaller means tighter crop)
 - **step_map_auto_tighten**: Automatically reduce step-map padding for trips with many steps to produce more zoomed-in step maps (default: true)
