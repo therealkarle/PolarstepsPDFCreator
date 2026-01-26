@@ -16,6 +16,7 @@ from datetime import datetime
 import argparse
 import json
 import re
+import base64
 # Optional TOML loader (tomllib for Python 3.11+, fallback to the 'toml' package)
 try:
     import tomllib as _tomllib
@@ -34,6 +35,18 @@ import os
 import sys
 import subprocess
 from collections import deque
+
+# Optional Playwright (HTML -> PDF renderer)
+try:
+    from playwright.sync_api import sync_playwright
+except Exception:
+    sync_playwright = None
+
+# Optional emoji library for robust emoji segmentation
+try:
+    import emoji as _emoji  # type: ignore
+except Exception:
+    _emoji = None
 
 # Geographic utilities and viewport calculation (new bounding-box system)
 from geo import haversine_km as _geo_haversine_km
@@ -288,7 +301,7 @@ MISSING_PHOTO_COLOR = "#FF4D4F"  # red
 
 # Emoji regex (captures sequences including ZWJ/FE0F)
 EMOJI_PATTERN = re.compile(
-    r'([\U0001F1E6-\U0001F1FF\U0001F300-\U0001F6FF\U0001F900-\U0001F9FF\u2600-\u26FF\u2700-\u27BF\u200d\ufe0f]+)',
+    r'([\U0001F1E6-\U0001F1FF\U0001F300-\U0001F6FF\U0001F700-\U0001F77F\U0001F780-\U0001F7FF\U0001F800-\U0001F8FF\U0001F900-\U0001F9FF\U0001FA00-\U0001FA6F\U0001FA70-\U0001FAFF\U0001FB00-\U0001FBFF\u2300-\u23FF\u2600-\u26FF\u2700-\u27BF\u2B00-\u2BFF\u200d\ufe0f]+)',
     flags=re.UNICODE
 )
 
@@ -1116,6 +1129,274 @@ def trip_parser_get_dates(trip_path: Path):
     return tp.get_trip_dates() if hasattr(tp, 'get_trip_dates') else (None, None)
 
 
+class HtmlPDFBuilder:
+    """Builds the PDF document using HTML/CSS rendered by Playwright (Chromium)."""
+
+    def __init__(self, output_path: Path, trip_parser: TripParser, map_generator: MapGenerator, config: dict = None):
+        self.output_path = Path(output_path)
+        self.trip_parser = trip_parser
+        self.map_generator = map_generator
+        self.config = config or {}
+
+        # Layout options
+        self.max_photos_per_step = int(self.config.get("max_photos_per_step", 6))
+        self.photo_max_width = int(self.config.get("html_photo_max_width", 1200))
+
+    def _image_bytes_to_data_url(self, data: bytes, mime: str = "image/png") -> str:
+        b64 = base64.b64encode(data).decode("ascii")
+        return f"data:{mime};base64,{b64}"
+
+    def _image_file_to_data_url(self, path: Path) -> Optional[str]:
+        try:
+            with Image.open(path) as img:
+                img = img.convert("RGB")
+                if self.photo_max_width > 0:
+                    if img.width > self.photo_max_width:
+                        ratio = float(self.photo_max_width) / float(img.width)
+                        new_h = max(1, int(round(img.height * ratio)))
+                        img = img.resize((self.photo_max_width, new_h), Image.LANCZOS)
+                buf = io.BytesIO()
+                img.save(buf, format="JPEG", quality=88)
+                buf.seek(0)
+                return self._image_bytes_to_data_url(buf.read(), mime="image/jpeg")
+        except Exception:
+            return None
+
+    def _escape(self, text: str) -> str:
+        return html.escape(text or "")
+
+    def _format_weather(self, condition: str, temperature: float) -> str:
+        """Format weather info as plain text (no emoji)."""
+        weather_labels = {
+            "clear-day": "Clear",
+            "clear-night": "Clear night",
+            "partly-cloudy-day": "Partly cloudy",
+            "partly-cloudy-night": "Partly cloudy night",
+            "cloudy": "Cloudy",
+            "rain": "Rain",
+            "snow": "Snow",
+            "wind": "Windy",
+            "fog": "Fog",
+        }
+        label = weather_labels.get(condition, "Weather")
+        try:
+            return f"{label}, {float(temperature):.0f}°C"
+        except Exception:
+            return f"{label}"
+
+    def _build_description_html(self, text: str) -> str:
+        if not text:
+            return ""
+
+        lines = text.splitlines()
+        blocks = []
+        current_para = []
+        current_list = []
+
+        def flush_para():
+            if current_para:
+                blocks.append(("para", "\n".join(current_para)))
+                current_para.clear()
+
+        def flush_list():
+            if current_list:
+                blocks.append(("list", list(current_list)))
+                current_list.clear()
+
+        for line in lines:
+            if not line.strip():
+                flush_para()
+                flush_list()
+                continue
+            if re.match(r"^\s*[-*]\s+", line):
+                flush_para()
+                item = re.sub(r"^\s*[-*]\s+", "", line)
+                current_list.append(item)
+            else:
+                flush_list()
+                current_para.append(line)
+
+        flush_para()
+        flush_list()
+
+        parts = []
+        for kind, data in blocks:
+            if kind == "para":
+                safe = self._escape(data).replace("\n", "<br/>")
+                parts.append(f"<p class=\"step-desc\">{safe}</p>")
+            else:
+                items_html = "".join(
+                    f"<li>{self._escape(item)}</li>" for item in data
+                )
+                parts.append(f"<ul class=\"step-list\">{items_html}</ul>")
+
+        return "\n".join(parts)
+
+    def _build_html(self) -> str:
+        trip_name = self.trip_parser.get_trip_name()
+        start_date, end_date = self.trip_parser.get_trip_dates()
+        total_km = self.trip_parser.get_total_km()
+        step_count = len(self.trip_parser.steps)
+
+        date_str = ""
+        if start_date and end_date:
+            date_str = f"{start_date.strftime('%d.%m.%Y')} - {end_date.strftime('%d.%m.%Y')}"
+        elif start_date:
+            date_str = start_date.strftime('%d.%m.%Y')
+
+        subtitle = f"{date_str}<br/>{step_count} Steps • {total_km:.0f} km"
+
+        # Title page overview map
+        overview_img = ""
+        try:
+            map_bytes = self.map_generator.generate_overview_map(self.trip_parser)
+            if map_bytes:
+                overview_img = f"<img class=\"map\" src=\"{self._image_bytes_to_data_url(map_bytes)}\"/>"
+        except Exception:
+            overview_img = ""
+
+        html_parts = [
+            "<!doctype html>",
+            "<html>",
+            "<head>",
+            "<meta charset=\"utf-8\"/>",
+            "<style>",
+            "@page { size: A4; margin: 15mm; }",
+            "body { font-family: 'Segoe UI', 'Segoe UI Emoji', 'Segoe UI Symbol', sans-serif; color: #333; }",
+            ".title { text-align: center; color: #1A5F7A; font-size: 28pt; margin-top: 20mm; }",
+            ".subtitle { text-align: center; font-size: 14pt; margin-bottom: 10mm; }",
+            ".map { width: 100%; height: auto; display: block; margin: 0 auto; }",
+            ".page-break { page-break-after: always; }",
+            ".step-title { color: #1A5F7A; font-size: 18pt; margin: 6mm 0 2mm; }",
+            ".step-meta { color: #666; font-size: 10pt; margin: 0 0 4mm; }",
+            ".step-desc { font-size: 11pt; line-height: 1.35; margin: 0 0 4mm; }",
+            ".step-list { margin: 0 0 4mm 6mm; }",
+            ".photo-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin: 2mm 0 4mm; }",
+            ".photo-grid img { width: 100%; height: auto; display: block; }",
+            ".video-header { margin-top: 3mm; font-weight: 600; }",
+            ".video-link { display: block; color: #0066CC; text-decoration: none; font-size: 10pt; }",
+            "</style>",
+            "</head>",
+            "<body>",
+            f"<div class=\"title\">{self._escape(trip_name)}</div>",
+            f"<div class=\"subtitle\">{subtitle}</div>",
+            overview_img,
+            "<div class=\"page-break\"></div>",
+        ]
+
+        for i, step in enumerate(self.trip_parser.steps):
+            step_number = i + 1
+            step_data = step.get("data", {}) if isinstance(step, dict) else {}
+            photos = step.get("photos", []) if isinstance(step, dict) else []
+            videos = step.get("videos", []) if isinstance(step, dict) else []
+
+            display_name = step_data.get("display_name", f"Step {step_number}")
+            title_text = f"{step_number}. {display_name}"
+
+            location = step_data.get("location", {}) if isinstance(step_data, dict) else {}
+            location_name = location.get("name", "") if isinstance(location, dict) else ""
+            location_detail = location.get("detail", "") if isinstance(location, dict) else ""
+
+            start_time = step_data.get("start_time") if isinstance(step_data, dict) else None
+            date_str = ""
+            if start_time:
+                try:
+                    date_str = datetime.fromtimestamp(start_time).strftime("%A, %d. %B %Y")
+                except Exception:
+                    date_str = ""
+
+            weather_str = ""
+            weather_condition = step_data.get("weather_condition") if isinstance(step_data, dict) else None
+            weather_temp = step_data.get("weather_temperature") if isinstance(step_data, dict) else None
+            if weather_condition and weather_temp is not None:
+                weather_str = f" • {self._escape(self._format_weather(weather_condition, weather_temp))}"
+
+            meta_text = f"📍 {location_name}, {location_detail}"
+            if date_str:
+                meta_text += f" • 📅 {date_str}"
+            meta_text += weather_str
+
+            step_map_html = ""
+            try:
+                step_width = int(getattr(self.map_generator, "step_width", self.map_generator.width))
+                step_height = int(getattr(self.map_generator, "step_height", self.map_generator.height))
+                render_scale = float(getattr(self.map_generator, "step_render_scale", 1.0))
+                render_scale = max(1.0, min(4.0, render_scale))
+                map_bytes = self.map_generator.generate_step_map_for_step(
+                    self.trip_parser,
+                    step_number - 1,
+                    width=int(step_width * render_scale),
+                    height=int(step_height * render_scale)
+                )
+                if map_bytes:
+                    step_map_html = f"<img class=\"map\" src=\"{self._image_bytes_to_data_url(map_bytes)}\"/>"
+            except Exception:
+                step_map_html = ""
+
+            description = step_data.get("description", "") if isinstance(step_data, dict) else ""
+            desc_html = self._build_description_html(description)
+
+            # Photo grid
+            photo_html = ""
+            if photos:
+                items = []
+                for p in photos[: self.max_photos_per_step]:
+                    try:
+                        url = self._image_file_to_data_url(Path(p))
+                        if url:
+                            items.append(f"<img src=\"{url}\"/>")
+                    except Exception:
+                        continue
+                if items:
+                    photo_html = f"<div class=\"photo-grid\">{''.join(items)}</div>"
+
+            # Video links
+            video_html = ""
+            if videos:
+                links = []
+                for video_path in videos:
+                    try:
+                        file_url = Path(video_path).resolve().as_uri()
+                    except Exception:
+                        file_url = str(video_path)
+                    name = Path(video_path).name
+                    links.append(f"<a class=\"video-link\" href=\"{self._escape(file_url)}\">{self._escape(name)}</a>")
+                video_html = "<div class=\"video-header\">📹 Videos:</div>" + "".join(links)
+
+            html_parts.extend([
+                "<div class=\"step\">",
+                f"<div class=\"step-title\">{self._escape(title_text)}</div>",
+                f"<div class=\"step-meta\">{self._escape(meta_text)}</div>",
+                step_map_html,
+                desc_html,
+                photo_html,
+                video_html,
+                "</div>",
+                "<div class=\"page-break\"></div>",
+            ])
+
+        html_parts.append("</body></html>")
+        return "\n".join([p for p in html_parts if p is not None])
+
+    def build(self):
+        if sync_playwright is None:
+            raise RuntimeError("Playwright is not installed. Install it and run 'playwright install' to use the HTML renderer.")
+
+        html_doc = self._build_html()
+
+        with sync_playwright() as p:
+            browser = p.chromium.launch()
+            page = browser.new_page()
+            page.set_content(html_doc, wait_until="load")
+            page.pdf(
+                path=str(self.output_path),
+                format="A4",
+                margin={"top": "15mm", "bottom": "15mm", "left": "15mm", "right": "15mm"},
+                print_background=True,
+            )
+            browser.close()
+
+
 class PDFBuilder:
     """Builds the PDF document from parsed trip data."""
     
@@ -1228,6 +1509,54 @@ class PDFBuilder:
             return False
         return bool(EMOJI_PATTERN.search(text))
 
+    def _split_text_with_emoji(self, text: str) -> list:
+        """Split text into runs of (is_emoji, segment).
+
+        Uses the optional `emoji` library for robust segmentation when available.
+        Falls back to the regex-based matcher otherwise.
+        """
+        if text is None:
+            return []
+
+        if _emoji is not None:
+            try:
+                items = _emoji.emoji_list(text)
+            except Exception:
+                items = []
+
+            if items:
+                parts = []
+                last = 0
+                for item in items:
+                    start = item.get("match_start")
+                    end = item.get("match_end")
+                    if start is None or end is None:
+                        loc = item.get("location")
+                        if loc is not None:
+                            start = int(loc)
+                            end = start + len(item.get("emoji", ""))
+                    if start is None or end is None:
+                        continue
+                    if start > last:
+                        parts.append((False, text[last:start]))
+                    parts.append((True, text[start:end]))
+                    last = end
+                if last < len(text):
+                    parts.append((False, text[last:]))
+                return parts
+
+        # Fallback: regex-based segmentation (best-effort)
+        parts = []
+        last = 0
+        for m in EMOJI_PATTERN.finditer(text):
+            if m.start() > last:
+                parts.append((False, text[last:m.start()]))
+            parts.append((True, m.group(0)))
+            last = m.end()
+        if last < len(text):
+            parts.append((False, text[last:]))
+        return parts
+
     def _get_emoji_png_path(self, emoji: str) -> Optional[Path]:
         """Get or fetch a Twemoji PNG for an emoji sequence (cached)."""
         if not emoji:
@@ -1260,6 +1589,10 @@ class PDFBuilder:
         """Return an inline <img> tag for an emoji, or the escaped emoji if unavailable."""
         emoji_path = self._get_emoji_png_path(emoji)
         if not emoji_path:
+            # Fallback: render emoji glyphs using the registered emoji font (monochrome if color fonts unsupported)
+            emoji_font = getattr(self, "_registered_emoji_font", None)
+            if emoji_font:
+                return f'<font name="{emoji_font}">{html.escape(emoji)}</font>'
             return html.escape(emoji)
 
         # Use POSIX-style path to avoid backslash escaping in XML
@@ -1276,12 +1609,12 @@ class PDFBuilder:
         scale = float(self.config.get("emoji_scale", 1.1)) if hasattr(self, "config") else 1.1
         size_px = max(8, int(float(style.fontSize) * scale))
 
-        parts = EMOJI_PATTERN.split(text)
+        parts = self._split_text_with_emoji(text)
         out = []
-        for part in parts:
+        for is_emoji, part in parts:
             if not part:
                 continue
-            if EMOJI_PATTERN.fullmatch(part):
+            if is_emoji:
                 out.append(self._emoji_img_tag(part, size_px))
             else:
                 escaped = html.escape(part)
@@ -1403,7 +1736,10 @@ class PDFBuilder:
         cache_dir.mkdir(parents=True, exist_ok=True)
 
         # Emoji regex (captures sequences including ZWJ/FE0F)
-        emoji_pattern = re.compile(r'([\U0001F1E6-\U0001F1FF\U0001F300-\U0001F6FF\U0001F900-\U0001F9FF\u2600-\u26FF\u2700-\u27BF\u200d\ufe0f]+)', flags=re.UNICODE)
+        emoji_pattern = re.compile(
+            r'([\U0001F1E6-\U0001F1FF\U0001F300-\U0001F6FF\U0001F700-\U0001F77F\U0001F780-\U0001F7FF\U0001F800-\U0001F8FF\U0001F900-\U0001F9FF\U0001FA00-\U0001FA6F\U0001FA70-\U0001FAFF\U0001FB00-\U0001FBFF\u2300-\u23FF\u2600-\u26FF\u2700-\u27BF\u2B00-\u2BFF\u200d\ufe0f]+)',
+            flags=re.UNICODE
+        )
 
         lines = text.splitlines() or [text]
 
@@ -1824,10 +2160,10 @@ class PDFBuilder:
         # Collect flowables for this step, then add as a single unit when possible
         step_flow = []
 
-        # Step title (legacy paragraph)
+        # Step title (with inline emoji support)
         display_name = step_data.get("display_name", f"Step {step_number}")
-        safe_title = f"{step_number}. {display_name}".replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-        step_flow.append(Paragraph(safe_title, self.styles["StepTitle"]))
+        title_text = f"{step_number}. {display_name}"
+        step_flow.append(self._paragraph_with_inline_emoji(title_text, "StepTitle", preserve_newlines=False))
 
         # Small spacer to separate title from meta to prevent visual overlap
         from reportlab.platypus import Spacer
@@ -1855,9 +2191,8 @@ class PDFBuilder:
             meta_text += f" • 📅 {date_str}"
         meta_text += weather_str
 
-        # Meta (legacy paragraph)
-        safe_meta = meta_text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-        step_flow.append(Paragraph(safe_meta, self.styles["StepMeta"]))
+        # Meta (with inline emoji support for 📍, 📅, etc.)
+        step_flow.append(self._paragraph_with_inline_emoji(meta_text, "StepMeta", preserve_newlines=False))
 
         # Step map (small, inline)
         lat = location.get("lat") or location.get("latitude") or location.get("Latitude")
@@ -1918,12 +2253,11 @@ class PDFBuilder:
         except Exception as e:
             print(f"    Warning: Could not generate step map: {e}")
 
-        # Description
+        # Description (with colored inline emoji images via Twemoji)
         description = step_data.get("description", "")
         if description:
-            safe_desc = description.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-            safe_desc = safe_desc.replace("\n", "<br/>")
-            step_flow.append(Paragraph(safe_desc, self.styles["StepDescription"]))
+            desc_flowables = self._build_description_flowables(description)
+            step_flow.extend(desc_flowables)
 
         # Photo grid
         if photos:
@@ -1934,8 +2268,8 @@ class PDFBuilder:
 
         # Video links (append header + links)
         if videos:
-            # Video header as Paragraph
-            step_flow.append(Paragraph("📹 Videos:", self.styles["VideoHeader"]))
+            # Video header with inline emoji (📹)
+            step_flow.append(self._paragraph_with_inline_emoji("📹 Videos:", "VideoHeader", preserve_newlines=False))
 
             for video_path in videos:
                 video_name = video_path.name
@@ -2964,8 +3298,25 @@ def render_trip(trip_path: Path, script_dir: Path, config: dict, cache_manager: 
         
         # No legacy config loading - the new [maps] section is authoritative for map sizing and padding.
 
-        pdf_builder = PDFBuilder(output_path, parser, map_gen, config=config)
-        pdf_builder.build()
+        renderer = str(config.get("renderer", "html")).strip().lower()
+        if renderer == "auto":
+            try:
+                print("  Renderer: HTML (Chromium)")
+                pdf_builder = HtmlPDFBuilder(output_path, parser, map_gen, config=config)
+                pdf_builder.build()
+            except Exception as e:
+                print(f"  Warning: HTML renderer failed ({e}); falling back to ReportLab.")
+                print("  Renderer: ReportLab")
+                pdf_builder = PDFBuilder(output_path, parser, map_gen, config=config)
+                pdf_builder.build()
+        elif renderer == "reportlab":
+            print("  Renderer: ReportLab")
+            pdf_builder = PDFBuilder(output_path, parser, map_gen, config=config)
+            pdf_builder.build()
+        else:
+            print("  Renderer: HTML (Chromium)")
+            pdf_builder = HtmlPDFBuilder(output_path, parser, map_gen, config=config)
+            pdf_builder.build()
         
         # Mark as rendered
         cache_manager.mark_rendered(trip_path)

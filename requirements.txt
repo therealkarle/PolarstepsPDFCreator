@@ -5,3 +5,5 @@ staticmap>=0.5.7
 requests>=2.31.0
 # TOML parser for config (allows comments and clearer syntax)
 toml>=0.10.2
+emoji>=2.0.0
+playwright>=1.41.0

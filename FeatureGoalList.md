@@ -22,7 +22,7 @@ Diese Liste dient als ausführliche Checkliste für noch zu implementierende Fea
 ---
 
 ## 😀 Emoji Support
-- [ ] **Inline-Emoji-Bilder in Texten** (Twemoji-Fallback, Cache `.emoji_cache`) 💡
+- [x] **Inline-Emoji-Bilder in Texten** (Twemoji-Fallback, Cache `.emoji_cache`) 💡
   - Akzeptanzkriterien: Emojis in Step-Titel/-Beschreibung werden als kleine Bilder eingebettet; Text bleibt kopierbar; fallback auf Text bei Fehler.
 - [ ] **Schreibe Tests / Beispiele** mit Emoji-komplexen Sequenzen (ZWJ, Skin-Tone)
 
