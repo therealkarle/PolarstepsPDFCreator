@@ -1,9 +1,10 @@
 import sys
+from pathlib import Path
+
 sys.path.append('.')
 from polarsteps_pdf_generator import parse_render_command, CacheManager
 
-cm = CacheManager('rendered_trips_cache.json')
-from pathlib import Path
+cm = CacheManager(Path('cache') / 'rendered_trips_cache.json')
 trips = [Path(f"trip_{i}") for i in range(1, 101)]
 
 cmd = 'r 67 -config(map_style = "street", max_photos_per_step = 4)'

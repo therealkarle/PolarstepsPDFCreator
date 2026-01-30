@@ -34,7 +34,55 @@ import requests
 import os
 import sys
 import subprocess
+import shutil
 from collections import deque
+
+# Root folders for temp output and caches
+SCRIPT_DIR = Path(__file__).parent
+CACHE_ROOT = SCRIPT_DIR / "cache"
+TEMP_ROOT = SCRIPT_DIR / "temp"
+
+
+def _ensure_dir(path: Path) -> Path:
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def get_cache_dir(*parts: str) -> Path:
+    return _ensure_dir(CACHE_ROOT.joinpath(*parts))
+
+
+def get_temp_dir(*parts: str) -> Path:
+    return _ensure_dir(TEMP_ROOT.joinpath(*parts))
+
+
+def _migrate_legacy_cache_paths():
+    """Move legacy cache locations into cache/ for backward compatibility."""
+    legacy_cache_file = SCRIPT_DIR / "rendered_trips_cache.json"
+    new_cache_file = get_cache_dir() / "rendered_trips_cache.json"
+    if legacy_cache_file.exists() and not new_cache_file.exists():
+        try:
+            _ensure_dir(new_cache_file.parent)
+            shutil.move(str(legacy_cache_file), str(new_cache_file))
+        except Exception:
+            pass
+
+    def _migrate_dir(legacy_dir: Path, new_dir: Path):
+        if not legacy_dir.exists() or not legacy_dir.is_dir():
+            return
+        _ensure_dir(new_dir)
+        for item in legacy_dir.iterdir():
+            try:
+                shutil.move(str(item), str(new_dir / item.name))
+            except Exception:
+                continue
+        try:
+            legacy_dir.rmdir()
+        except Exception:
+            pass
+
+    _migrate_dir(SCRIPT_DIR / ".emoji_cache", get_cache_dir("emoji"))
+    _migrate_dir(SCRIPT_DIR / ".map_marker_cache", get_cache_dir("map_marker"))
 
 # Optional Playwright (HTML -> PDF renderer)
 try:
@@ -823,8 +871,7 @@ class MapGenerator:
                 except Exception:
                     return None
 
-        cache_dir = Path(__file__).parent / ".map_marker_cache"
-        cache_dir.mkdir(parents=True, exist_ok=True)
+        cache_dir = get_cache_dir("map_marker")
 
         try:
             mtime = photo_path.stat().st_mtime if (not is_url and isinstance(photo_path, Path)) else 0
@@ -873,8 +920,7 @@ class MapGenerator:
                 if url.startswith("http://") or url.startswith("https://"):
                     r = requests.get(url, timeout=10)
                     if r.status_code == 200:
-                        cache_dir = Path(__file__).parent / ".map_marker_cache"
-                        cache_dir.mkdir(parents=True, exist_ok=True)
+                        cache_dir = get_cache_dir("map_marker")
                         tmp_path = cache_dir / (hashlib.sha1(url.encode("utf-8")).hexdigest() + ".jpg")
                         tmp_path.write_bytes(r.content)
                         # Retry with downloaded image
@@ -891,8 +937,7 @@ class MapGenerator:
         - `thickness` is the stroke width in pixels
         """
         try:
-            cache_dir = Path(__file__).parent / ".map_marker_cache"
-            cache_dir.mkdir(parents=True, exist_ok=True)
+            cache_dir = get_cache_dir("map_marker")
             key_src = f"ring|{size}|{color}|{thickness}"
             cache_name = hashlib.sha1(key_src.encode("utf-8")).hexdigest() + ".png"
             cache_path = cache_dir / cache_name
@@ -1396,6 +1441,25 @@ class HtmlPDFBuilder:
             )
             browser.close()
 
+        # Optionally open the rendered PDF file after creation (config key: open_pdf_after_render)
+        try:
+            open_after = bool(self.config.get("open_pdf_after_render", True))
+        except Exception:
+            open_after = True
+
+        if open_after:
+            try:
+                if os.name == "nt":
+                    # Windows
+                    os.startfile(str(self.output_path))
+                elif sys.platform == "darwin":
+                    subprocess.run(["open", str(self.output_path)], check=False)
+                else:
+                    # Linux/Unix
+                    subprocess.run(["xdg-open", str(self.output_path)], check=False)
+            except Exception as e:
+                print(f"  Warning: Could not open PDF: {e}")
+
 
 class PDFBuilder:
     """Builds the PDF document from parsed trip data."""
@@ -1562,8 +1626,7 @@ class PDFBuilder:
         if not emoji:
             return None
 
-        cache_dir = Path(__file__).parent / ".emoji_cache"
-        cache_dir.mkdir(parents=True, exist_ok=True)
+        cache_dir = get_cache_dir("emoji")
 
         # Convert emoji sequence to codepoint sequence
         cps = [f"{ord(ch):x}" for ch in emoji]
@@ -1732,8 +1795,7 @@ class PDFBuilder:
             regular_font = ImageFont.load_default()
 
         # Emoji cache folder
-        cache_dir = Path(__file__).parent / ".emoji_cache"
-        cache_dir.mkdir(parents=True, exist_ok=True)
+        cache_dir = get_cache_dir("emoji")
 
         # Emoji regex (captures sequences including ZWJ/FE0F)
         emoji_pattern = re.compile(
@@ -1877,7 +1939,7 @@ class PDFBuilder:
             map_bytes = self.map_generator.generate_overview_map(self.trip_parser)
             if getattr(self.map_generator, 'debug_map', False):
                 try:
-                    tmp = Path.cwd() / f"debug_overview_{self.trip_parser.get_trip_name().replace(' ', '_')}.png"
+                    tmp = get_temp_dir() / f"debug_overview_{self.trip_parser.get_trip_name().replace(' ', '_')}.png"
                     tmp.write_bytes(map_bytes)
                     print(f"Debug: wrote overview image to {tmp} ({len(map_bytes)} bytes)")
                 except Exception:
@@ -3435,8 +3497,11 @@ Examples:
         print(f"Warning: could not load config: {e}")
         config = {}
     
+    # Move legacy cache locations into cache/
+    _migrate_legacy_cache_paths()
+
     # Initialize cache manager
-    cache_file = script_dir / "rendered_trips_cache.json"
+    cache_file = get_cache_dir() / "rendered_trips_cache.json"
     cache_manager = CacheManager(cache_file)
     
     # Handle clear cache from CLI

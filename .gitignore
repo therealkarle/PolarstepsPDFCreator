@@ -9,5 +9,8 @@ venv/
 
 # Ignore cache files
 __pycache__/
+cache/
+temp/
 .emoji_cache/
+.map_marker_cache/
 

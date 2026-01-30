@@ -63,7 +63,7 @@ padding_factor = 0.2
 # Minimum map width in km (prevents over-zoom on single points)
 min_width_km = 12.0
 # Maximum map width in km. If neighbors don't fit, remove farthest first.
-max_width_km = 150.0
+max_width_km = 250.0
 # Cluster distance: if a neighbor is within this distance, include it
 # (used to group nearby steps together)
 cluster_distance_km = 2.0
