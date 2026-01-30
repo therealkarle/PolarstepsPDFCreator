@@ -527,6 +527,127 @@ class MapGenerator:
         except Exception:
             return base_image
 
+    def _project_to_image_pixel(self, lon: float, lat: float, zoom: int, center: tuple, width: int, height: int) -> Optional[Tuple[float, float]]:
+        try:
+            if center is None:
+                return None
+            center_lon, center_lat = center
+            pt_px = self._lonlat_to_pixel(lon, lat, zoom)
+            center_px = self._lonlat_to_pixel(center_lon, center_lat, zoom)
+            world_px = 256 * (2 ** int(zoom))
+            dx = pt_px[0] - center_px[0]
+            if dx > (world_px / 2.0):
+                dx -= world_px
+            elif dx < (-world_px / 2.0):
+                dx += world_px
+            dy = pt_px[1] - center_px[1]
+            x = (width / 2.0) + dx
+            y = (height / 2.0) + dy
+            return (x, y)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _color_to_rgba(color, alpha: int = 255) -> tuple:
+        try:
+            if isinstance(color, (tuple, list)):
+                if len(color) == 4:
+                    return (int(color[0]), int(color[1]), int(color[2]), int(color[3]))
+                if len(color) == 3:
+                    return (int(color[0]), int(color[1]), int(color[2]), int(alpha))
+            if isinstance(color, str) and color.startswith("#") and len(color) == 7:
+                r = int(color[1:3], 16)
+                g = int(color[3:5], 16)
+                b = int(color[5:7], 16)
+                return (r, g, b, int(alpha))
+        except Exception:
+            pass
+        return (255, 255, 255, int(alpha))
+
+    def _draw_markers_on_image(self, base_image: Image.Image, markers: List[dict], zoom: int, center: tuple) -> Image.Image:
+        if not markers:
+            return base_image
+        try:
+            base = base_image.convert("RGBA")
+            draw = ImageDraw.Draw(base)
+            width, height = base.size
+            for marker in markers:
+                lon = marker.get("lon")
+                lat = marker.get("lat")
+                marker_px = int(marker.get("marker_px", 0) or 0)
+                marker_radius = int(marker.get("marker_radius", 0) or 0)
+                if lon is None or lat is None:
+                    continue
+                pos = self._project_to_image_pixel(lon, lat, zoom, center, width, height)
+                if not pos:
+                    continue
+                x, y = pos
+                if x < -marker_px or x > (width + marker_px) or y < -marker_px or y > (height + marker_px):
+                    continue
+
+                halo_color = marker.get("halo_color")
+                halo_radius = marker.get("halo_radius")
+                if halo_color and halo_radius:
+                    hc = self._color_to_rgba(halo_color)
+                    r = float(halo_radius)
+                    draw.ellipse([x - r, y - r, x + r, y + r], fill=hc)
+
+                thumb = marker.get("thumb")
+                if thumb:
+                    try:
+                        with Image.open(str(thumb)) as img:
+                            img = img.convert("RGBA")
+                            if marker_px and (img.width != marker_px or img.height != marker_px):
+                                img = img.resize((marker_px, marker_px), Image.LANCZOS)
+                            ox = int(round(x - (img.width / 2.0)))
+                            oy = int(round(y - (img.height / 2.0)))
+                            base.alpha_composite(img, dest=(ox, oy))
+                    except Exception:
+                        pass
+                else:
+                    color = self._color_to_rgba(marker.get("color"))
+                    r = float(marker_radius)
+                    draw.ellipse([x - r, y - r, x + r, y + r], fill=color)
+
+                ring_overlay = marker.get("ring_overlay")
+                if ring_overlay:
+                    try:
+                        with Image.open(str(ring_overlay)) as img:
+                            img = img.convert("RGBA")
+                            ox = int(round(x - (img.width / 2.0)))
+                            oy = int(round(y - (img.height / 2.0)))
+                            base.alpha_composite(img, dest=(ox, oy))
+                    except Exception:
+                        pass
+            return base
+        except Exception:
+            return base_image
+
+    def _draw_route_on_image(self, base_image: Image.Image, route_coords: List[tuple], zoom: int, center: tuple, line_color: str, line_width: int, outline_color: Optional[str] = None, outline_width: Optional[int] = None) -> Image.Image:
+        if not route_coords:
+            return base_image
+        try:
+            base = base_image.convert("RGBA")
+            draw = ImageDraw.Draw(base)
+            width, height = base.size
+            points: List[tuple] = []
+            for lon, lat in route_coords:
+                pos = self._project_to_image_pixel(lon, lat, zoom, center, width, height)
+                if pos:
+                    points.append(pos)
+            if len(points) < 2:
+                return base
+
+            if outline_color and outline_width and outline_width > 0:
+                oc = self._color_to_rgba(outline_color)
+                draw.line(points, fill=oc, width=int(outline_width), joint="curve")
+
+            lc = self._color_to_rgba(line_color)
+            draw.line(points, fill=lc, width=int(line_width), joint="curve")
+            return base
+        except Exception:
+            return base_image
+
 
     @staticmethod
     def _extract_lon_lat(step: dict) -> Optional[tuple]:
@@ -769,6 +890,8 @@ class MapGenerator:
             m.add_line(line)
 
         # Add step markers (use photo thumbnails when possible)
+        draw_markers_on_top = bool(self.label_overlay_url and center is not None)
+        markers_to_draw: List[dict] = []
         for i, step in enumerate(trip_parser.steps):
             step_data = step["data"]
             location = step_data.get("location", {})
@@ -788,25 +911,50 @@ class MapGenerator:
                     # create thumbnail (white ring); prefer IconMarker when available
                     # marker_px is absolute pixels (configured by marker_thumb_size) scaled by render pixel scale
                     thumb = self._get_step_thumbnail(step, size=marker_px, ring_color=(255,255,255,230))
-                    if thumb and IconMarker is not None:
-                        off_x = int(marker_px / 2)
-                        off_y = int(marker_px / 2)
-                        try:
-                            m.add_marker(IconMarker((lon, lat), str(thumb), off_x, off_y))
+                    if thumb and (IconMarker is not None or draw_markers_on_top):
+                        if draw_markers_on_top:
+                            markers_to_draw.append({
+                                "lon": lon,
+                                "lat": lat,
+                                "thumb": thumb,
+                                "marker_px": marker_px,
+                                "marker_radius": max(4, int(round(marker_px * 0.3))),
+                                "color": MARKER_COLOR_START if i == 0 else MARKER_COLOR_STEP,
+                            })
                             continue
-                        except Exception:
-                            pass
+                        else:
+                            off_x = int(marker_px / 2)
+                            off_y = int(marker_px / 2)
+                            try:
+                                m.add_marker(IconMarker((lon, lat), str(thumb), off_x, off_y))
+                                continue
+                            except Exception:
+                                pass
 
                     # fallback to circle marker (no red in overview map)
                     color = MARKER_COLOR_START if i == 0 else MARKER_COLOR_STEP
                     # Use an absolute radius proportional to thumbnail size
                     marker_radius = max(4, int(round(marker_px * 0.3)))
-                    m.add_marker(CircleMarker((lon, lat), color, marker_radius))
+                    if draw_markers_on_top:
+                        markers_to_draw.append({
+                            "lon": lon,
+                            "lat": lat,
+                            "thumb": None,
+                            "marker_px": marker_px,
+                            "marker_radius": marker_radius,
+                            "color": color,
+                        })
+                    else:
+                        m.add_marker(CircleMarker((lon, lat), color, marker_radius))
 
         # Render map
         if center is not None:
             image = m.render(zoom=zoom, center=center)
             image = self._apply_label_overlay(image, zoom, center)
+            if draw_markers_on_top and len(route_coords) > 1:
+                image = self._draw_route_on_image(image, route_coords, zoom, center, ROUTE_COLOR, ROUTE_LINE_WIDTH)
+            if draw_markers_on_top:
+                image = self._draw_markers_on_image(image, markers_to_draw, zoom, center)
         else:
             image = m.render()
 
@@ -1087,6 +1235,8 @@ class MapGenerator:
         marker_radius = max(4, int(round(marker_px * 0.3)))
         normal_indices = [i for i in range(len(trip_parser.steps)) if i != step_index]
         draw_order = normal_indices + ([step_index] if 0 <= step_index < len(trip_parser.steps) else [])
+        draw_markers_on_top = bool(self.label_overlay_url)
+        markers_to_draw: List[dict] = []
         
         for i in draw_order:
             st = trip_parser.steps[i]
@@ -1105,47 +1255,101 @@ class MapGenerator:
 
             # Add a red halo under the current step marker only when a photo exists
             if is_current and has_photo:
-                try:
-                    m.add_marker(CircleMarker((lon, lat), MISSING_PHOTO_COLOR, marker_radius + 4))
-                except Exception:
+                if draw_markers_on_top:
                     pass
+                else:
+                    try:
+                        m.add_marker(CircleMarker((lon, lat), MISSING_PHOTO_COLOR, marker_radius + 4))
+                    except Exception:
+                        pass
 
-            if thumb and IconMarker is not None:
-                off_x = int(marker_px / 2)
-                off_y = int(marker_px / 2)
-                try:
-                    m.add_marker(IconMarker((lon, lat), str(thumb), off_x, off_y))
-                    # If this is the current step with a photo, overlay a ring image on top
+            if thumb and (IconMarker is not None or draw_markers_on_top):
+                if draw_markers_on_top:
+                    overlay = None
                     if is_current and has_photo:
                         try:
                             overlay = self._get_ring_overlay(
-                                marker_px + 8, 
-                                color=MISSING_PHOTO_COLOR, 
+                                marker_px + 8,
+                                color=MISSING_PHOTO_COLOR,
                                 # thickness in absolute pixels (small fraction of marker size)
                                 thickness=max(2, int(round(marker_px * 0.05)))
                             )
-                            if overlay:
-                                off_xo = int((marker_px + 8) / 2)
-                                off_yo = int((marker_px + 8) / 2)
-                                try:
-                                    m.add_marker(IconMarker((lon, lat), str(overlay), off_xo, off_yo))
-                                except Exception:
-                                    pass
                         except Exception:
-                            pass
+                            overlay = None
+                    markers_to_draw.append({
+                        "lon": lon,
+                        "lat": lat,
+                        "thumb": thumb,
+                        "marker_px": marker_px,
+                        "marker_radius": marker_radius,
+                        "color": MARKER_COLOR_START if i == 0 else ("#FF4D4F" if is_current else MARKER_COLOR_STEP),
+                        "halo_color": MISSING_PHOTO_COLOR if (is_current and has_photo) else None,
+                        "halo_radius": (marker_radius + 4) if (is_current and has_photo) else None,
+                        "ring_overlay": overlay,
+                    })
                     continue
-                except Exception:
-                    pass
+                else:
+                    off_x = int(marker_px / 2)
+                    off_y = int(marker_px / 2)
+                    try:
+                        m.add_marker(IconMarker((lon, lat), str(thumb), off_x, off_y))
+                        # If this is the current step with a photo, overlay a ring image on top
+                        if is_current and has_photo:
+                            try:
+                                overlay = self._get_ring_overlay(
+                                    marker_px + 8, 
+                                    color=MISSING_PHOTO_COLOR, 
+                                    # thickness in absolute pixels (small fraction of marker size)
+                                    thickness=max(2, int(round(marker_px * 0.05)))
+                                )
+                                if overlay:
+                                    off_xo = int((marker_px + 8) / 2)
+                                    off_yo = int((marker_px + 8) / 2)
+                                    try:
+                                        m.add_marker(IconMarker((lon, lat), str(overlay), off_xo, off_yo))
+                                    except Exception:
+                                        pass
+                            except Exception:
+                                pass
+                        continue
+                    except Exception:
+                        pass
 
             if is_current and not has_photo:
                 color = MISSING_PHOTO_COLOR
             else:
                 color = MARKER_COLOR_START if i == 0 else ("#FF4D4F" if is_current else MARKER_COLOR_STEP)
-            m.add_marker(CircleMarker((lon, lat), color, marker_radius))
+            if draw_markers_on_top:
+                markers_to_draw.append({
+                    "lon": lon,
+                    "lat": lat,
+                    "thumb": None,
+                    "marker_px": marker_px,
+                    "marker_radius": marker_radius,
+                    "color": color,
+                    "halo_color": MISSING_PHOTO_COLOR if (is_current and has_photo) else None,
+                    "halo_radius": (marker_radius + 4) if (is_current and has_photo) else None,
+                    "ring_overlay": None,
+                })
+            else:
+                m.add_marker(CircleMarker((lon, lat), color, marker_radius))
 
         # Render map
         image = m.render(zoom=zoom, center=center)
         image = self._apply_label_overlay(image, zoom, center)
+        if draw_markers_on_top and len(route_coords) > 1:
+            image = self._draw_route_on_image(
+                image,
+                route_coords,
+                zoom,
+                center,
+                ROUTE_COLOR,
+                ROUTE_LINE_WIDTH,
+                outline_color=ROUTE_OUTLINE_COLOR,
+                outline_width=ROUTE_OUTLINE_WIDTH,
+            )
+        if draw_markers_on_top:
+            image = self._draw_markers_on_image(image, markers_to_draw, zoom, center)
         
         img_bytes = io.BytesIO()
         image.save(img_bytes, format="PNG")
