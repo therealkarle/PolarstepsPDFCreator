@@ -161,7 +161,7 @@ min_width_km = 10.0
 [maps.step]
 padding_factor = 0.10
 min_width_km = 2.0
-max_width_km = 100.0
+max_distance_farthest_steps_km = 100.0
 cluster_distance_km = 5.0
 min_zoom = 13
 render_scale = 2.0

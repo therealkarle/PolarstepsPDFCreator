@@ -526,7 +526,7 @@ def compute_step_viewport(
     current_step: StepLocation,
     prev_step: Optional[StepLocation],
     next_step: Optional[StepLocation],
-    max_width_km: float = 100.0,
+    max_distance_farthest_km: float = 100.0,
     min_width_km: float = 2.0,
     cluster_distance_km: float = 5.0,
     padding_factor: float = 0.10,
@@ -536,24 +536,23 @@ def compute_step_viewport(
     extra_padding_px: float = 0.0,
 ) -> MapViewport:
     """
-    Compute viewport for individual step map with smart neighbor inclusion.
+    Compute viewport for individual step map with distance-based neighbor selection.
     
-    NEW RADIUS-BASED ALGORITHM:
-    1. Always center on current step
-    2. Include neighbors if within max_width_km
-    3. Find maximum distance from current step to any included point
-    4. Add substantial padding margin to that radius
-    5. Compute zoom that guarantees that radius fits in viewport
-    
-    This ensures the current step marker (and neighbors) are always visible.
+    DISTANCE-BASED ALGORITHM:
+    1. Get current step + prev/next neighbors
+    2. Calculate distance between the two farthest steps
+    3. If farthest distance <= max_distance_farthest_km, include all visible
+    4. Otherwise drop the neighbor farthest from current, re-check remaining
+    5. If still exceeds threshold, show only current step (use min_width_km)
+    6. Center map on geographic midpoint of ALL visible steps
     
     Args:
-        current_step: The current step location (always included, always centered)
+        current_step: The current step location (always included)
         prev_step: Previous step (Sn-1), or None if this is the first step
         next_step: Next step (Sn+1), or None if this is the last step
-        max_width_km: Maximum map width in kilometers
-        min_width_km: Minimum map width in kilometers
-        cluster_distance_km: Max distance to consider steps as clustered
+        max_distance_farthest_km: Maximum allowed distance between farthest visible steps
+        min_width_km: Minimum map width in kilometers (used when only current step shown)
+        cluster_distance_km: Not used in new algorithm (kept for API compatibility)
         padding_factor: Padding around included steps
         viewport_width_px: Logical viewport width
         viewport_height_px: Logical viewport height
@@ -563,14 +562,7 @@ def compute_step_viewport(
     Returns:
         MapViewport ready for static map generation
     """
-    # CENTER IS ALWAYS THE CURRENT STEP - this is the key change
-    center_lat = current_step.lat
-    center_lon = current_step.lon
-    
-    # Collect all points to include (for radius calculation)
-    included_points = [(current_step.lat, current_step.lon)]
-    
-    # Calculate distances to neighbors
+    # Calculate distances from current step to neighbors
     prev_distance = None
     next_distance = None
     
@@ -586,63 +578,102 @@ def compute_step_viewport(
             next_step.lat, next_step.lon
         )
     
-# Include neighbors based on distance to the current step (radius rule)
-    # max_width_km is treated as full diameter -> max allowed distance from current step
-    max_distance_km = float(max_width_km) / 2.0
-
-    if prev_step and prev_distance is not None and prev_distance <= max_distance_km:
+    # Calculate distance between prev and next (if both exist)
+    prev_next_distance = None
+    if prev_step and next_step:
+        prev_next_distance = haversine_km(
+            prev_step.lat, prev_step.lon,
+            next_step.lat, next_step.lon
+        )
+    
+    # Determine which steps to include based on farthest distance threshold
+    include_prev = False
+    include_next = False
+    
+    if prev_step and next_step:
+        # Both neighbors exist - check if all three fit
+        # Farthest distance is max of: prev↔next, prev↔current, current↔next
+        farthest_dist = max(
+            prev_next_distance or 0,
+            prev_distance or 0,
+            next_distance or 0
+        )
+        
+        if farthest_dist <= max_distance_farthest_km:
+            # All three fit
+            include_prev = True
+            include_next = True
+        else:
+            # Drop the neighbor farthest from current
+            if (prev_distance or 0) >= (next_distance or 0):
+                # prev is farther - drop it, check if next fits alone
+                if (next_distance or 0) <= max_distance_farthest_km:
+                    include_next = True
+                # else: only current shown
+            else:
+                # next is farther - drop it, check if prev fits alone
+                if (prev_distance or 0) <= max_distance_farthest_km:
+                    include_prev = True
+                # else: only current shown
+    
+    elif prev_step:
+        # Only prev neighbor exists (current is last step)
+        if (prev_distance or 0) <= max_distance_farthest_km:
+            include_prev = True
+    
+    elif next_step:
+        # Only next neighbor exists (current is first step)
+        if (next_distance or 0) <= max_distance_farthest_km:
+            include_next = True
+    
+    # Build list of included points
+    included_points = [(current_step.lat, current_step.lon)]
+    if include_prev and prev_step:
         included_points.append((prev_step.lat, prev_step.lon))
-
-    if next_step and next_distance is not None and next_distance <= max_distance_km:
+    if include_next and next_step:
         included_points.append((next_step.lat, next_step.lon))
-
-    # If no neighbors were included but there are neighbors within a soft cluster distance,
-    # include them to provide context (preserve earlier cluster behavior)
+    
+    # CENTER ON MIDPOINT OF ALL VISIBLE STEPS
     if len(included_points) == 1:
-        if prev_step and prev_distance is not None and prev_distance <= cluster_distance_km:
-            included_points.append((prev_step.lat, prev_step.lon))
-        if next_step and next_distance is not None and next_distance <= cluster_distance_km:
-            included_points.append((next_step.lat, next_step.lon))
+        # Only current step - center on it
+        center_lat = current_step.lat
+        center_lon = current_step.lon
+    else:
+        # Multiple steps - compute geographic midpoint
+        center_lat, center_lon = geographic_midpoint(included_points)
     
-    # Find maximum distance from CENTER (current_step) to any included point
-    max_dist_km = 0.0
-    for lat, lon in included_points:
-        dist = haversine_km(center_lat, center_lon, lat, lon)
-        if dist > max_dist_km:
-            max_dist_km = dist
+    # Create bounds from all included points
+    bounds = GeoBounds.from_points(included_points)
     
-    # Apply padding - use generous padding to keep markers inside
-    # Minimum 40% padding for step maps to ensure current marker is well within bounds
-    effective_padding = max(0.40, padding_factor)
-    padded_radius_km = max_dist_km * (1.0 + effective_padding)
+    # Apply padding from config to keep markers inside viewport
+    effective_padding = padding_factor
+    bounds = bounds.expand_by_factor(effective_padding)
     
-    # Apply extra pixel-based padding
+    # Apply extra pixel-based padding for marker sizes
     try:
         pad_px = float(extra_padding_px)
     except Exception:
         pad_px = 0.0
     if pad_px > 0 and viewport_width_px > 0:
         pixel_margin_fraction = (2 * pad_px) / viewport_width_px
-        padded_radius_km *= (1.0 + pixel_margin_fraction)
+        bounds = bounds.expand_by_factor(pixel_margin_fraction)
     
-    # Enforce minimum radius (width/2)
-    min_radius_km = min_width_km / 2.0
-    if padded_radius_km < min_radius_km:
-        padded_radius_km = min_radius_km
+    # Enforce minimum width
+    bounds = bounds.expand_to_min_width_km(min_width_km)
     
-    # Compute zoom using radius-based algorithm
-    zoom = _compute_zoom_for_radius_km(
-        padded_radius_km,
-        center_lat,
+    # Expand to target aspect ratio (never shrinks, only expands)
+    bounds = bounds.expand_to_aspect_ratio(aspect_ratio)
+    
+    # Compute zoom using the actual bounds (not radius)
+    # This ensures the rectangular viewport properly contains all points
+    zoom = compute_zoom_for_bounds(
+        bounds,
         viewport_width_px,
         viewport_height_px,
-        aspect_ratio,
     )
     
-    # Create bounds for compatibility
-    bounds = GeoBounds.from_points(included_points)
-    bounds = bounds.expand_by_factor(effective_padding)
-    bounds = bounds.expand_to_aspect_ratio(aspect_ratio)
+    # Use the bounds center for the map center (more accurate than midpoint for wide maps)
+    center_lat, center_lon = bounds.center
     
     return MapViewport(
         center_lat=center_lat,

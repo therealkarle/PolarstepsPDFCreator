@@ -3,6 +3,10 @@
         "f:/AppDevelopment/PolarstepsPDFCreator/.venv/Scripts/python.exe": true,
         "map_style": true,
         ".\\.venv\\Scripts\\python.exe": true,
-        "&": true
+        "&": true,
+        "/^python -c \"from map_viewport import compute_step_viewport, StepLocation; print\\('Import OK'\\); help\\(compute_step_viewport\\)\"$/": {
+            "approve": true,
+            "matchCommandLine": true
+        }
     }
 }

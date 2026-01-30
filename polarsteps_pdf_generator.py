@@ -389,7 +389,7 @@ class MapGenerator:
             - maps.step.aspect_ratio: aspect ratio for step maps
       - maps.step.padding_factor: padding for step maps
       - maps.step.min_width_km: minimum width for step maps
-      - maps.step.max_width_km: maximum width for step maps
+      - maps.step.max_distance_farthest_steps_km: max distance between farthest visible steps
       - maps.step.cluster_distance_km: cluster distance for neighbors
       
     Other supported keys:
@@ -433,11 +433,8 @@ class MapGenerator:
         # Step map settings
         self.step_padding_factor = 0.10
         self.step_min_width_km = 2.0
-        self.step_max_width_km = 100.0
+        self.step_max_distance_farthest_km = 100.0
         self.step_cluster_distance_km = 5.0
-        # Minimum zoom for step maps (clamp computed zoom to this value)
-        # Increase if step maps appear too zoomed-out / low-detail
-        self.step_min_zoom = 13
         # Supersampling render scale for step maps (higher = sharper tiles)
         # 1.0 = normal; 2.0 = render at 2x resolution and downscale in PDF
         self.step_render_scale = 2.0
@@ -1004,12 +1001,12 @@ class MapGenerator:
     def generate_step_map_for_step(self, trip_parser: TripParser, step_index: int, width: int = 0, height: int = 0) -> bytes:
         """Generate a map for a specific step using Geographic Bounding Box approach.
         
-        NEW BOUNDING-BOX SYSTEM (2026):
-        1. Always include current step
-        2. Include immediate prev/next neighbor (n=1) if within max_width_km
-        3. Exception: Include clustered neighbors (within cluster_distance_km)
-        4. If neighbor doesn't fit in max_width_km, exclude it (remove farthest first)
-        5. Apply padding, min_width, and configured aspect ratio
+        NEW DISTANCE-BASED SYSTEM (2026):
+        1. Get current step + immediate prev/next neighbors
+        2. If distance between farthest steps <= max_distance_farthest_steps_km, include all
+        3. Otherwise drop the neighbor farthest from current and re-check
+        4. If remaining neighbor still exceeds threshold, show only current step
+        5. Center map on geographic midpoint of all visible steps
         6. ALWAYS draw path from prev -> current -> next (regardless of viewport bounds)
 
         Args:
@@ -1051,13 +1048,13 @@ class MapGenerator:
         marker_px = max(8, int(round(self.marker_thumb_size * pixel_scale)))
         extra_pad_px = max(6, int(round(marker_px * 0.6)))
 
-        # Compute viewport using new bounding-box system
+        # Compute viewport using distance-based step selection system
         try:
             viewport = compute_step_viewport(
                 current_step=current_step,
                 prev_step=prev_step,
                 next_step=next_step,
-                max_width_km=float(getattr(self, 'step_max_width_km', 100.0)),
+                max_distance_farthest_km=float(getattr(self, 'step_max_distance_farthest_km', 100.0)),
                 min_width_km=float(getattr(self, 'step_min_width_km', 2.0)),
                 cluster_distance_km=float(getattr(self, 'step_cluster_distance_km', 5.0)),
                 padding_factor=float(getattr(self, 'step_padding_factor', 0.10)),
@@ -1067,12 +1064,9 @@ class MapGenerator:
                 extra_padding_px=extra_pad_px,
             )
             zoom = max(0, min(19, viewport.zoom))
-            # Enforce a minimum zoom to avoid excessively zoomed-out step maps
-            min_z = int(getattr(self, 'step_min_zoom', 13))
-            if zoom < min_z:
-                if getattr(self, 'debug_map', False):
-                    print(f"Step {step_index} zoom {zoom} increased to min_zoom {min_z}")
-                zoom = min_z
+            # Note: We no longer enforce min_zoom here because it can cause markers
+            # to be cut off. The viewport calculation already ensures proper fit.
+            # If you want more detail, reduce max_distance_farthest_steps_km instead.
             center = (viewport.center_lon, viewport.center_lat)
             
             if getattr(self, 'debug_map', False):
@@ -3344,16 +3338,9 @@ def render_trip(trip_path: Path, script_dir: Path, config: dict, cache_manager: 
         # Step-specific config
         map_gen.step_padding_factor = float(step_config.get("padding_factor", map_gen.step_padding_factor))
         map_gen.step_min_width_km = float(step_config.get("min_width_km", map_gen.step_min_width_km))
-        map_gen.step_max_width_km = float(step_config.get("max_width_km", map_gen.step_max_width_km))
+        map_gen.step_max_distance_farthest_km = float(step_config.get("max_distance_farthest_steps_km", map_gen.step_max_distance_farthest_km))
         map_gen.step_cluster_distance_km = float(step_config.get("cluster_distance_km", map_gen.step_cluster_distance_km))
-        map_gen.step_min_zoom = int(step_config.get("min_zoom", map_gen.step_min_zoom))
         map_gen.step_render_scale = float(step_config.get("render_scale", map_gen.step_render_scale))
-        
-        # Step map settings
-        map_gen.step_padding_factor = float(step_config.get("padding_factor", 0.10))
-        map_gen.step_min_width_km = float(step_config.get("min_width_km", 2.0))
-        map_gen.step_max_width_km = float(step_config.get("max_width_km", 100.0))
-        map_gen.step_cluster_distance_km = float(step_config.get("cluster_distance_km", 5.0))
         
         # Debug flag
         map_gen.debug_map = bool(config.get("debug_map", False))

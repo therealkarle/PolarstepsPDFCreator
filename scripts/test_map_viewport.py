@@ -233,7 +233,7 @@ def test_compute_step_viewport():
         current_step=current,
         prev_step=prev_step,
         next_step=next_step,
-        max_width_km=100.0,
+        max_distance_farthest_km=100.0,
         min_width_km=2.0,
         cluster_distance_km=5.0,
         padding_factor=0.10,
@@ -242,14 +242,14 @@ def test_compute_step_viewport():
     assert isinstance(viewport, MapViewport)
     assert viewport.zoom >= 0 and viewport.zoom <= 19
     
-    # With max_width_km=100, both neighbors should fit
+    # With max_distance_farthest_km=100, both neighbors should fit
     assert viewport.bounds.width_km() <= 110  # some margin for padding/aspect
     
     print("✓ compute_step_viewport tests passed")
 
 
-def test_step_viewport_max_width_filtering():
-    """Test that neighbors are excluded when they exceed max_width_km."""
+def test_step_viewport_max_distance_filtering():
+    """Test that neighbors are excluded when they exceed max_distance_farthest_km."""
     current = StepLocation(lat=48.0, lon=9.0, step_id="current")
     # Very far neighbor (>500km away)
     far_prev = StepLocation(lat=52.0, lon=9.0, step_id="prev")  # ~440km away
@@ -259,7 +259,7 @@ def test_step_viewport_max_width_filtering():
         current_step=current,
         prev_step=far_prev,
         next_step=close_next,
-        max_width_km=100.0,  # Should exclude far_prev
+        max_distance_farthest_km=100.0,  # Should exclude far_prev
         min_width_km=2.0,
         cluster_distance_km=5.0,
         padding_factor=0.10,
@@ -331,7 +331,7 @@ def run_all_tests():
     test_geobounds_min_width()
     test_compute_overview_viewport()
     test_compute_step_viewport()
-    test_step_viewport_max_width_filtering()
+    test_step_viewport_max_distance_filtering()
     test_get_path_coordinates()
     test_compute_zoom_for_bounds()
     
