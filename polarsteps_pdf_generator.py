@@ -35,7 +35,9 @@ import os
 import sys
 import subprocess
 import shutil
-from collections import deque
+from collections import deque, OrderedDict
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import time
 
 # Root folders for temp output, debug output, and caches
 SCRIPT_DIR = Path(__file__).parent
@@ -426,6 +428,13 @@ class MapGenerator:
         self._tile_cache = {}
         # maximum thumbnail size used for markers
         self.marker_thumb_size = marker_thumb_size
+        # reuse HTTP session for tile/image downloads
+        self._requests_session = requests.Session()
+        # in-memory caches (per run)
+        self._marker_image_cache = OrderedDict()
+        self._marker_image_cache_items = 256
+        self._trip_route_cache = {}
+        self._trip_step_coords_cache = {}
         
         # ========== NEW BOUNDING-BOX CONFIG (2026) ==========
         # These are the primary settings for the new system.
@@ -447,6 +456,98 @@ class MapGenerator:
         # Debug flag
         self.debug_map = False
         
+
+
+    def _cache_get(self, cache: OrderedDict, key):
+        if key in cache:
+            cache.move_to_end(key)
+            return cache[key]
+        return None
+
+    def _cache_set(self, cache: OrderedDict, key, value, max_items: int):
+        if max_items <= 0:
+            return
+        cache[key] = value
+        cache.move_to_end(key)
+        while len(cache) > max_items:
+            cache.popitem(last=False)
+
+    def _http_get(self, url: str, timeout: int = 6):
+        try:
+            return self._requests_session.get(url, timeout=timeout)
+        except Exception:
+            return None
+
+    def _trip_cache_key(self, trip_parser: TripParser) -> str:
+        try:
+            trip_path = getattr(trip_parser, "trip_path", None)
+            if trip_path:
+                return str(Path(trip_path))
+        except Exception:
+            pass
+        return str(id(trip_parser))
+
+    def _get_trip_step_coords(self, trip_parser: TripParser) -> List[Optional[tuple]]:
+        key = self._trip_cache_key(trip_parser)
+        cached = self._trip_step_coords_cache.get(key)
+        if cached is not None and len(cached) == len(trip_parser.steps):
+            return cached
+        coords = [self._extract_lon_lat(step) for step in trip_parser.steps]
+        self._trip_step_coords_cache[key] = coords
+        return coords
+
+    def _get_trip_route_coords(self, trip_parser: TripParser) -> List[tuple]:
+        key = self._trip_cache_key(trip_parser)
+        cached = self._trip_route_cache.get(key)
+        if cached is not None:
+            return cached
+        coords = trip_parser.get_route_coordinates()
+        self._trip_route_cache[key] = coords
+        return coords
+
+    def _load_marker_image(self, path: Path, size: Optional[int] = None) -> Optional[Image.Image]:
+        try:
+            key = (str(path), int(size or 0))
+            cached = self._cache_get(self._marker_image_cache, key)
+            if cached is not None:
+                return cached
+            with Image.open(str(path)) as img:
+                img = img.convert("RGBA")
+                if size and (img.width != size or img.height != size):
+                    img = img.resize((size, size), Image.LANCZOS)
+                img = img.copy()
+            self._cache_set(self._marker_image_cache, key, img, self._marker_image_cache_items)
+            return img
+        except Exception:
+            return None
+
+    def clone(self) -> "MapGenerator":
+        """Create a new MapGenerator with copied settings for parallel rendering."""
+        mg = MapGenerator(
+            width=self.width,
+            height=self.height,
+            marker_thumb_size=self.marker_thumb_size,
+            url_template=self.url_template,
+            label_overlay_url=self.label_overlay_url,
+            label_overlay_opacity=self.label_overlay_opacity,
+        )
+        mg.overview_width = self.overview_width
+        mg.overview_height = self.overview_height
+        mg.step_width = self.step_width
+        mg.step_height = self.step_height
+        mg.overview_aspect_ratio = self.overview_aspect_ratio
+        mg.step_aspect_ratio = self.step_aspect_ratio
+        mg._pixel_scale = self._pixel_scale
+        mg.overview_padding_factor = self.overview_padding_factor
+        mg.overview_min_width_km = self.overview_min_width_km
+        mg.step_padding_factor = self.step_padding_factor
+        mg.step_min_width_km = self.step_min_width_km
+        mg.step_max_distance_farthest_km = self.step_max_distance_farthest_km
+        mg.step_cluster_distance_km = self.step_cluster_distance_km
+        mg.step_render_scale = self.step_render_scale
+        mg.debug_map = self.debug_map
+        mg._marker_image_cache_items = self._marker_image_cache_items
+        return mg
 
 
     @staticmethod
@@ -491,9 +592,10 @@ class MapGenerator:
                     try:
                         tile = self._tile_cache.get(url)
                         if tile is None:
-                            r = requests.get(url, timeout=6)
-                            if r.status_code == 200:
-                                tile = Image.open(io.BytesIO(r.content)).convert("RGBA")
+                            r = self._http_get(url, timeout=6)
+                            if r is not None and r.status_code == 200:
+                                tile_img = Image.open(io.BytesIO(r.content)).convert("RGBA")
+                                tile = tile_img.copy()
                                 self._tile_cache[url] = tile
                     except Exception:
                         tile = None
@@ -595,10 +697,8 @@ class MapGenerator:
                 thumb = marker.get("thumb")
                 if thumb:
                     try:
-                        with Image.open(str(thumb)) as img:
-                            img = img.convert("RGBA")
-                            if marker_px and (img.width != marker_px or img.height != marker_px):
-                                img = img.resize((marker_px, marker_px), Image.LANCZOS)
+                        img = self._load_marker_image(Path(thumb), size=marker_px if marker_px else None)
+                        if img is not None:
                             ox = int(round(x - (img.width / 2.0)))
                             oy = int(round(y - (img.height / 2.0)))
                             base.alpha_composite(img, dest=(ox, oy))
@@ -612,8 +712,8 @@ class MapGenerator:
                 ring_overlay = marker.get("ring_overlay")
                 if ring_overlay:
                     try:
-                        with Image.open(str(ring_overlay)) as img:
-                            img = img.convert("RGBA")
+                        img = self._load_marker_image(Path(ring_overlay))
+                        if img is not None:
                             ox = int(round(x - (img.width / 2.0)))
                             oy = int(round(y - (img.height / 2.0)))
                             base.alpha_composite(img, dest=(ox, oy))
@@ -703,7 +803,7 @@ class MapGenerator:
             return False
         return False
 
-    def _find_neighbor_index(self, trip_parser: TripParser, step_index: int, direction: int) -> Optional[int]:
+    def _find_neighbor_index(self, trip_parser: TripParser, step_index: int, direction: int, coords_cache: Optional[List[Optional[tuple]]] = None) -> Optional[int]:
         """Find the nearest previous/next step that has coordinates.
 
         direction: -1 for previous, +1 for next
@@ -715,7 +815,10 @@ class MapGenerator:
 
         i = step_index + direction
         while 0 <= i < len(trip_parser.steps):
-            coord = self._extract_lon_lat(trip_parser.steps[i])
+            if coords_cache is not None and 0 <= i < len(coords_cache):
+                coord = coords_cache[i]
+            else:
+                coord = self._extract_lon_lat(trip_parser.steps[i])
             if coord:
                 return i
             i += direction
@@ -804,7 +907,9 @@ class MapGenerator:
         """Quickly check whether a tile can be retrieved from the given URL template."""
         try:
             test_url = url_template.format(z=2, x=1, y=1)
-            r = requests.get(test_url, timeout=5)
+            r = self._http_get(test_url, timeout=5)
+            if r is None:
+                return False
             ctype = r.headers.get("content-type", "")
             return r.status_code == 200 and ctype.startswith("image")
         except Exception:
@@ -849,8 +954,8 @@ class MapGenerator:
 
         # Collect step locations for viewport calculation
         step_locations: List[StepLocation] = []
-        for i, step in enumerate(trip_parser.steps):
-            coord = self._extract_lon_lat(step)
+        coords_cache = self._get_trip_step_coords(trip_parser)
+        for i, coord in enumerate(coords_cache):
             if coord:
                 lon, lat = coord
                 step_locations.append(StepLocation(lat=lat, lon=lon, step_id=str(i)))
@@ -884,7 +989,7 @@ class MapGenerator:
             center = None
 
         # Add route line (white only for overview; outline omitted to keep map clean)
-        route_coords = trip_parser.get_route_coordinates()
+        route_coords = self._get_trip_route_coords(trip_parser)
         if len(route_coords) > 1:
             line = Line(route_coords, ROUTE_COLOR, ROUTE_LINE_WIDTH)
             m.add_line(line)
@@ -894,58 +999,47 @@ class MapGenerator:
         markers_to_draw: List[dict] = []
         for i, step in enumerate(trip_parser.steps):
             step_data = step["data"]
-            location = step_data.get("location", {})
-
-            if location:
-                lat = location.get("lat") or location.get("latitude") or location.get("Latitude")
-                lon = location.get("lon") or location.get("lng") or location.get("longitude") or location.get("Longitude")
-
-                try:
-                    lat = float(lat) if lat is not None else None
-                    lon = float(lon) if lon is not None else None
-                except Exception:
-                    lat = None
-                    lon = None
-
-                if lat is not None and lon is not None:
-                    # create thumbnail (white ring); prefer IconMarker when available
-                    # marker_px is absolute pixels (configured by marker_thumb_size) scaled by render pixel scale
-                    thumb = self._get_step_thumbnail(step, size=marker_px, ring_color=(255,255,255,230))
-                    if thumb and (IconMarker is not None or draw_markers_on_top):
-                        if draw_markers_on_top:
-                            markers_to_draw.append({
-                                "lon": lon,
-                                "lat": lat,
-                                "thumb": thumb,
-                                "marker_px": marker_px,
-                                "marker_radius": max(4, int(round(marker_px * 0.3))),
-                                "color": MARKER_COLOR_START if i == 0 else MARKER_COLOR_STEP,
-                            })
-                            continue
-                        else:
-                            off_x = int(marker_px / 2)
-                            off_y = int(marker_px / 2)
-                            try:
-                                m.add_marker(IconMarker((lon, lat), str(thumb), off_x, off_y))
-                                continue
-                            except Exception:
-                                pass
-
-                    # fallback to circle marker (no red in overview map)
-                    color = MARKER_COLOR_START if i == 0 else MARKER_COLOR_STEP
-                    # Use an absolute radius proportional to thumbnail size
-                    marker_radius = max(4, int(round(marker_px * 0.3)))
+            coord = coords_cache[i] if i < len(coords_cache) else self._extract_lon_lat(step)
+            if coord:
+                lon, lat = coord
+                # create thumbnail (white ring); prefer IconMarker when available
+                # marker_px is absolute pixels (configured by marker_thumb_size) scaled by render pixel scale
+                thumb = self._get_step_thumbnail(step, size=marker_px, ring_color=(255,255,255,230))
+                if thumb and (IconMarker is not None or draw_markers_on_top):
                     if draw_markers_on_top:
                         markers_to_draw.append({
                             "lon": lon,
                             "lat": lat,
-                            "thumb": None,
+                            "thumb": thumb,
                             "marker_px": marker_px,
-                            "marker_radius": marker_radius,
-                            "color": color,
+                            "marker_radius": max(4, int(round(marker_px * 0.3))),
+                            "color": MARKER_COLOR_START if i == 0 else MARKER_COLOR_STEP,
                         })
+                        continue
                     else:
-                        m.add_marker(CircleMarker((lon, lat), color, marker_radius))
+                        off_x = int(marker_px / 2)
+                        off_y = int(marker_px / 2)
+                        try:
+                            m.add_marker(IconMarker((lon, lat), str(thumb), off_x, off_y))
+                            continue
+                        except Exception:
+                            pass
+
+                # fallback to circle marker (no red in overview map)
+                color = MARKER_COLOR_START if i == 0 else MARKER_COLOR_STEP
+                # Use an absolute radius proportional to thumbnail size
+                marker_radius = max(4, int(round(marker_px * 0.3)))
+                if draw_markers_on_top:
+                    markers_to_draw.append({
+                        "lon": lon,
+                        "lat": lat,
+                        "thumb": None,
+                        "marker_px": marker_px,
+                        "marker_radius": marker_radius,
+                        "color": color,
+                    })
+                else:
+                    m.add_marker(CircleMarker((lon, lat), color, marker_radius))
 
         # Render map
         if center is not None:
@@ -1055,8 +1149,8 @@ class MapGenerator:
             try:
                 url = str(photo_path)
                 if url.startswith("http://") or url.startswith("https://"):
-                    r = requests.get(url, timeout=10)
-                    if r.status_code == 200:
+                    r = self._http_get(url, timeout=10)
+                    if r is not None and r.status_code == 200:
                         cache_dir = get_cache_dir("map_marker")
                         tmp_path = cache_dir / (hashlib.sha1(url.encode("utf-8")).hexdigest() + ".jpg")
                         tmp_path.write_bytes(r.content)
@@ -1163,7 +1257,8 @@ class MapGenerator:
         h = height or getattr(self, "step_height", self.height)
 
         # Extract current step coordinates
-        current_coord = self._extract_lon_lat(trip_parser.steps[step_index]) if (0 <= step_index < len(trip_parser.steps)) else None
+        coords_cache = self._get_trip_step_coords(trip_parser)
+        current_coord = coords_cache[step_index] if (0 <= step_index < len(coords_cache)) else None
         if not current_coord:
             m = self._create_map(w, h)
             image = m.render()
@@ -1173,10 +1268,10 @@ class MapGenerator:
             return img_bytes.getvalue()
 
         # Get immediate neighbors (n=1 only; skip steps without coordinates)
-        prev_idx = self._find_neighbor_index(trip_parser, step_index, -1)
-        next_idx = self._find_neighbor_index(trip_parser, step_index, +1)
-        prev_coord = self._extract_lon_lat(trip_parser.steps[prev_idx]) if prev_idx is not None else None
-        next_coord = self._extract_lon_lat(trip_parser.steps[next_idx]) if next_idx is not None else None
+        prev_idx = self._find_neighbor_index(trip_parser, step_index, -1, coords_cache=coords_cache)
+        next_idx = self._find_neighbor_index(trip_parser, step_index, +1, coords_cache=coords_cache)
+        prev_coord = coords_cache[prev_idx] if prev_idx is not None else None
+        next_coord = coords_cache[next_idx] if next_idx is not None else None
 
         # Create StepLocation objects for viewport calculation
         current_step = StepLocation(lat=current_coord[1], lon=current_coord[0], step_id=str(step_index))
@@ -1223,7 +1318,7 @@ class MapGenerator:
 
         # ALWAYS draw route line for context (prev -> current -> next)
         # This is independent of whether neighbors are in viewport bounds
-        route_coords = trip_parser.get_route_coordinates()
+        route_coords = self._get_trip_route_coords(trip_parser)
         if len(route_coords) > 1:
             outline = Line(route_coords, ROUTE_OUTLINE_COLOR, ROUTE_OUTLINE_WIDTH)
             m.add_line(outline)
@@ -1240,7 +1335,7 @@ class MapGenerator:
         
         for i in draw_order:
             st = trip_parser.steps[i]
-            coord = self._extract_lon_lat(st)
+            coord = coords_cache[i] if i < len(coords_cache) else self._extract_lon_lat(st)
             if not coord:
                 continue
             lon, lat = coord
@@ -1376,13 +1471,66 @@ class HtmlPDFBuilder:
         # Layout options
         self.max_photos_per_step = int(self.config.get("max_photos_per_step", 6))
         self.photo_max_width = int(self.config.get("html_photo_max_width", 1200))
+        self._memory_cache_items = int(self.config.get("html_memory_cache_items", 256))
+        self._image_data_cache = OrderedDict()
+        self._map_data_cache = OrderedDict()
+        self._photo_workers = int(self.config.get("html_photo_workers", 4))
+        try:
+            default_map_workers = max(1, min(4, int(os.cpu_count() or 4)))
+        except Exception:
+            default_map_workers = 2
+        self._map_workers = int(self.config.get("html_map_workers", default_map_workers))
+        self._map_thread_local = threading.local()
+
+    def _cache_get(self, cache: OrderedDict, key):
+        if key in cache:
+            cache.move_to_end(key)
+            return cache[key]
+        return None
+
+    def _cache_set(self, cache: OrderedDict, key, value):
+        if self._memory_cache_items <= 0:
+            return
+        cache[key] = value
+        cache.move_to_end(key)
+        while len(cache) > self._memory_cache_items:
+            cache.popitem(last=False)
 
     def _image_bytes_to_data_url(self, data: bytes, mime: str = "image/png") -> str:
         b64 = base64.b64encode(data).decode("ascii")
         return f"data:{mime};base64,{b64}"
 
+    def _get_thread_map_generator(self) -> MapGenerator:
+        mg = getattr(self._map_thread_local, "map_generator", None)
+        if mg is None:
+            mg = self.map_generator.clone()
+            self._map_thread_local.map_generator = mg
+        return mg
+
+    def _map_bytes_to_data_url(self, data: bytes, mime: str = "image/png") -> str:
+        try:
+            key = (hashlib.sha1(data).hexdigest(), mime)
+            cached = self._cache_get(self._map_data_cache, key)
+            if cached is not None:
+                return cached
+        except Exception:
+            key = None
+        url = self._image_bytes_to_data_url(data, mime=mime)
+        if key is not None:
+            self._cache_set(self._map_data_cache, key, url)
+        return url
+
     def _image_file_to_data_url(self, path: Path) -> Optional[str]:
         try:
+            key = None
+            try:
+                stat = path.stat()
+                key = (str(path), int(stat.st_mtime_ns), self.photo_max_width)
+                cached = self._cache_get(self._image_data_cache, key)
+                if cached is not None:
+                    return cached
+            except Exception:
+                key = None
             with Image.open(path) as img:
                 img = img.convert("RGB")
                 if self.photo_max_width > 0:
@@ -1393,7 +1541,10 @@ class HtmlPDFBuilder:
                 buf = io.BytesIO()
                 img.save(buf, format="JPEG", quality=88)
                 buf.seek(0)
-                return self._image_bytes_to_data_url(buf.read(), mime="image/jpeg")
+                url = self._image_bytes_to_data_url(buf.read(), mime="image/jpeg")
+                if key is not None:
+                    self._cache_set(self._image_data_cache, key, url)
+                return url
         except Exception:
             return None
 
@@ -1485,13 +1636,66 @@ class HtmlPDFBuilder:
 
         # Title page overview map
         overview_img = ""
-        try:
-            print("  Rendering title page and overview map...")
-            map_bytes = self.map_generator.generate_overview_map(self.trip_parser)
-            if map_bytes:
-                overview_img = f"<img class=\"map\" src=\"{self._image_bytes_to_data_url(map_bytes)}\"/>"
-        except Exception:
-            overview_img = ""
+        step_maps: dict = {}
+        if step_count > 0 and self._map_workers > 1:
+            step_width = int(getattr(self.map_generator, "step_width", self.map_generator.width))
+            step_height = int(getattr(self.map_generator, "step_height", self.map_generator.height))
+            render_scale = float(getattr(self.map_generator, "step_render_scale", 1.0))
+            render_scale = max(1.0, min(4.0, render_scale))
+            width_px = int(step_width * render_scale)
+            height_px = int(step_height * render_scale)
+            workers = max(1, min(int(self._map_workers), step_count + 1))
+
+            def _render_overview_map():
+                try:
+                    print("  Rendering title page and overview map...")
+                    t0 = time.perf_counter()
+                    mg = self._get_thread_map_generator()
+                    data = mg.generate_overview_map(self.trip_parser)
+                    dt = time.perf_counter() - t0
+                    print(f"  Overview map done in {dt:.1f}s")
+                    return data
+                except Exception:
+                    return None
+
+            def _render_step_map(idx: int):
+                try:
+                    mg = self._get_thread_map_generator()
+                    data = mg.generate_step_map_for_step(
+                        self.trip_parser,
+                        idx,
+                        width=width_px,
+                        height=height_px,
+                    )
+                    return (idx, data)
+                except Exception:
+                    return (idx, None)
+
+            try:
+                with ThreadPoolExecutor(max_workers=workers) as executor:
+                    overview_future = executor.submit(_render_overview_map)
+                    futures = [executor.submit(_render_step_map, idx) for idx in range(step_count)]
+                    for future in as_completed(futures):
+                        idx, data = future.result()
+                        if data:
+                            step_maps[idx] = data
+                    map_bytes = overview_future.result()
+                    if map_bytes:
+                        overview_img = f"<img class=\"map\" src=\"{self._map_bytes_to_data_url(map_bytes)}\"/>"
+            except Exception:
+                step_maps = {}
+                overview_img = ""
+        else:
+            try:
+                print("  Rendering title page and overview map...")
+                t0 = time.perf_counter()
+                map_bytes = self.map_generator.generate_overview_map(self.trip_parser)
+                dt = time.perf_counter() - t0
+                print(f"  Overview map done in {dt:.1f}s")
+                if map_bytes:
+                    overview_img = f"<img class=\"map\" src=\"{self._map_bytes_to_data_url(map_bytes)}\"/>"
+            except Exception:
+                overview_img = ""
 
         html_parts = [
             "<!doctype html>",
@@ -1521,6 +1725,7 @@ class HtmlPDFBuilder:
             overview_img,
             "<div class=\"page-break\"></div>",
         ]
+
 
         for i, step in enumerate(self.trip_parser.steps):
             step_number = i + 1
@@ -1558,18 +1763,20 @@ class HtmlPDFBuilder:
 
             step_map_html = ""
             try:
-                step_width = int(getattr(self.map_generator, "step_width", self.map_generator.width))
-                step_height = int(getattr(self.map_generator, "step_height", self.map_generator.height))
-                render_scale = float(getattr(self.map_generator, "step_render_scale", 1.0))
-                render_scale = max(1.0, min(4.0, render_scale))
-                map_bytes = self.map_generator.generate_step_map_for_step(
-                    self.trip_parser,
-                    step_number - 1,
-                    width=int(step_width * render_scale),
-                    height=int(step_height * render_scale)
-                )
+                map_bytes = step_maps.get(step_number - 1)
+                if map_bytes is None:
+                    step_width = int(getattr(self.map_generator, "step_width", self.map_generator.width))
+                    step_height = int(getattr(self.map_generator, "step_height", self.map_generator.height))
+                    render_scale = float(getattr(self.map_generator, "step_render_scale", 1.0))
+                    render_scale = max(1.0, min(4.0, render_scale))
+                    map_bytes = self.map_generator.generate_step_map_for_step(
+                        self.trip_parser,
+                        step_number - 1,
+                        width=int(step_width * render_scale),
+                        height=int(step_height * render_scale)
+                    )
                 if map_bytes:
-                    step_map_html = f"<img class=\"map\" src=\"{self._image_bytes_to_data_url(map_bytes)}\"/>"
+                    step_map_html = f"<img class=\"map\" src=\"{self._map_bytes_to_data_url(map_bytes)}\"/>"
             except Exception:
                 step_map_html = ""
 
@@ -1580,13 +1787,31 @@ class HtmlPDFBuilder:
             photo_html = ""
             if photos:
                 items = []
-                for p in photos[: self.max_photos_per_step]:
+                photo_paths = [Path(p) for p in photos[: self.max_photos_per_step]]
+                workers = max(1, min(int(self._photo_workers), len(photo_paths)))
+                if workers > 1:
                     try:
-                        url = self._image_file_to_data_url(Path(p))
-                        if url:
-                            items.append(f"<img src=\"{url}\"/>")
+                        with ThreadPoolExecutor(max_workers=workers) as executor:
+                            urls = list(executor.map(self._image_file_to_data_url, photo_paths))
+                        for url in urls:
+                            if url:
+                                items.append(f"<img src=\"{url}\"/>")
                     except Exception:
-                        continue
+                        for p in photo_paths:
+                            try:
+                                url = self._image_file_to_data_url(p)
+                                if url:
+                                    items.append(f"<img src=\"{url}\"/>")
+                            except Exception:
+                                continue
+                else:
+                    for p in photo_paths:
+                        try:
+                            url = self._image_file_to_data_url(p)
+                            if url:
+                                items.append(f"<img src=\"{url}\"/>")
+                        except Exception:
+                            continue
                 if items:
                     photo_html = f"<div class=\"photo-grid\">{''.join(items)}</div>"
 
@@ -1622,18 +1847,23 @@ class HtmlPDFBuilder:
         if sync_playwright is None:
             raise RuntimeError("Playwright is not installed. Install it and run 'playwright install' to use the HTML renderer.")
 
+        t0 = time.perf_counter()
         html_doc = self._build_html()
+        t1 = time.perf_counter()
+        print(f"  HTML build done in {t1 - t0:.1f}s")
 
         with sync_playwright() as p:
             browser = p.chromium.launch()
             page = browser.new_page()
             page.set_content(html_doc, wait_until="load")
+            t_pdf = time.perf_counter()
             page.pdf(
                 path=str(self.output_path),
                 format="A4",
                 margin={"top": "15mm", "bottom": "15mm", "left": "15mm", "right": "15mm"},
                 print_background=True,
             )
+            print(f"  PDF render done in {time.perf_counter() - t_pdf:.1f}s")
             browser.close()
 
         # Optionally open the rendered PDF file after creation (config key: open_pdf_after_render)
@@ -1644,6 +1874,7 @@ class HtmlPDFBuilder:
 
         if open_after:
             try:
+                t_open = time.perf_counter()
                 if os.name == "nt":
                     # Windows
                     os.startfile(str(self.output_path))
@@ -1652,6 +1883,7 @@ class HtmlPDFBuilder:
                 else:
                     # Linux/Unix
                     subprocess.run(["xdg-open", str(self.output_path)], check=False)
+                print(f"  Open PDF command done in {time.perf_counter() - t_open:.1f}s")
             except Exception as e:
                 print(f"  Warning: Could not open PDF: {e}")
 
