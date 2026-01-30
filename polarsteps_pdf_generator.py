@@ -37,10 +37,11 @@ import subprocess
 import shutil
 from collections import deque
 
-# Root folders for temp output and caches
+# Root folders for temp output, debug output, and caches
 SCRIPT_DIR = Path(__file__).parent
 CACHE_ROOT = SCRIPT_DIR / "cache"
 TEMP_ROOT = SCRIPT_DIR / "temp"
+DEBUG_ROOT = SCRIPT_DIR / "debug"
 
 
 def _ensure_dir(path: Path) -> Path:
@@ -54,6 +55,10 @@ def get_cache_dir(*parts: str) -> Path:
 
 def get_temp_dir(*parts: str) -> Path:
     return _ensure_dir(TEMP_ROOT.joinpath(*parts))
+
+
+def get_debug_dir(*parts: str) -> Path:
+    return _ensure_dir(DEBUG_ROOT.joinpath(*parts))
 
 
 def _migrate_legacy_cache_paths():
@@ -577,8 +582,8 @@ class MapGenerator:
             return False
         return False
 
-    def _find_distinct_neighbor_index(self, trip_parser: TripParser, step_index: int, direction: int) -> Optional[int]:
-        """Find previous/next step index with coords outside cluster radius.
+    def _find_neighbor_index(self, trip_parser: TripParser, step_index: int, direction: int) -> Optional[int]:
+        """Find the nearest previous/next step that has coordinates.
 
         direction: -1 for previous, +1 for next
         """
@@ -587,27 +592,14 @@ class MapGenerator:
         if not (0 <= step_index < len(trip_parser.steps)):
             return None
 
-        current = self._extract_lon_lat(trip_parser.steps[step_index])
-        if not current:
-            return None
-
-        best_fallback = None
-        cur_lon, cur_lat = current
         i = step_index + direction
         while 0 <= i < len(trip_parser.steps):
             coord = self._extract_lon_lat(trip_parser.steps[i])
             if coord:
-                best_fallback = i
-                lon, lat = coord
-                try:
-                    dist = self._haversine_km(cur_lon, cur_lat, lon, lat)
-                except Exception:
-                    dist = None
-                if dist is not None and dist >= float(getattr(self, 'step_cluster_distance_km', 5.0)):
-                    return i
+                return i
             i += direction
 
-        return best_fallback
+        return None
 
     def _zoom_for_horizontal_km(self, width_km: float, center_lat: float, width_px: int, *, prefer: str = "at_least") -> int:
         """Compute an integer zoom that targets a horizontal map width in km.
@@ -1032,9 +1024,9 @@ class MapGenerator:
             img_bytes.seek(0)
             return img_bytes.getvalue()
 
-        # Get immediate neighbors (n=1 only, but considering clusters)
-        prev_idx = self._find_distinct_neighbor_index(trip_parser, step_index, -1)
-        next_idx = self._find_distinct_neighbor_index(trip_parser, step_index, +1)
+        # Get immediate neighbors (n=1 only; skip steps without coordinates)
+        prev_idx = self._find_neighbor_index(trip_parser, step_index, -1)
+        next_idx = self._find_neighbor_index(trip_parser, step_index, +1)
         prev_coord = self._extract_lon_lat(trip_parser.steps[prev_idx]) if prev_idx is not None else None
         next_coord = self._extract_lon_lat(trip_parser.steps[next_idx]) if next_idx is not None else None
 
@@ -1277,6 +1269,8 @@ class HtmlPDFBuilder:
         total_km = self.trip_parser.get_total_km()
         step_count = len(self.trip_parser.steps)
 
+
+
         date_str = ""
         if start_date and end_date:
             date_str = f"{start_date.strftime('%d.%m.%Y')} - {end_date.strftime('%d.%m.%Y')}"
@@ -1288,6 +1282,7 @@ class HtmlPDFBuilder:
         # Title page overview map
         overview_img = ""
         try:
+            print("  Rendering title page and overview map...")
             map_bytes = self.map_generator.generate_overview_map(self.trip_parser)
             if map_bytes:
                 overview_img = f"<img class=\"map\" src=\"{self._image_bytes_to_data_url(map_bytes)}\"/>"
@@ -1331,6 +1326,8 @@ class HtmlPDFBuilder:
 
             display_name = step_data.get("display_name", f"Step {step_number}")
             title_text = f"{step_number}. {display_name}"
+
+            print(f"  Rendering step {step_number}/{step_count}: {display_name}")
 
             location = step_data.get("location", {}) if isinstance(step_data, dict) else {}
             location_name = location.get("name", "") if isinstance(location, dict) else ""
@@ -1933,7 +1930,7 @@ class PDFBuilder:
             map_bytes = self.map_generator.generate_overview_map(self.trip_parser)
             if getattr(self.map_generator, 'debug_map', False):
                 try:
-                    tmp = get_temp_dir() / f"debug_overview_{self.trip_parser.get_trip_name().replace(' ', '_')}.png"
+                    tmp = get_debug_dir() / f"debug_overview_{self.trip_parser.get_trip_name().replace(' ', '_')}.png"
                     tmp.write_bytes(map_bytes)
                     print(f"Debug: wrote overview image to {tmp} ({len(map_bytes)} bytes)")
                 except Exception:
@@ -2277,7 +2274,7 @@ class PDFBuilder:
             )
             if getattr(self.map_generator, 'debug_map', False):
                 try:
-                    tmp = Path.cwd() / f"debug_step_{step_number}_{self.trip_parser.get_trip_name().replace(' ', '_')}.png"
+                    tmp = get_debug_dir() / f"debug_step_{step_number}_{self.trip_parser.get_trip_name().replace(' ', '_')}.png"
                     tmp.write_bytes(map_bytes)
                     print(f"Debug: wrote step image to {tmp} ({len(map_bytes)} bytes)")
                 except Exception:

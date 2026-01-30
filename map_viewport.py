@@ -586,20 +586,42 @@ def compute_step_viewport(
             next_step.lat, next_step.lon
         )
     
-    # Determine which steps to include based on farthest distance threshold
+    # Determine which steps to include based on a horizontal max distance
+    # (from config) and a derived vertical max distance from the aspect ratio.
+    # The horizontal limit is the configured value; vertical limit is scaled
+    # by the map's aspect ratio so tall spans are constrained appropriately.
+    horizontal_limit_km = max_distance_farthest_km
+    vertical_limit_km = max_distance_farthest_km / max(0.1, aspect_ratio)
+
+    def _horizontal_km(a: StepLocation, b: StepLocation) -> float:
+        # lon_span expects west->east ordering. Compute the minimal span in
+        # either direction to handle arbitrary point ordering.
+        span_ab = lon_span(a.lon, b.lon)
+        span_ba = lon_span(b.lon, a.lon)
+        lon_deg = min(span_ab, span_ba)
+        mid_lat = (a.lat + b.lat) / 2.0
+        return deg_lon_to_km(lon_deg, mid_lat)
+
+    def _within_limits(horiz_km: float, vert_km: float) -> bool:
+        return (horiz_km <= horizontal_limit_km) and (vert_km <= vertical_limit_km)
     include_prev = False
     include_next = False
     
     if prev_step and next_step:
         # Both neighbors exist - check if all three fit
-        # Farthest distance is max of: prev↔next, prev↔current, current↔next
-        farthest_dist = max(
-            prev_next_distance or 0,
-            prev_distance or 0,
-            next_distance or 0
-        )
+        # Farthest horizontal span among the same pairs
+        horiz_prev_next = _horizontal_km(prev_step, next_step)
+        horiz_prev_current = _horizontal_km(prev_step, current_step)
+        horiz_current_next = _horizontal_km(current_step, next_step)
+        farthest_horiz = max(horiz_prev_next, horiz_prev_current, horiz_current_next)
+
+        # Farthest vertical span among the same pairs
+        vert_prev_next = abs(prev_step.lat - next_step.lat) * 111.0
+        vert_prev_current = abs(prev_step.lat - current_step.lat) * 111.0
+        vert_current_next = abs(current_step.lat - next_step.lat) * 111.0
+        farthest_vert = max(vert_prev_next, vert_prev_current, vert_current_next)
         
-        if farthest_dist <= max_distance_farthest_km:
+        if _within_limits(farthest_horiz, farthest_vert):
             # All three fit
             include_prev = True
             include_next = True
@@ -607,23 +629,35 @@ def compute_step_viewport(
             # Drop the neighbor farthest from current
             if (prev_distance or 0) >= (next_distance or 0):
                 # prev is farther - drop it, check if next fits alone
-                if (next_distance or 0) <= max_distance_farthest_km:
+                if _within_limits(
+                    _horizontal_km(current_step, next_step),
+                    abs(current_step.lat - next_step.lat) * 111.0
+                ):
                     include_next = True
                 # else: only current shown
             else:
                 # next is farther - drop it, check if prev fits alone
-                if (prev_distance or 0) <= max_distance_farthest_km:
+                if _within_limits(
+                    _horizontal_km(current_step, prev_step),
+                    abs(current_step.lat - prev_step.lat) * 111.0
+                ):
                     include_prev = True
                 # else: only current shown
     
     elif prev_step:
         # Only prev neighbor exists (current is last step)
-        if (prev_distance or 0) <= max_distance_farthest_km:
+        if _within_limits(
+            _horizontal_km(current_step, prev_step),
+            abs(current_step.lat - prev_step.lat) * 111.0
+        ):
             include_prev = True
     
     elif next_step:
         # Only next neighbor exists (current is first step)
-        if (next_distance or 0) <= max_distance_farthest_km:
+        if _within_limits(
+            _horizontal_km(current_step, next_step),
+            abs(current_step.lat - next_step.lat) * 111.0
+        ):
             include_next = True
     
     # Build list of included points
@@ -645,9 +679,20 @@ def compute_step_viewport(
     # Create bounds from all included points
     bounds = GeoBounds.from_points(included_points)
     
-    # Apply padding from config to keep markers inside viewport
-    effective_padding = padding_factor
-    bounds = bounds.expand_by_factor(effective_padding)
+    # Apply padding from config to keep markers inside viewport.
+    # Horizontal padding uses the configured factor; vertical padding is scaled
+    # by aspect ratio so wide maps don't get excessive vertical buffer.
+    horizontal_padding = padding_factor
+    vertical_padding = padding_factor / max(0.1, aspect_ratio)
+
+    lat_expand = bounds.lat_span_deg * vertical_padding
+    lon_expand = bounds.lon_span_deg * horizontal_padding
+    new_lat_south = clamp_lat(bounds.lat_south - lat_expand)
+    new_lat_north = clamp_lat(bounds.lat_north + lat_expand)
+    new_lon_west, new_lon_east = expand_lon_bounds(
+        bounds.lon_west, bounds.lon_east, lon_expand
+    )
+    bounds = GeoBounds(new_lat_south, new_lat_north, new_lon_west, new_lon_east)
     
     # Apply extra pixel-based padding for marker sizes
     try:

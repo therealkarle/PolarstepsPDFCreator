@@ -60,12 +60,17 @@ vertical_resolution_px = 360
 aspect_ratio = "32:9"
 # Padding factor around included steps
 # Recommended range: 0.02 - 0.15 (smaller = tighter, larger = more margin)
+# Vertical padding is scaled by aspect ratio:
+#   vertical_padding = padding_factor / aspect_ratio
 padding_factor = 0.05
 # Minimum map width in km (prevents over-zoom on single points)
 min_width_km = 12.0
-# Maximum distance between farthest visible steps in km.
+# Maximum HORIZONTAL distance between farthest visible steps in km.
 # If prev and next neighbors exceed this threshold, the farthest from current is dropped.
 # If remaining neighbor still exceeds threshold, only current step is shown.
+# Vertical distance is derived from aspect ratio:
+#   vertical_limit_km = max_distance_farthest_steps_km / aspect_ratio
+# This prevents overly tall spans when horizontal coverage is high.
 max_distance_farthest_steps_km = 400.0
 # Cluster distance: if a neighbor is within this distance, include it
 # (used to group nearby steps together)

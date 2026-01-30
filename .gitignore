@@ -11,6 +11,7 @@ venv/
 __pycache__/
 cache/
 temp/
+debug/
 .emoji_cache/
 .map_marker_cache/
 

@@ -7,6 +7,10 @@
         "/^python -c \"from map_viewport import compute_step_viewport, StepLocation; print\\('Import OK'\\); help\\(compute_step_viewport\\)\"$/": {
             "approve": true,
             "matchCommandLine": true
+        },
+        "/^New-Item -ItemType Directory -Path \"F:\\\\AppDevelopment\\\\PolarstepsPDFCreator\\\\debug\" -Force \\| Out-Null; Get-ChildItem -Path \"F:\\\\AppDevelopment\\\\PolarstepsPDFCreator\" -Filter \"debug_\\*\\.png\" \\| ForEach-Object \\{ Move-Item -LiteralPath \\$_\\.FullName -Destination \"F:\\\\AppDevelopment\\\\PolarstepsPDFCreator\\\\debug\" -Force \\}$/": {
+            "approve": true,
+            "matchCommandLine": true
         }
     }
 }
