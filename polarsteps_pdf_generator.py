@@ -182,21 +182,48 @@ class TripParser:
                     data["description"] = _clean_text(data.get("description", ""))
                     data["display_name"] = _clean_text(data.get("display_name", data.get("name", ""))) or data.get("name")
 
-                # Attempt to find a matching local folder by slug/display_slug/display_name
+                # Attempt to find a matching local folder by step id + location/slug, then fallback matches
                 photos = []
                 videos = []
+                step_id = data.get("id") if isinstance(data, dict) else None
+                if step_id is not None:
+                    step_id = str(step_id)
                 slug = (data.get("slug") or data.get("display_slug") or "").lower()
                 display = (data.get("display_name") or "").lower().replace(" ", "-")
+                loc_name = ""
+                if isinstance(data, dict):
+                    loc = data.get("location")
+                    if isinstance(loc, dict):
+                        loc_name = (loc.get("name") or "").lower().replace(" ", "-")
+
+                def _folder_token(value: str) -> str:
+                    return "".join(ch if (ch.isalnum() or ch in ("-", "_")) else "-" for ch in value).strip("-")
+
+                expected_names = set()
+                if step_id:
+                    for base in (slug, display, loc_name):
+                        if base:
+                            expected_names.add(f"{_folder_token(base)}_{step_id}")
 
                 candidate = None
                 for c in trip_children:
                     name = c.name.lower()
-                    if slug and slug in name:
+                    if expected_names and name in expected_names:
                         candidate = c
                         break
-                    if display and display in name:
+                    if step_id and (name.endswith(f"_{step_id}") or f"_{step_id}_" in name or name == step_id):
                         candidate = c
                         break
+                # Only fall back to slug/display matching if step has no ID (legacy data)
+                if not candidate and not step_id:
+                    for c in trip_children:
+                        name = c.name.lower()
+                        if slug and slug in name:
+                            candidate = c
+                            break
+                        if display and display in name:
+                            candidate = c
+                            break
                 # If we found a folder, look for photos/videos inside
                 if candidate:
                     photos_dir = candidate / "photos"
