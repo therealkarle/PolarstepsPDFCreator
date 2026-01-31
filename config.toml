@@ -15,6 +15,8 @@ emoji_scale = 1.2
 safety_margin_mm = 12
 # Maximum number of photos to display per step page
 max_photos_per_step = 6
+# Include an appendix with undisplayed step photos and all video links
+appendix_show_undisplayed_media = true
 # Photo wall layout: number of columns in the masonry grid
 photo_wall_columns = 3
 # Gap between photos in the wall (pixels/points)

@@ -6,7 +6,7 @@ Generates beautiful PDF travel journals from downloaded Polarsteps data.
 Features:
 - Overview map with route and step markers (first photo per step)
 - Per-step pages with location map, weather, description, and photo grid
-- Compact video link collection per step
+- Appendix with undisplayed step photos and video links
 - ESRI World Imagery satellite tiles
 """
 import io
@@ -387,18 +387,8 @@ EMOJI_PATTERN = re.compile(
     flags=re.UNICODE
 )
 
-# ReportLab: page sizes, units, styles and flowables
-from reportlab.lib.pagesizes import A4
-from reportlab.lib.units import mm
-from reportlab.lib.colors import HexColor
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_JUSTIFY
-from reportlab.platypus import Paragraph, Image as RLImage, Table, TableStyle, Spacer, SimpleDocTemplate, PageBreak, KeepTogether, ListFlowable, ListItem
-from reportlab.pdfbase import pdfmetrics
-from reportlab.pdfbase.ttfonts import TTFont
-
 # Pillow (PIL) for image processing
-from PIL import Image, ImageDraw, ImageFont, ImageOps
+from PIL import Image, ImageDraw, ImageOps
 
 
 class MapGenerator:
@@ -1497,6 +1487,7 @@ class HtmlPDFBuilder:
 
         # Layout options
         self.max_photos_per_step = int(self.config.get("max_photos_per_step", 6))
+        self.appendix_show_undisplayed_media = bool(self.config.get("appendix_show_undisplayed_media", True))
         self.photo_max_width = int(self.config.get("html_photo_max_width", 1200))
         self._memory_cache_items = int(self.config.get("html_memory_cache_items", 256))
         self._image_data_cache = OrderedDict()
@@ -1597,6 +1588,19 @@ class HtmlPDFBuilder:
         except Exception:
             return f"{label}"
 
+    def _linkify(self, text: str) -> str:
+        """Convert URLs in text to clickable anchor tags (text must already be HTML-escaped)."""
+        # Pattern to match URLs (http, https, www)
+        url_pattern = r'(https?://[^\s<>"]+|www\.[^\s<>"]+)'
+        
+        def replace_url(match):
+            url = match.group(1)
+            # Add http:// prefix for www. links
+            href = url if url.startswith('http') else f'http://{url}'
+            return f'<a class="link" href="{href}">{url}</a>'
+        
+        return re.sub(url_pattern, replace_url, text)
+
     def _build_description_html(self, text: str) -> str:
         if not text:
             return ""
@@ -1636,14 +1640,47 @@ class HtmlPDFBuilder:
         for kind, data in blocks:
             if kind == "para":
                 safe = self._escape(data).replace("\n", "<br/>")
+                safe = self._linkify(safe)
                 parts.append(f"<p class=\"step-desc\">{safe}</p>")
             else:
                 items_html = "".join(
-                    f"<li>{self._escape(item)}</li>" for item in data
+                    f"<li>{self._linkify(self._escape(item))}</li>" for item in data
                 )
                 parts.append(f"<ul class=\"step-list\">{items_html}</ul>")
 
         return "\n".join(parts)
+
+    def _build_photo_grid_html(self, photo_paths: List[Path]) -> str:
+        if not photo_paths:
+            return ""
+        items = []
+        workers = max(1, min(int(self._photo_workers), len(photo_paths)))
+        if workers > 1:
+            try:
+                with ThreadPoolExecutor(max_workers=workers) as executor:
+                    urls = list(executor.map(self._image_file_to_data_url, photo_paths))
+                for url in urls:
+                    if url:
+                        items.append(f"<img src=\"{url}\"/>")
+            except Exception:
+                for p in photo_paths:
+                    try:
+                        url = self._image_file_to_data_url(p)
+                        if url:
+                            items.append(f"<img src=\"{url}\"/>")
+                    except Exception:
+                        continue
+        else:
+            for p in photo_paths:
+                try:
+                    url = self._image_file_to_data_url(p)
+                    if url:
+                        items.append(f"<img src=\"{url}\"/>")
+                except Exception:
+                    continue
+        if items:
+            return f"<div class=\"photo-grid\">{''.join(items)}</div>"
+        return ""
 
     def _build_html(self) -> str:
         trip_name = self.trip_parser.get_trip_name()
@@ -1745,8 +1782,13 @@ class HtmlPDFBuilder:
             ".step-list { margin: 0 0 4mm 6mm; }",
             f".photo-grid {{ column-count: {photo_wall_columns}; column-gap: {photo_wall_gap}px; margin: 2mm 0 4mm; }}",
             f".photo-grid img {{ width: 100%; height: auto; display: block; break-inside: avoid; margin: 0 0 {photo_wall_gap}px 0; }}",
+            ".appendix-title { color: #1A5F7A; font-size: 20pt; margin: 4mm 0 2mm; }",
+            ".appendix-subtitle { color: #666; font-size: 10pt; margin: 0 0 4mm; }",
+            ".appendix-step-title { color: #1A5F7A; font-size: 14pt; margin: 6mm 0 2mm; }",
             ".video-header { margin-top: 3mm; font-weight: 600; }",
             ".video-link { display: block; color: #0066CC; text-decoration: none; font-size: 10pt; }",
+            "a.link { color: #0066CC; text-decoration: none; }",
+            "a.link:hover { text-decoration: underline; }",
             "</style>",
             "</head>",
             "<body>",
@@ -1756,7 +1798,7 @@ class HtmlPDFBuilder:
             "<div class=\"page-break\"></div>",
         ]
 
-
+        appendix_items = []
         for i, step in enumerate(self.trip_parser.steps):
             step_number = i + 1
             step_data = step.get("data", {}) if isinstance(step, dict) else {}
@@ -1814,49 +1856,17 @@ class HtmlPDFBuilder:
             desc_html = self._build_description_html(description)
 
             # Photo grid
-            photo_html = ""
-            if photos:
-                items = []
-                photo_paths = [Path(p) for p in photos[: self.max_photos_per_step]]
-                workers = max(1, min(int(self._photo_workers), len(photo_paths)))
-                if workers > 1:
-                    try:
-                        with ThreadPoolExecutor(max_workers=workers) as executor:
-                            urls = list(executor.map(self._image_file_to_data_url, photo_paths))
-                        for url in urls:
-                            if url:
-                                items.append(f"<img src=\"{url}\"/>")
-                    except Exception:
-                        for p in photo_paths:
-                            try:
-                                url = self._image_file_to_data_url(p)
-                                if url:
-                                    items.append(f"<img src=\"{url}\"/>")
-                            except Exception:
-                                continue
-                else:
-                    for p in photo_paths:
-                        try:
-                            url = self._image_file_to_data_url(p)
-                            if url:
-                                items.append(f"<img src=\"{url}\"/>")
-                        except Exception:
-                            continue
-                if items:
-                    photo_html = f"<div class=\"photo-grid\">{''.join(items)}</div>"
+            photos_to_show = photos[: self.max_photos_per_step]
+            extra_photos = photos[self.max_photos_per_step :]
+            photo_html = self._build_photo_grid_html([Path(p) for p in photos_to_show])
 
-            # Video links
-            video_html = ""
-            if videos:
-                links = []
-                for video_path in videos:
-                    try:
-                        file_url = Path(video_path).resolve().as_uri()
-                    except Exception:
-                        file_url = str(video_path)
-                    name = Path(video_path).name
-                    links.append(f"<a class=\"video-link\" href=\"{self._escape(file_url)}\">{self._escape(name)}</a>")
-                video_html = "<div class=\"video-header\">📹 Videos:</div>" + "".join(links)
+            if self.appendix_show_undisplayed_media and (extra_photos or videos):
+                appendix_items.append({
+                    "step_number": step_number,
+                    "display_name": display_name or f"Step {step_number}",
+                    "extra_photos": extra_photos,
+                    "videos": videos,
+                })
 
             html_parts.extend([
                 "<div class=\"step\">",
@@ -1865,10 +1875,39 @@ class HtmlPDFBuilder:
                 step_map_html,
                 desc_html,
                 photo_html,
-                video_html,
                 "</div>",
                 "<div class=\"page-break\"></div>",
             ])
+
+        if self.appendix_show_undisplayed_media and appendix_items:
+            html_parts.extend([
+                "<div class=\"page-break\"></div>",
+                "<div class=\"appendix\">",
+                "<div class=\"appendix-title\">Additional Media</div>",
+                "<div class=\"appendix-subtitle\">Photos not shown on step pages and all video links.</div>",
+            ])
+            for item in appendix_items:
+                appendix_title = f"{item['step_number']}. {item['display_name']}"
+                html_parts.append(f"<div class=\"appendix-step-title\">{self._escape(appendix_title)}</div>")
+
+                extra_photos = item.get("extra_photos", [])
+                if extra_photos:
+                    extra_html = self._build_photo_grid_html([Path(p) for p in extra_photos])
+                    if extra_html:
+                        html_parts.append(extra_html)
+
+                videos = item.get("videos", [])
+                if videos:
+                    links = []
+                    for video_path in videos:
+                        try:
+                            file_url = Path(video_path).resolve().as_uri()
+                        except Exception:
+                            file_url = str(video_path)
+                        name = Path(video_path).name
+                        links.append(f"<a class=\"video-link\" href=\"{self._escape(file_url)}\">{self._escape(name)}</a>")
+                    html_parts.append("<div class=\"video-header\">📹 Videos:</div>" + "".join(links))
+            html_parts.append("</div>")
 
         html_parts.append("</body></html>")
         return "\n".join([p for p in html_parts if p is not None])
@@ -1882,19 +1921,59 @@ class HtmlPDFBuilder:
         t1 = time.perf_counter()
         print(f"  HTML build done in {t1 - t0:.1f}s")
 
-        with sync_playwright() as p:
-            browser = p.chromium.launch()
-            page = browser.new_page()
-            page.set_content(html_doc, wait_until="load")
-            t_pdf = time.perf_counter()
-            page.pdf(
-                path=str(self.output_path),
-                format="A4",
-                margin={"top": "15mm", "bottom": "15mm", "left": "15mm", "right": "15mm"},
-                print_background=True,
-            )
-            print(f"  PDF render done in {time.perf_counter() - t_pdf:.1f}s")
-            browser.close()
+        # Write HTML to a temp file and load via file:// URL to avoid Chromium crashes
+        # when passing very large HTML strings via set_content()
+        temp_dir = get_temp_dir("html")
+        temp_html = temp_dir / f"render_{os.getpid()}.html"
+        try:
+            temp_html.write_text(html_doc, encoding="utf-8")
+        except Exception as e:
+            raise RuntimeError(f"Could not write temp HTML file: {e}")
+
+        html_file_url = temp_html.as_uri()
+
+        try:
+            with sync_playwright() as p:
+                last_error = None
+                for attempt in range(1, 3):
+                    browser = None
+                    try:
+                        browser = p.chromium.launch()
+                        page = browser.new_page()
+                        # Navigate to file instead of set_content to handle large docs better
+                        page.goto(html_file_url, wait_until="domcontentloaded", timeout=120000)
+                        try:
+                            page.wait_for_load_state("load", timeout=120000)
+                        except Exception:
+                            pass
+                        t_pdf = time.perf_counter()
+                        page.pdf(
+                            path=str(self.output_path),
+                            format="A4",
+                            margin={"top": "15mm", "bottom": "15mm", "left": "15mm", "right": "15mm"},
+                            print_background=True,
+                        )
+                        print(f"  PDF render done in {time.perf_counter() - t_pdf:.1f}s")
+                        browser.close()
+                        last_error = None
+                        break
+                    except Exception as e:
+                        last_error = e
+                        try:
+                            if browser is not None:
+                                browser.close()
+                        except Exception:
+                            pass
+                        if attempt < 2:
+                            print("  Warning: HTML render failed, retrying once...")
+                if last_error is not None:
+                    raise last_error
+        finally:
+            # Clean up temp HTML file
+            try:
+                temp_html.unlink(missing_ok=True)
+            except Exception:
+                pass
 
         # Optionally open the rendered PDF file after creation (config key: open_pdf_after_render)
         try:
@@ -1914,945 +1993,6 @@ class HtmlPDFBuilder:
                     # Linux/Unix
                     subprocess.run(["xdg-open", str(self.output_path)], check=False)
                 print(f"  Open PDF command done in {time.perf_counter() - t_open:.1f}s")
-            except Exception as e:
-                print(f"  Warning: Could not open PDF: {e}")
-
-
-class PDFBuilder:
-    """Builds the PDF document from parsed trip data."""
-    
-    # Page dimensions
-    PAGE_WIDTH, PAGE_HEIGHT = A4
-    MARGIN = 15 * mm
-    CONTENT_WIDTH = PAGE_WIDTH - 2 * MARGIN
-    
-    # Colors
-    PRIMARY_COLOR = HexColor("#1A5F7A")
-    SECONDARY_COLOR = HexColor("#4ECDC4")
-    TEXT_COLOR = HexColor("#333333")
-    LIGHT_GRAY = HexColor("#F5F5F5")
-    
-    def __init__(self, output_path: Path, trip_parser: TripParser, map_generator: MapGenerator, config: dict = None):
-        self.output_path = Path(output_path)
-        self.trip_parser = trip_parser
-        self.map_generator = map_generator
-        self.config = config or {}
-
-        # Enforce fixed font sizes for step text to avoid layout variance
-        # These values are integers (points) and should be set before creating styles
-        self.STEP_TITLE_FONT_SIZE = int(self.config.get("step_title_font_size", 18))
-        self.STEP_TEXT_FONT_SIZE = int(self.config.get("step_text_font_size", 12))
-
-        # Try to register fonts before creating styles so styles can reference them
-        self._register_fonts()
-        self.styles = self._create_styles()
-        self.elements = []
-    
-    def _create_styles(self) -> dict:
-        """Create custom paragraph styles."""
-        styles = getSampleStyleSheet()
-        # Choose font names (registered in _register_fonts)
-        text_font = getattr(self, "_registered_text_font", "Helvetica")
-        emoji_font = getattr(self, "_registered_emoji_font", text_font)
-        
-        styles.add(ParagraphStyle(
-            name="TripTitle",
-            fontSize=28,
-            textColor=self.PRIMARY_COLOR,
-            alignment=TA_CENTER,
-            spaceAfter=12 * mm,
-            fontName=text_font
-        ))
-        
-        styles.add(ParagraphStyle(
-            name="TripSubtitle",
-            fontSize=14,
-            textColor=self.TEXT_COLOR,
-            alignment=TA_CENTER,
-            leading=16,
-            spaceAfter=8 * mm
-        ))
-        
-        styles.add(ParagraphStyle(
-            name="StepTitle",
-            fontSize=self.STEP_TITLE_FONT_SIZE if hasattr(self, 'STEP_TITLE_FONT_SIZE') else 18,
-            textColor=self.PRIMARY_COLOR,
-            alignment=TA_LEFT,
-            spaceAfter=8,
-            fontName=text_font
-        ))
-        
-        styles.add(ParagraphStyle(
-            name="StepMeta",
-            fontSize=self.STEP_TEXT_FONT_SIZE if hasattr(self, 'STEP_TEXT_FONT_SIZE') else 10,
-            textColor=HexColor("#666666"),
-            alignment=TA_LEFT,
-            spaceBefore=4,
-            spaceAfter=10,
-            leading=12,
-            fontName=emoji_font
-        ))
-        
-        styles.add(ParagraphStyle(
-            name="StepDescription",
-            fontSize=self.STEP_TEXT_FONT_SIZE if hasattr(self, 'STEP_TEXT_FONT_SIZE') else 11,
-            textColor=self.TEXT_COLOR,
-            alignment=TA_JUSTIFY,
-            spaceAfter=15,
-            leading=14,
-            fontName=text_font
-        ))
-        
-        styles.add(ParagraphStyle(
-            name="VideoLink",
-            fontSize=self.STEP_TEXT_FONT_SIZE if hasattr(self, 'STEP_TEXT_FONT_SIZE') else 9,
-            textColor=HexColor("#0066CC"),
-            alignment=TA_LEFT,
-            spaceAfter=3,
-            fontName=text_font
-        ))
-        
-        styles.add(ParagraphStyle(
-            name="VideoHeader",
-            fontSize=self.STEP_TEXT_FONT_SIZE if hasattr(self, 'STEP_TEXT_FONT_SIZE') else 10,
-            textColor=self.TEXT_COLOR,
-            alignment=TA_LEFT,
-            spaceBefore=10,
-            spaceAfter=5,
-            fontName=text_font
-        ))
-        
-        return styles
-
-    def _contains_emoji(self, text: str) -> bool:
-        """Detect if the text contains emoji characters."""
-        if not text:
-            return False
-        return bool(EMOJI_PATTERN.search(text))
-
-    def _split_text_with_emoji(self, text: str) -> list:
-        """Split text into runs of (is_emoji, segment).
-
-        Uses the optional `emoji` library for robust segmentation when available.
-        Falls back to the regex-based matcher otherwise.
-        """
-        if text is None:
-            return []
-
-        if _emoji is not None:
-            try:
-                items = _emoji.emoji_list(text)
-            except Exception:
-                items = []
-
-            if items:
-                parts = []
-                last = 0
-                for item in items:
-                    start = item.get("match_start")
-                    end = item.get("match_end")
-                    if start is None or end is None:
-                        loc = item.get("location")
-                        if loc is not None:
-                            start = int(loc)
-                            end = start + len(item.get("emoji", ""))
-                    if start is None or end is None:
-                        continue
-                    if start > last:
-                        parts.append((False, text[last:start]))
-                    parts.append((True, text[start:end]))
-                    last = end
-                if last < len(text):
-                    parts.append((False, text[last:]))
-                return parts
-
-        # Fallback: regex-based segmentation (best-effort)
-        parts = []
-        last = 0
-        for m in EMOJI_PATTERN.finditer(text):
-            if m.start() > last:
-                parts.append((False, text[last:m.start()]))
-            parts.append((True, m.group(0)))
-            last = m.end()
-        if last < len(text):
-            parts.append((False, text[last:]))
-        return parts
-
-    def _get_emoji_png_path(self, emoji: str) -> Optional[Path]:
-        """Get or fetch a Twemoji PNG for an emoji sequence (cached)."""
-        if not emoji:
-            return None
-
-        cache_dir = get_cache_dir("emoji")
-
-        # Convert emoji sequence to codepoint sequence
-        cps = [f"{ord(ch):x}" for ch in emoji]
-        cp_seq = "-".join(cps)
-        emoji_file = cache_dir / f"{cp_seq}.png"
-
-        if emoji_file.exists():
-            return emoji_file
-
-        # Fetch from Twemoji CDN (72x72)
-        url = f"https://twemoji.maxcdn.com/v/latest/72x72/{cp_seq}.png"
-        try:
-            r = requests.get(url, timeout=10)
-            if r.status_code == 200:
-                emoji_file.write_bytes(r.content)
-                return emoji_file
-        except Exception:
-            return None
-
-        return None
-
-    def _emoji_img_tag(self, emoji: str, size_px: int) -> str:
-        """Return an inline <img> tag for an emoji, or the escaped emoji if unavailable."""
-        emoji_path = self._get_emoji_png_path(emoji)
-        if not emoji_path:
-            # Fallback: render emoji glyphs using the registered emoji font (monochrome if color fonts unsupported)
-            emoji_font = getattr(self, "_registered_emoji_font", None)
-            if emoji_font:
-                return f'<font name="{emoji_font}">{html.escape(emoji)}</font>'
-            return html.escape(emoji)
-
-        # Use POSIX-style path to avoid backslash escaping in XML
-        src = emoji_path.as_posix()
-        valign = -2
-        return f'<img src="{src}" width="{size_px}" height="{size_px}" valign="{valign}"/>'
-
-    def _text_to_inline_emoji_html(self, text: str, style: ParagraphStyle, preserve_newlines: bool = True) -> str:
-        """Convert text to ReportLab paragraph markup with inline emoji images."""
-        if text is None:
-            return ""
-
-        # Scale emoji roughly to text size
-        scale = float(self.config.get("emoji_scale", 1.1)) if hasattr(self, "config") else 1.1
-        size_px = max(8, int(float(style.fontSize) * scale))
-
-        parts = self._split_text_with_emoji(text)
-        out = []
-        for is_emoji, part in parts:
-            if not part:
-                continue
-            if is_emoji:
-                out.append(self._emoji_img_tag(part, size_px))
-            else:
-                escaped = html.escape(part)
-                if preserve_newlines:
-                    escaped = escaped.replace("\n", "<br/>")
-                out.append(escaped)
-        return "".join(out)
-
-    def _paragraph_with_inline_emoji(self, text: str, style_name: str, preserve_newlines: bool = True) -> Paragraph:
-        """Create a Paragraph with inline emoji images while keeping text copyable."""
-        style = self.styles.get(style_name)
-        html_text = self._text_to_inline_emoji_html(text or "", style, preserve_newlines=preserve_newlines)
-        try:
-            return Paragraph(html_text, style)
-        except Exception:
-            # Fallback: keep text copyable even if inline image parsing fails
-            safe_text = html.escape(text or "")
-            if preserve_newlines:
-                safe_text = safe_text.replace("\n", "<br/>")
-            return Paragraph(safe_text, style)
-
-    def _register_fonts(self):
-        """Try to register an emoji-capable font and a text font for consistent PDF text rendering.
-
-        Order of preference can be supplied via `config` keys `text_font_path` and `emoji_font_path`.
-        """
-        script_dir = Path(__file__).parent
-        cfg = getattr(self, 'config', {}) or {}
-
-        # Candidate font paths (Windows and common names)
-        candidates = []
-        emoji_candidates = []
-        if cfg.get('text_font_path'):
-            candidates.append(Path(cfg['text_font_path']))
-        if cfg.get('emoji_font_path'):
-            emoji_candidates.append(Path(cfg['emoji_font_path']))
-
-        # Common Windows fonts
-        candidates += [
-            Path("C:/Windows/Fonts/arial.ttf"),
-            Path("C:/Windows/Fonts/seguisym.ttf"),
-            Path("C:/Windows/Fonts/SegoeUI.ttf"),
-            Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf")
-        ]
-
-        emoji_candidates += [
-            Path("C:/Windows/Fonts/seguiemj.ttf"),
-            Path("C:/Windows/Fonts/seguiemj.ttf"),
-            Path("C:/Windows/Fonts/seguisym.ttf"),
-            Path("C:/Windows/Fonts/Symbola.ttf"),
-            Path("/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf"),
-            Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf")
-        ]
-
-        # Find text font
-        registered_text = None
-        for p in candidates:
-            try:
-                if p and p.exists():
-                    pdfmetrics.registerFont(TTFont('AppText', str(p)))
-                    registered_text = 'AppText'
-                    self._registered_text_font = 'AppText'
-                    break
-            except Exception:
-                continue
-
-        if not registered_text:
-            self._registered_text_font = 'Helvetica'
-
-        # Find emoji font (may be color; PDF will render monochrome glyphs)
-        registered_emoji = None
-        for p in emoji_candidates:
-            try:
-                if p and p.exists():
-                    pdfmetrics.registerFont(TTFont('AppEmoji', str(p)))
-                    registered_emoji = 'AppEmoji'
-                    self._registered_emoji_font = 'AppEmoji'
-                    break
-            except Exception:
-                continue
-
-        if not getattr(self, '_registered_emoji_font', None):
-            # fallback to text font
-            self._registered_emoji_font = getattr(self, '_registered_text_font', 'Helvetica')
-
-    def _render_text_to_image(self, text: str, style: ParagraphStyle, max_width: float) -> RLImage:
-        """Render given text to an image using an emoji-capable font and return a ReportLab Image.
-
-        - `max_width` is given in points; we render at 72 DPI so 1 point == 1 pixel.
-        """
-        # Use points as pixels (ReportLab points at 72 DPI)
-        width_px = max(int(max_width), 200)
-        # Fixed font size for step text (use style fontSize or fallback to STEP_TEXT_FONT_SIZE)
-        try:
-            font_size_px = int(getattr(style, "fontSize", None) or getattr(self, "STEP_TEXT_FONT_SIZE", 11))
-        except Exception:
-            font_size_px = 11
-
-        # Choose a regular text font (try Segoe UI, Arial, DejaVuSans)
-        regular_font_paths = [
-            "C:/Windows/Fonts/seguiui.ttf",
-            "C:/Windows/Fonts/SegoeUI.ttf",
-            "C:/Windows/Fonts/arial.ttf",
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        ]
-        regular_font = None
-        for p in regular_font_paths:
-            try:
-                if Path(p).exists():
-                    regular_font = ImageFont.truetype(p, font_size_px)
-                    break
-            except Exception:
-                continue
-        if regular_font is None:
-            regular_font = ImageFont.load_default()
-
-        # Emoji cache folder
-        cache_dir = get_cache_dir("emoji")
-
-        # Emoji regex (captures sequences including ZWJ/FE0F)
-        emoji_pattern = re.compile(
-            r'([\U0001F1E6-\U0001F1FF\U0001F300-\U0001F6FF\U0001F700-\U0001F77F\U0001F780-\U0001F7FF\U0001F800-\U0001F8FF\U0001F900-\U0001F9FF\U0001FA00-\U0001FA6F\U0001FA70-\U0001FAFF\U0001FB00-\U0001FBFF\u2300-\u23FF\u2600-\u26FF\u2700-\u27BF\u2B00-\u2BFF\u200d\ufe0f]+)',
-            flags=re.UNICODE
-        )
-
-        lines = text.splitlines() or [text]
-
-        # First pass: compute required image width and height
-        line_metrics = []
-        max_line_width = 0
-        total_height = 0
-
-        for line in lines:
-            parts = emoji_pattern.split(line)
-            line_width = 0
-            line_height = 0
-            for part in parts:
-                if not part:
-                    continue
-                if emoji_pattern.fullmatch(part):
-                    # Emoji sequence: convert to codepoints
-                    cps = [f"{ord(ch):x}" for ch in part]
-                    # join by '-' (handles multi-codepoint roughly)
-                    cp_seq = '-'.join(cps)
-                    emoji_file = cache_dir / f"{cp_seq}.png"
-                    if not emoji_file.exists():
-                        # Fetch from Twemoji CDN (72x72)
-                        url = f"https://twemoji.maxcdn.com/v/latest/72x72/{cp_seq}.png"
-                        try:
-                            r = requests.get(url, timeout=10)
-                            if r.status_code == 200:
-                                emoji_file.write_bytes(r.content)
-                        except Exception:
-                            pass
-                    try:
-                        with Image.open(emoji_file) as eimg:
-                            ew, eh = eimg.size
-                            # scale emoji height slightly larger for visibility
-                            emoji_scale = float(self.config.get("emoji_scale", 1.2)) if hasattr(self, 'config') else 1.2
-                            scale = (font_size_px * emoji_scale) / float(eh)
-                            ew = int(ew * scale)
-                            eh = int(eh * scale)
-                    except Exception:
-                        # fallback to square placeholder
-                        ew = font_size_px
-                        eh = font_size_px
-                    line_width += ew
-                    line_height = max(line_height, eh)
-                else:
-                    bbox = ImageDraw.Draw(Image.new("RGB", (1, 1))).textbbox((0, 0), part, font=regular_font)
-                    pw = bbox[2] - bbox[0]
-                    ph = bbox[3] - bbox[1]
-                    line_width += pw
-                    line_height = max(line_height, ph)
-            line_metrics.append((line_width, line_height, parts))
-            max_line_width = max(max_line_width, line_width)
-            total_height += line_height + 4
-
-        img_width = max(max_line_width, width_px)
-        img_height = max(int(total_height), font_size_px + 4)
-
-        img = Image.new("RGBA", (int(img_width), int(img_height)), "WHITE")
-        draw = ImageDraw.Draw(img)
-
-        y = 0
-        for (line_width, line_height, parts) in line_metrics:
-            x = 0
-            for part in parts:
-                if not part:
-                    continue
-                if emoji_pattern.fullmatch(part):
-                    cps = [f"{ord(ch):x}" for ch in part]
-                    cp_seq = '-'.join(cps)
-                    emoji_file = cache_dir / f"{cp_seq}.png"
-                    try:
-                        with Image.open(emoji_file).convert("RGBA") as eimg:
-                            ew, eh = eimg.size
-                            emoji_scale = float(self.config.get("emoji_scale", 1.2)) if hasattr(self, 'config') else 1.2
-                            scale = (font_size_px * emoji_scale) / float(eh)
-                            ew = int(ew * scale)
-                            eh = int(eh * scale)
-                            eimg = eimg.resize((ew, eh), Image.LANCZOS)
-                            img.paste(eimg, (int(x), int(y)), eimg)
-                            x += ew
-                    except Exception:
-                        # draw a placeholder box
-                        draw.rectangle([x, y, x + font_size_px, y + font_size_px], outline=(0, 0, 0))
-                        x += font_size_px
-                else:
-                    draw.text((x, y), part, font=regular_font, fill=(0, 0, 0))
-                    bbox = draw.textbbox((x, y), part, font=regular_font)
-                    pw = bbox[2] - bbox[0]
-                    x += pw
-            y += line_height + 4
-
-        # Save image to bytes
-        img_bytes = io.BytesIO()
-        img.convert("RGB").save(img_bytes, format="PNG")
-        img_bytes.seek(0)
-
-        rl_img = RLImage(img_bytes)
-        # Scale image to fit max_width while preserving aspect ratio
-        img_width_pt = min(self.CONTENT_WIDTH, float(rl_img.imageWidth))
-        scale = img_width_pt / float(rl_img.imageWidth)
-        rl_img.drawWidth = img_width_pt
-        rl_img.drawHeight = float(rl_img.imageHeight) * scale
-        return rl_img
-
-    def _add_text_or_image(self, text: str, style_name: str, escape_html: bool = True):
-        """Add text as a Paragraph with inline emoji images (copyable text)."""
-        if text is None:
-            return
-
-        preserve_newlines = escape_html
-        self.elements.append(self._paragraph_with_inline_emoji(text, style_name, preserve_newlines=preserve_newlines))
-    
-    def _add_title_page(self):
-        """Add the title page with trip name and overview map."""
-        trip_name = self.trip_parser.get_trip_name()
-        start_date, end_date = self.trip_parser.get_trip_dates()
-        total_km = self.trip_parser.get_total_km()
-        step_count = len(self.trip_parser.steps)
-        
-        # Title: render as Paragraphs to ensure consistent spacing
-        self.elements.append(Spacer(1, 30 * mm))
-        # Render title and subtitle as Paragraphs (avoid image-based rendering here)
-        date_str = ""
-        if start_date and end_date:
-            date_str = f"{start_date.strftime('%d.%m.%Y')} - {end_date.strftime('%d.%m.%Y')}"
-        elif start_date:
-            date_str = start_date.strftime('%d.%m.%Y')
-
-        subtitle = f"{date_str}<br/>{step_count} Steps • {total_km:.0f} km"
-
-        self.elements.append(Paragraph(trip_name, self.styles["TripTitle"]))
-        self.elements.append(Paragraph(subtitle, self.styles["TripSubtitle"]))
-        self.elements.append(Spacer(1, 10 * mm))
-        try:
-            map_bytes = self.map_generator.generate_overview_map(self.trip_parser)
-            if getattr(self.map_generator, 'debug_map', False):
-                try:
-                    tmp = get_debug_dir() / f"debug_overview_{self.trip_parser.get_trip_name().replace(' ', '_')}.png"
-                    tmp.write_bytes(map_bytes)
-                    print(f"Debug: wrote overview image to {tmp} ({len(map_bytes)} bytes)")
-                except Exception:
-                    pass
-
-            # Normalize image with Pillow (drop alpha, convert to RGB) to avoid PDF embedding issues
-            try:
-                pil = Image.open(io.BytesIO(map_bytes)).convert('RGB')
-                buf = io.BytesIO()
-                pil.save(buf, format='PNG')
-                buf.seek(0)
-                map_img = RLImage(buf)
-            except Exception:
-                # Fallback to raw bytes if Pillow conversion fails
-                try:
-                    map_img = RLImage(io.BytesIO(map_bytes))
-                except Exception as e:
-                    print(f"Warning: could not create overview RLImage: {e}")
-                    map_img = None
-
-            if map_img:
-                # Scale to fit page width
-                aspect = float(getattr(self.map_generator, "overview_width", self.map_generator.width)) / float(
-                    getattr(self.map_generator, "overview_height", self.map_generator.height)
-                )
-                map_width = self.CONTENT_WIDTH
-                map_height = map_width / aspect
-
-                map_img.drawWidth = map_width
-                map_img.drawHeight = map_height
-
-                self.elements.append(map_img)
-        except Exception as e:
-            print(f"  Warning: Could not generate overview map: {e}")
-        
-        self.elements.append(PageBreak())
-    
-    def _format_weather(self, condition: str, temperature: float) -> str:
-        """Format weather info as plain text (no emoji) for reliable PDF rendering."""
-        weather_labels = {
-            "clear-day": "Clear",
-            "clear-night": "Clear night",
-            "partly-cloudy-day": "Partly cloudy",
-            "partly-cloudy-night": "Partly cloudy night",
-            "cloudy": "Cloudy",
-            "rain": "Rain",
-            "snow": "Snow",
-            "wind": "Windy",
-            "fog": "Fog"
-        }
-
-        label = weather_labels.get(condition, "Weather")
-        return f"{label}, {temperature:.0f}°C"
-    
-    def _create_photo_grid(self, photos: list, max_photos: int = 6) -> Optional[RLImage]:
-        """Create a packed photo wall based on individual image aspect ratios."""
-        if not photos:
-            return None
-
-        max_photos = int(self.config.get("max_photos_per_step", max_photos))
-        photos_to_show = photos[:max_photos]
-
-        # Wall configuration (points ~ pixels at 72 DPI)
-        target_width = int(self.CONTENT_WIDTH)
-        gap = int(self.config.get("photo_wall_gap", 0))
-        columns = int(self.config.get("photo_wall_columns", 3))
-
-        # Build list of (path, aspect)
-        items = []
-        for photo_path in photos_to_show:
-            try:
-                with Image.open(photo_path) as img:
-                    w, h = img.size
-                if h == 0:
-                    continue
-                aspect = float(w) / float(h)
-                items.append((photo_path, aspect))
-            except Exception as e:
-                print(f"    Warning: Could not read image {photo_path}: {e}")
-
-        if not items:
-            return None
-
-        # Masonry column layout (no crop, minimal vertical gaps)
-        columns = max(1, min(columns, len(items)))
-        col_width = int((target_width - gap * (columns - 1)) / columns)
-        if col_width < 1:
-            col_width = 1
-        col_heights = [0 for _ in range(columns)]
-        placements = []  # (path, x, y, w, h)
-
-        for path, aspect in items:
-            if aspect <= 0:
-                continue
-            w = col_width
-            h = max(1, int(round(w / aspect)))
-            col_idx = min(range(columns), key=lambda i: col_heights[i])
-            x = col_idx * (col_width + gap)
-            y = col_heights[col_idx]
-            placements.append((path, x, y, w, h))
-            col_heights[col_idx] += h + gap
-
-        total_height = max(col_heights) - gap if col_heights else 1
-        total_height = max(total_height, 1)
-
-        wall = Image.new("RGB", (target_width, total_height), (255, 255, 255))
-
-        for path, x, y, w, h in placements:
-            try:
-                with Image.open(path) as img:
-                    if img.mode in ("RGBA", "P"):
-                        img = img.convert("RGB")
-                    resized = img.resize((w, h), resample=Image.LANCZOS)
-                    wall.paste(resized, (x, y))
-            except Exception as e:
-                print(f"    Warning: Could not process image {path}: {e}")
-
-        # Convert wall to ReportLab image
-        img_bytes = io.BytesIO()
-        wall.save(img_bytes, format="JPEG", quality=88)
-        img_bytes.seek(0)
-
-        rl_img = RLImage(img_bytes)
-        rl_img.drawWidth = self.CONTENT_WIDTH
-        # Scale height to match the width
-        scale = self.CONTENT_WIDTH / float(wall.size[0])
-        rl_img.drawHeight = float(wall.size[1]) * scale
-
-        return rl_img
-
-    def _flowables_height(self, flowables: list) -> float:
-        """Estimate total height (in points) of a list of flowables by calling their
-        `wrap` method. Falls back to reasonable defaults when wrap fails.
-        """
-        total = 0.0
-        for f in flowables:
-            try:
-                w, h = f.wrap(self.CONTENT_WIDTH, self.PAGE_HEIGHT)
-                total += float(h)
-            except Exception:
-                # Fallbacks: Spacer has .height, Paragraph/Table/Images may be approximated
-                try:
-                    from reportlab.platypus import Spacer
-                    if isinstance(f, Spacer):
-                        total += float(f.height)
-                        continue
-                except Exception:
-                    pass
-                # Default conservative estimate for unknown flowables
-                total += 60 * mm
-        return total
-
-    def _remaining_page_space(self) -> float:
-        """Estimate remaining vertical space on the current page (points).
-
-        We compute heights of the flowables added since the last PageBreak.
-        """
-        # Inner page height is page height minus margins
-        page_inner = float(self.PAGE_HEIGHT - 2 * self.MARGIN)
-
-        # Find last PageBreak index
-        used_flowables = []
-        for f in reversed(self.elements):
-            if isinstance(f, PageBreak):
-                break
-            used_flowables.insert(0, f)
-
-        used_height = self._flowables_height(used_flowables) if used_flowables else 0.0
-        remaining = max(0.0, page_inner - used_height)
-        return remaining
-
-    
-    def _add_video_links(self, videos: list):
-        """Add compact video link collection."""
-        if not videos:
-            return
-        
-        # Use emoji-aware renderer for the video header
-        self._add_text_or_image("📹 Videos:", "VideoHeader", escape_html=False)
-        
-        for video_path in videos:
-            video_name = video_path.name
-            # Create file:// link for local file
-            try:
-                file_url = Path(video_path).resolve().as_uri()
-            except Exception:
-                file_url = str(video_path)
-            link_text = f'<link href="{file_url}">{video_name}</link>'
-            self.elements.append(Paragraph(link_text, self.styles["VideoLink"]))
-
-    def _build_description_flowables(self, text: str) -> list:
-        """Build nicely formatted flowables for step descriptions (paragraphs + bullet lists)."""
-        if not text:
-            return []
-
-        lines = text.splitlines()
-        blocks = []
-        current_para = []
-        current_list = []
-
-        def flush_para():
-            if current_para:
-                blocks.append(("para", "\n".join(current_para)))
-                current_para.clear()
-
-        def flush_list():
-            if current_list:
-                blocks.append(("list", list(current_list)))
-                current_list.clear()
-
-        for line in lines:
-            if not line.strip():
-                flush_para()
-                flush_list()
-                continue
-
-            if re.match(r"^\s*[-*]\s+", line):
-                flush_para()
-                item = re.sub(r"^\s*[-*]\s+", "", line)
-                current_list.append(item)
-            else:
-                flush_list()
-                current_para.append(line)
-
-        flush_para()
-        flush_list()
-
-        flowables = []
-        for kind, data in blocks:
-            if kind == "para":
-                flowables.append(self._paragraph_with_inline_emoji(data, "StepDescription", preserve_newlines=True))
-            else:
-                items = [
-                    ListItem(
-                        self._paragraph_with_inline_emoji(item, "StepDescription", preserve_newlines=False),
-                        leftIndent=12
-                    )
-                    for item in data
-                ]
-                flowables.append(
-                    ListFlowable(
-                        items,
-                        bulletType="bullet",
-                        leftIndent=12
-                    )
-                )
-
-        return flowables
-    
-    def _add_step(self, step: dict, step_number: int):
-        """Add a step to the PDF."""
-        step_data = step["data"]
-        photos = step["photos"]
-        videos = step["videos"]
-        
-        # Collect flowables for this step, then add as a single unit when possible
-        step_flow = []
-
-        # Step title (with inline emoji support)
-        display_name = step_data.get("display_name", f"Step {step_number}")
-        title_text = f"{step_number}. {display_name}"
-        step_flow.append(self._paragraph_with_inline_emoji(title_text, "StepTitle", preserve_newlines=False))
-
-        # Small spacer to separate title from meta to prevent visual overlap
-        from reportlab.platypus import Spacer
-        step_flow.append(Spacer(1, 2 * mm))
-
-        # Location and date
-        location = step_data.get("location", {})
-        location_name = location.get("name", "")
-        location_detail = location.get("detail", "")
-
-        start_time = step_data.get("start_time")
-        date_str = ""
-        if start_time:
-            date_str = datetime.fromtimestamp(start_time).strftime("%A, %d. %B %Y")
-
-        # Weather
-        weather_str = ""
-        weather_condition = step_data.get("weather_condition")
-        weather_temp = step_data.get("weather_temperature")
-        if weather_condition and weather_temp is not None:
-            weather_str = f" • {self._format_weather(weather_condition, weather_temp)}"
-
-        meta_text = f"📍 {location_name}, {location_detail}"
-        if date_str:
-            meta_text += f" • 📅 {date_str}"
-        meta_text += weather_str
-
-        # Meta (with inline emoji support for 📍, 📅, etc.)
-        step_flow.append(self._paragraph_with_inline_emoji(meta_text, "StepMeta", preserve_newlines=False))
-
-        # Step map (small, inline)
-        lat = location.get("lat") or location.get("latitude") or location.get("Latitude")
-        lon = location.get("lon") or location.get("lng") or location.get("longitude") or location.get("Longitude")
-
-        try:
-            lat = float(lat) if lat is not None else None
-            lon = float(lon) if lon is not None else None
-        except Exception:
-            lat = None
-            lon = None
-
-        # Always attempt to generate a step map (MapGenerator has fallbacks if coords are missing)
-        try:
-            # generate map ensuring prev & next are visible and current is highlighted
-            # Generate at a higher resolution (supersampling) for sharper step maps
-            render_scale = float(getattr(self.map_generator, "step_render_scale", 1.0))
-            render_scale = max(1.0, min(4.0, render_scale))
-            step_width = int(getattr(self.map_generator, "step_width", self.map_generator.width))
-            step_height = int(getattr(self.map_generator, "step_height", self.map_generator.height))
-            map_bytes = self.map_generator.generate_step_map_for_step(
-                self.trip_parser,
-                step_number - 1,
-                width=int(step_width * render_scale),
-                height=int(step_height * render_scale)
-            )
-            if getattr(self.map_generator, 'debug_map', False):
-                try:
-                    tmp = get_debug_dir() / f"debug_step_{step_number}_{self.trip_parser.get_trip_name().replace(' ', '_')}.png"
-                    tmp.write_bytes(map_bytes)
-                    print(f"Debug: wrote step image to {tmp} ({len(map_bytes)} bytes)")
-                except Exception:
-                    pass
-
-            if map_bytes:
-                # Normalize image with Pillow to avoid embedding problems (drop alpha)
-                try:
-                    pil = Image.open(io.BytesIO(map_bytes)).convert('RGB')
-                    buf = io.BytesIO()
-                    pil.save(buf, format='PNG')
-                    buf.seek(0)
-                    map_img = RLImage(buf)
-                except Exception:
-                    try:
-                        map_img = RLImage(io.BytesIO(map_bytes))
-                    except Exception as e:
-                        print(f"    Warning: could not create RLImage for step map: {e}")
-                        map_img = None
-
-                if map_img:
-                    # Preserve map aspect ratio and fit into content width with a max height
-                    orig_aspect = float(step_width) / float(step_height) if step_height else (16.0 / 9.0)
-                    map_width = self.CONTENT_WIDTH
-                    map_height = map_width / orig_aspect
-                    map_img.drawWidth = map_width
-                    map_img.drawHeight = map_height
-                    step_flow.append(map_img)
-        except Exception as e:
-            print(f"    Warning: Could not generate step map: {e}")
-
-        # Description (with colored inline emoji images via Twemoji)
-        description = step_data.get("description", "")
-        if description:
-            desc_flowables = self._build_description_flowables(description)
-            step_flow.extend(desc_flowables)
-
-        # Photo grid
-        if photos:
-            photo_grid = self._create_photo_grid(photos)
-            if photo_grid:
-                step_flow.append(photo_grid)
-                step_flow.append(Spacer(1, 5 * mm))
-
-        # Video links (append header + links)
-        if videos:
-            # Video header with inline emoji (📹)
-            step_flow.append(self._paragraph_with_inline_emoji("📹 Videos:", "VideoHeader", preserve_newlines=False))
-
-            for video_path in videos:
-                video_name = video_path.name
-                try:
-                    file_url = Path(video_path).resolve().as_uri()
-                except Exception:
-                    file_url = str(video_path)
-                link_text = f'<link href="{file_url}">{video_name}</link>'
-                step_flow.append(Paragraph(link_text, self.styles["VideoLink"]))
-
-        # Spacer before next step
-        step_flow.append(Spacer(1, 10 * mm))
-
-        # Return the prepared flowables for this step to the caller
-        return step_flow
-    
-    def build(self):
-        """Build the complete PDF."""
-        print(f"  Building PDF: {self.output_path}")
-        
-        doc = SimpleDocTemplate(
-            str(self.output_path),
-            pagesize=A4,
-            leftMargin=self.MARGIN,
-            rightMargin=self.MARGIN,
-            topMargin=self.MARGIN,
-            bottomMargin=self.MARGIN
-        )
-        
-        # Add title page
-        print("  Adding title page with overview map...")
-        self._add_title_page()
-        
-        # Add steps with page-space checks
-        total_steps = len(self.trip_parser.steps)
-        page_inner_height = float(self.PAGE_HEIGHT - 2 * self.MARGIN)
-        safety_margin = 12 * mm
-
-        for i, step in enumerate(self.trip_parser.steps):
-            step_name = step["data"].get("display_name", f"Step {i+1}")
-            print(f"  Adding step {i+1}/{total_steps}: {step_name}")
-
-            # Collect flowables for this step
-            step_flow = self._add_step(step, i + 1)
-
-            try:
-                step_height = self._flowables_height(step_flow)
-            except Exception:
-                step_height = page_inner_height
-
-            remaining = self._remaining_page_space()
-
-            # If step fits in the remaining space minus safety, keep together here
-            if step_height <= remaining - safety_margin:
-                self.elements.append(KeepTogether(step_flow))
-            else:
-                # If the step fits on an empty page, start a new page and keep together
-                if step_height <= page_inner_height - safety_margin:
-                    if remaining < safety_margin or remaining < step_height:
-                        self.elements.append(PageBreak())
-                    self.elements.append(KeepTogether(step_flow))
-                else:
-                    # Step is taller than a page: start a new page if needed, then allow splitting
-                    if remaining < safety_margin:
-                        self.elements.append(PageBreak())
-                    self.elements.extend(step_flow)
-        
-        # Build PDF
-        print("  Generating PDF file...")
-        doc.build(self.elements)
-        print(f"  PDF created: {self.output_path}")
-
-        # Optionally open the rendered PDF file after creation (config key: open_pdf_after_render)
-        try:
-            open_after = bool(self.config.get("open_pdf_after_render", True))
-        except Exception:
-            open_after = True
-
-        if open_after:
-            try:
-                if os.name == "nt":
-                    # Windows
-                    os.startfile(str(self.output_path))
-                elif sys.platform == "darwin":
-                    subprocess.run(["open", str(self.output_path)], check=False)
-                else:
-                    # Linux/Unix
-                    subprocess.run(["xdg-open", str(self.output_path)], check=False)
             except Exception as e:
                 print(f"  Warning: Could not open PDF: {e}")
 
@@ -3786,25 +2926,9 @@ def render_trip(trip_path: Path, script_dir: Path, config: dict, cache_manager: 
         
         # No legacy config loading - the new [maps] section is authoritative for map sizing and padding.
 
-        renderer = str(config.get("renderer", "html")).strip().lower()
-        if renderer == "auto":
-            try:
-                print("  Renderer: HTML (Chromium)")
-                pdf_builder = HtmlPDFBuilder(output_path, parser, map_gen, config=config)
-                pdf_builder.build()
-            except Exception as e:
-                print(f"  Warning: HTML renderer failed ({e}); falling back to ReportLab.")
-                print("  Renderer: ReportLab")
-                pdf_builder = PDFBuilder(output_path, parser, map_gen, config=config)
-                pdf_builder.build()
-        elif renderer == "reportlab":
-            print("  Renderer: ReportLab")
-            pdf_builder = PDFBuilder(output_path, parser, map_gen, config=config)
-            pdf_builder.build()
-        else:
-            print("  Renderer: HTML (Chromium)")
-            pdf_builder = HtmlPDFBuilder(output_path, parser, map_gen, config=config)
-            pdf_builder.build()
+        print("  Renderer: HTML (Chromium)")
+        pdf_builder = HtmlPDFBuilder(output_path, parser, map_gen, config=config)
+        pdf_builder.build()
         
         # Mark as rendered
         cache_manager.mark_rendered(trip_path)

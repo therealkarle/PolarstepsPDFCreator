@@ -1,5 +1,4 @@
 # Polarsteps PDF Creator Dependencies
-reportlab>=4.0.0
 Pillow>=10.0.0
 staticmap>=0.5.7
 requests>=2.31.0

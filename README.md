@@ -7,7 +7,7 @@ Generate beautiful PDF travel journals from your downloaded Polarsteps data.
 - 🗺️ **Overview Map**: Satellite map with your complete route and step markers
 - 📍 **Step Maps**: Individual location maps for each step (ESRI World Imagery)
 - 📸 **Photo Grids**: Adaptive photo layout (1-6 photos per step)
-- 📹 **Video Links**: Compact link collection for local video files
+- 📎 **Additional Media Appendix**: Undisplayed photos and all video links at the end
 - 🌡️ **Weather Info**: Temperature and conditions for each step
 - 📝 **Descriptions**: Full travel journal text with formatting
 - 💾 **Cache System**: Tracks rendered trips and provides batch rendering
@@ -148,6 +148,7 @@ emoji_scale = 1.2
 # Layout
 safety_margin_mm = 12
 max_photos_per_step = 6
+appendix_show_undisplayed_media = true
 
 # Map settings
 map_style = "hybrid"  # "hybrid" (satellite) or "road" (streets); default: "hybrid"
@@ -197,6 +198,7 @@ Migration note:
 - **step_map_neighbor_limit_steps_threshold**: Minimum step count before neighbor distance limiting applies (default: 5)
 - **step_map_max_pad_km**: Maximum absolute padding applied to step maps (km). Caps how much padding can be added even on wide spans (default: 25 km).
 - **max_photos_per_step**: Maximum photos per step page (default: 6)
+- **appendix_show_undisplayed_media**: Append undisplayed photos and all video links at the end (default: true)
 
 ## Cache System
 
