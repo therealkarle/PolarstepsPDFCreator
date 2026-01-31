@@ -1,3 +1,12 @@
+# --- App Behavior ---
+# Language selection (see LanguagePack/)
+# Supported: "en", "de" (copy a pack to add more)
+language = "de"
+# List already rendered trips in the CLI menu
+show_rendered_trips = true
+# Open the generated PDF automatically after rendering
+open_pdf_after_render = true
+
 # --- Font Settings ---
 # Font size for the step title (e.g., "1. Amsterdam")
 step_title_font_size = 18
@@ -84,11 +93,3 @@ cluster_distance_km = 2.0
 # Supersampling render scale for step maps (higher = sharper tiles)
 # 1.0 = normal, 2.0 = render at 2x resolution and downscale in PDF
 render_scale = 1.0
-
-
-
-# --- App Behavior ---
-# List already rendered trips in the CLI menu
-show_rendered_trips = true
-# Open the generated PDF automatically after rendering
-open_pdf_after_render = true

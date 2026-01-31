@@ -154,6 +154,9 @@ appendix_show_undisplayed_media = true
 map_style = "hybrid"  # "hybrid" (satellite) or "road" (streets); default: "hybrid"
 marker_thumb_size = 40
 
+# Language (see LanguagePack/)
+language = "en"  # "en" or "de"
+
 # New bounding-box map settings
 maps.vertical_resolution_px = 720  # vertical image resolution in pixels (affects marker sizes)
 [maps.overview]
@@ -199,6 +202,7 @@ Migration note:
 - **step_map_max_pad_km**: Maximum absolute padding applied to step maps (km). Caps how much padding can be added even on wide spans (default: 25 km).
 - **max_photos_per_step**: Maximum photos per step page (default: 6)
 - **appendix_show_undisplayed_media**: Append undisplayed photos and all video links at the end (default: true)
+- **language**: UI/PDF language pack code. Default is "en"; use "de" for German. Add new languages by copying a file in `LanguagePack/`.
 
 ## Cache System
 

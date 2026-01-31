@@ -44,6 +44,148 @@ SCRIPT_DIR = Path(__file__).parent
 CACHE_ROOT = SCRIPT_DIR / "cache"
 TEMP_ROOT = SCRIPT_DIR / "temp"
 DEBUG_ROOT = SCRIPT_DIR / "debug"
+LANGUAGE_PACK_DIR = SCRIPT_DIR / "LanguagePack"
+
+
+class LanguageManager:
+    def __init__(self, language_code: str, pack: dict, fallback_pack: dict):
+        self.language_code = language_code
+        self.pack = pack or {}
+        self.fallback_pack = fallback_pack or {}
+
+    def t(self, key: str, **kwargs) -> str:
+        text = self.pack.get(key)
+        if text is None:
+            text = self.fallback_pack.get(key)
+        if text is None:
+            text = key
+        try:
+            return text.format(**kwargs)
+        except Exception:
+            return text
+
+    def get_list(self, key: str, default: Optional[List[str]] = None) -> List[str]:
+        value = self.pack.get(key)
+        if value is None:
+            value = self.fallback_pack.get(key)
+        if isinstance(value, list):
+            return [str(v).lower() for v in value]
+        return [str(v).lower() for v in (default or [])]
+
+    def is_yes(self, text: str) -> bool:
+        return str(text).strip().lower() in self.get_list("input.yes_values", ["yes", "y"])
+
+    def is_no(self, text: str) -> bool:
+        return str(text).strip().lower() in self.get_list("input.no_values", ["no", "n"])
+
+    def get_date_format(self, key: str, fallback: str = "%d.%m.%Y") -> str:
+        value = self.pack.get(key)
+        if value is None:
+            value = self.fallback_pack.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+        return fallback
+
+
+_DEFAULT_LANGUAGE_MANAGER = LanguageManager("en", {}, {})
+
+
+def _normalize_language_code(code: str) -> str:
+    if not code:
+        return "en"
+    normalized = str(code).strip().lower()
+    if normalized in ("de", "deutsch", "german", "ger"):
+        return "de"
+    if normalized in ("en", "english", "englisch"):
+        return "en"
+    return normalized
+
+
+def _try_set_locale_for_language(language_code: str):
+    try:
+        import locale
+    except Exception:
+        return None
+    candidates = {
+        "de": ["de_DE.UTF-8", "de_DE", "deu_deu", "German_Germany", "de-DE"],
+        "en": ["en_US.UTF-8", "en_US", "English_United States", "en-GB", "en_US.utf8"],
+    }
+    for name in candidates.get(language_code, []):
+        try:
+            locale.setlocale(locale.LC_TIME, name)
+            return name
+        except Exception:
+            continue
+    return None
+
+
+def _load_language_file(path: Path) -> dict:
+    try:
+        if not path.exists():
+            return {}
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _parse_simple_toml(content: str) -> dict:
+    data: dict = {}
+    current = data
+    for raw_line in content.splitlines():
+        line = raw_line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            section = line[1:-1].strip()
+            current = data
+            if section:
+                for part in section.split("."):
+                    part = part.strip()
+                    if not part:
+                        continue
+                    current = current.setdefault(part, {})
+            continue
+        if "=" not in line:
+            continue
+        key, val = line.split("=", 1)
+        key = key.strip()
+        val = val.strip()
+        if not key:
+            continue
+        parsed: object
+        if (val.startswith('"') and val.endswith('"')) or (val.startswith("'") and val.endswith("'")):
+            parsed = val[1:-1]
+        elif val.lower() in ("true", "false"):
+            parsed = val.lower() == "true"
+        else:
+            try:
+                if "." in val:
+                    parsed = float(val)
+                else:
+                    parsed = int(val)
+            except Exception:
+                parsed = val
+        current[key] = parsed
+    return data
+
+
+def load_language_manager(language_code: str, script_dir: Path) -> LanguageManager:
+    normalized = _normalize_language_code(language_code)
+    selected_path = (script_dir / "LanguagePack") / f"{normalized}.json"
+    fallback_path = (script_dir / "LanguagePack") / "en.json"
+
+    fallback_pack = _load_language_file(fallback_path)
+    selected_pack = _load_language_file(selected_path)
+    if not selected_pack and normalized != "en":
+        selected_pack = fallback_pack
+
+    _try_set_locale_for_language(normalized)
+    return LanguageManager(normalized, selected_pack, fallback_pack)
+
+
+def get_default_language_manager() -> LanguageManager:
+    return _DEFAULT_LANGUAGE_MANAGER
 
 
 def _ensure_dir(path: Path) -> Path:
@@ -936,14 +1078,16 @@ class MapGenerator:
         """Create a StaticMap with configured tiles. If the configured tile provider
         is unavailable, fall back to road tiles to keep map generation working."""
         if StaticMap is None:
-            raise RuntimeError("staticmap not available: install the 'staticmap' package to enable map generation")
+            lang = getattr(self, "lang", get_default_language_manager())
+            raise RuntimeError(lang.t("render.staticmap_missing"))
         w = int(round((width or self.width)))
         h = int(round((height or self.height)))
 
         url = self.url_template
         # If satellite/hybrid fails, try road tiles as a fallback (keeps generation usable)
         if url == ESRI_SATELLITE_URL and not self._is_tile_available(url):
-            print("Warning: Satellite tiles not available; falling back to road tiles for this run.")
+            lang = getattr(self, "lang", get_default_language_manager())
+            print(lang.t("map.satellite_unavailable"))
             url = ESRI_ROAD_URL
 
         return StaticMap(
@@ -993,12 +1137,18 @@ class MapGenerator:
                 center = (viewport.center_lon, viewport.center_lat)
                 
                 if getattr(self, 'debug_map', False):
-                    print(f"Overview map: {len(step_locations)} steps, "
-                          f"bounds width={viewport.bounds.width_km():.1f}km, "
-                          f"zoom={zoom}, center={center}")
+                    lang = getattr(self, "lang", get_default_language_manager())
+                    print(lang.t(
+                        "map.overview_debug",
+                        count=len(step_locations),
+                        width=viewport.bounds.width_km(),
+                        zoom=zoom,
+                        center=center,
+                    ))
             except Exception as e:
                 if getattr(self, 'debug_map', False):
-                    print(f"Overview viewport calc failed: {e}, using defaults")
+                    lang = getattr(self, "lang", get_default_language_manager())
+                    print(lang.t("map.overview_calc_failed", error=e))
                 zoom = 12
                 center = None
         else:
@@ -1268,7 +1418,8 @@ class MapGenerator:
             padding: Ignored in new system (uses step_padding_factor from config)
         """
         if StaticMap is None:
-            raise RuntimeError("staticmap not available: install the 'staticmap' package to enable step maps")
+            lang = getattr(self, "lang", get_default_language_manager())
+            raise RuntimeError(lang.t("render.staticmap_missing"))
 
         w = width or getattr(self, "step_width", self.width)
         h = height or getattr(self, "step_height", self.height)
@@ -1322,12 +1473,21 @@ class MapGenerator:
             center = (viewport.center_lon, viewport.center_lat)
             
             if getattr(self, 'debug_map', False):
-                print(f"Step {step_index} map: bounds width={viewport.bounds.width_km():.1f}km, "
-                      f"zoom={zoom}, center=({center[1]:.4f}, {center[0]:.4f}), "
-                      f"prev={'yes' if prev_step else 'no'}, next={'yes' if next_step else 'no'}")
+                lang = getattr(self, "lang", get_default_language_manager())
+                print(lang.t(
+                    "map.step_debug",
+                    index=step_index,
+                    width=viewport.bounds.width_km(),
+                    zoom=zoom,
+                    lat=center[1],
+                    lon=center[0],
+                    prev=lang.t("general.yes") if prev_step else lang.t("general.no"),
+                    next=lang.t("general.yes") if next_step else lang.t("general.no"),
+                ))
         except Exception as e:
             if getattr(self, 'debug_map', False):
-                print(f"Step viewport calc failed: {e}, using defaults")
+                lang = getattr(self, "lang", get_default_language_manager())
+                print(lang.t("map.step_calc_failed", error=e))
             zoom = 12
             center = (current_coord[0], current_coord[1])
 
@@ -1479,11 +1639,12 @@ def trip_parser_get_dates(trip_path: Path):
 class HtmlPDFBuilder:
     """Builds the PDF document using HTML/CSS rendered by Playwright (Chromium)."""
 
-    def __init__(self, output_path: Path, trip_parser: TripParser, map_generator: MapGenerator, config: dict = None):
+    def __init__(self, output_path: Path, trip_parser: TripParser, map_generator: MapGenerator, config: dict = None, language_manager: LanguageManager = None):
         self.output_path = Path(output_path)
         self.trip_parser = trip_parser
         self.map_generator = map_generator
         self.config = config or {}
+        self.lang = language_manager or get_default_language_manager()
 
         # Layout options
         self.max_photos_per_step = int(self.config.get("max_photos_per_step", 6))
@@ -1571,18 +1732,9 @@ class HtmlPDFBuilder:
 
     def _format_weather(self, condition: str, temperature: float) -> str:
         """Format weather info as plain text (no emoji)."""
-        weather_labels = {
-            "clear-day": "Clear",
-            "clear-night": "Clear night",
-            "partly-cloudy-day": "Partly cloudy",
-            "partly-cloudy-night": "Partly cloudy night",
-            "cloudy": "Cloudy",
-            "rain": "Rain",
-            "snow": "Snow",
-            "wind": "Windy",
-            "fog": "Fog",
-        }
-        label = weather_labels.get(condition, "Weather")
+        label = self.lang.t(f"weather.label.{condition}")
+        if label == f"weather.label.{condition}":
+            label = self.lang.t("weather.label.default")
         try:
             return f"{label}, {float(temperature):.0f}°C"
         except Exception:
@@ -1688,15 +1840,21 @@ class HtmlPDFBuilder:
         total_km = self.trip_parser.get_total_km()
         step_count = len(self.trip_parser.steps)
 
-
-
         date_str = ""
+        date_fmt = self.lang.get_date_format("date.format.trip", "%d.%m.%Y")
         if start_date and end_date:
-            date_str = f"{start_date.strftime('%d.%m.%Y')} - {end_date.strftime('%d.%m.%Y')}"
+            date_str = f"{start_date.strftime(date_fmt)} - {end_date.strftime(date_fmt)}"
         elif start_date:
-            date_str = start_date.strftime('%d.%m.%Y')
+            date_str = start_date.strftime(date_fmt)
 
-        subtitle = f"{date_str}<br/>{step_count} Steps • {total_km:.0f} km"
+        subtitle = self.lang.t(
+            "pdf.subtitle",
+            date=date_str,
+            steps=step_count,
+            steps_label=self.lang.t("pdf.steps_label"),
+            km=total_km,
+            km_label=self.lang.t("units.km"),
+        )
 
         # Title page overview map
         overview_img = ""
@@ -1712,12 +1870,12 @@ class HtmlPDFBuilder:
 
             def _render_overview_map():
                 try:
-                    print("  Rendering title page and overview map...")
+                    print(self.lang.t("render.rendering_title_overview"))
                     t0 = time.perf_counter()
                     mg = self._get_thread_map_generator()
                     data = mg.generate_overview_map(self.trip_parser)
                     dt = time.perf_counter() - t0
-                    print(f"  Overview map done in {dt:.1f}s")
+                    print(self.lang.t("render.overview_done", seconds=dt))
                     return data
                 except Exception:
                     return None
@@ -1751,11 +1909,11 @@ class HtmlPDFBuilder:
                 overview_img = ""
         else:
             try:
-                print("  Rendering title page and overview map...")
+                print(self.lang.t("render.rendering_title_overview"))
                 t0 = time.perf_counter()
                 map_bytes = self.map_generator.generate_overview_map(self.trip_parser)
                 dt = time.perf_counter() - t0
-                print(f"  Overview map done in {dt:.1f}s")
+                print(self.lang.t("render.overview_done", seconds=dt))
                 if map_bytes:
                     overview_img = f"<img class=\"map\" src=\"{self._map_bytes_to_data_url(map_bytes)}\"/>"
             except Exception:
@@ -1805,10 +1963,10 @@ class HtmlPDFBuilder:
             photos = step.get("photos", []) if isinstance(step, dict) else []
             videos = step.get("videos", []) if isinstance(step, dict) else []
 
-            display_name = step_data.get("display_name", f"Step {step_number}")
+            display_name = step_data.get("display_name", f"{self.lang.t('pdf.step_label')} {step_number}")
             title_text = f"{step_number}. {display_name}"
 
-            print(f"  Rendering step {step_number}/{step_count}: {display_name}")
+            print(self.lang.t("render.rendering_step", current=step_number, total=step_count, name=display_name))
 
             location = step_data.get("location", {}) if isinstance(step_data, dict) else {}
             location_name = location.get("name", "") if isinstance(location, dict) else ""
@@ -1818,20 +1976,27 @@ class HtmlPDFBuilder:
             date_str = ""
             if start_time:
                 try:
-                    date_str = datetime.fromtimestamp(start_time).strftime("%A, %d. %B %Y")
+                    date_fmt = self.lang.get_date_format("date.format.step", "%A, %d. %B %Y")
+                    date_str = datetime.fromtimestamp(start_time).strftime(date_fmt)
                 except Exception:
                     date_str = ""
 
-            weather_str = ""
             weather_condition = step_data.get("weather_condition") if isinstance(step_data, dict) else None
             weather_temp = step_data.get("weather_temperature") if isinstance(step_data, dict) else None
+            weather_text = ""
             if weather_condition and weather_temp is not None:
-                weather_str = f" • {self._escape(self._format_weather(weather_condition, weather_temp))}"
+                weather_text = self._format_weather(weather_condition, weather_temp)
 
-            meta_text = f"📍 {location_name}, {location_detail}"
+            location_parts = [p for p in (location_name, location_detail) if p]
+            location_text = ", ".join(location_parts)
+            meta_parts = []
+            if location_text:
+                meta_parts.append(self.lang.t("pdf.meta_location", location=location_text))
             if date_str:
-                meta_text += f" • 📅 {date_str}"
-            meta_text += weather_str
+                meta_parts.append(self.lang.t("pdf.meta_date", date=date_str))
+            if weather_text:
+                meta_parts.append(self.lang.t("pdf.meta_weather", weather=weather_text))
+            meta_text = " • ".join(meta_parts)
 
             step_map_html = ""
             try:
@@ -1863,7 +2028,7 @@ class HtmlPDFBuilder:
             if self.appendix_show_undisplayed_media and (extra_photos or videos):
                 appendix_items.append({
                     "step_number": step_number,
-                    "display_name": display_name or f"Step {step_number}",
+                    "display_name": display_name or f"{self.lang.t('pdf.step_label')} {step_number}",
                     "extra_photos": extra_photos,
                     "videos": videos,
                 })
@@ -1883,8 +2048,8 @@ class HtmlPDFBuilder:
             html_parts.extend([
                 "<div class=\"page-break\"></div>",
                 "<div class=\"appendix\">",
-                "<div class=\"appendix-title\">Additional Media</div>",
-                "<div class=\"appendix-subtitle\">Photos not shown on step pages and all video links.</div>",
+                f"<div class=\"appendix-title\">{self._escape(self.lang.t('pdf.additional_media_title'))}</div>",
+                f"<div class=\"appendix-subtitle\">{self._escape(self.lang.t('pdf.additional_media_subtitle'))}</div>",
             ])
             for item in appendix_items:
                 appendix_title = f"{item['step_number']}. {item['display_name']}"
@@ -1906,7 +2071,9 @@ class HtmlPDFBuilder:
                             file_url = str(video_path)
                         name = Path(video_path).name
                         links.append(f"<a class=\"video-link\" href=\"{self._escape(file_url)}\">{self._escape(name)}</a>")
-                    html_parts.append("<div class=\"video-header\">📹 Videos:</div>" + "".join(links))
+                    html_parts.append(
+                        f"<div class=\"video-header\">📹 {self._escape(self.lang.t('pdf.videos_label'))}</div>" + "".join(links)
+                    )
             html_parts.append("</div>")
 
         html_parts.append("</body></html>")
@@ -1914,12 +2081,12 @@ class HtmlPDFBuilder:
 
     def build(self):
         if sync_playwright is None:
-            raise RuntimeError("Playwright is not installed. Install it and run 'playwright install' to use the HTML renderer.")
+            raise RuntimeError(self.lang.t("render.playwright_missing"))
 
         t0 = time.perf_counter()
         html_doc = self._build_html()
         t1 = time.perf_counter()
-        print(f"  HTML build done in {t1 - t0:.1f}s")
+        print(self.lang.t("render.html_build_done", seconds=t1 - t0))
 
         # Write HTML to a temp file and load via file:// URL to avoid Chromium crashes
         # when passing very large HTML strings via set_content()
@@ -1928,7 +2095,7 @@ class HtmlPDFBuilder:
         try:
             temp_html.write_text(html_doc, encoding="utf-8")
         except Exception as e:
-            raise RuntimeError(f"Could not write temp HTML file: {e}")
+            raise RuntimeError(self.lang.t("render.temp_html_write_failed", error=e))
 
         html_file_url = temp_html.as_uri()
 
@@ -1953,7 +2120,7 @@ class HtmlPDFBuilder:
                             margin={"top": "15mm", "bottom": "15mm", "left": "15mm", "right": "15mm"},
                             print_background=True,
                         )
-                        print(f"  PDF render done in {time.perf_counter() - t_pdf:.1f}s")
+                        print(self.lang.t("render.pdf_render_done", seconds=time.perf_counter() - t_pdf))
                         browser.close()
                         last_error = None
                         break
@@ -1965,7 +2132,7 @@ class HtmlPDFBuilder:
                         except Exception:
                             pass
                         if attempt < 2:
-                            print("  Warning: HTML render failed, retrying once...")
+                            print(self.lang.t("render.html_render_retry"))
                 if last_error is not None:
                     raise last_error
         finally:
@@ -1992,9 +2159,9 @@ class HtmlPDFBuilder:
                 else:
                     # Linux/Unix
                     subprocess.run(["xdg-open", str(self.output_path)], check=False)
-                print(f"  Open PDF command done in {time.perf_counter() - t_open:.1f}s")
+                print(self.lang.t("render.open_pdf_done", seconds=time.perf_counter() - t_open))
             except Exception as e:
-                print(f"  Warning: Could not open PDF: {e}")
+                print(self.lang.t("render.open_pdf_failed", error=e))
 
 
 class CacheManager:
@@ -2021,7 +2188,7 @@ class CacheManager:
             with open(self.cache_file, "w", encoding="utf-8") as f:
                 json.dump(self.cache, f, indent=2)
         except Exception as e:
-            print(f"Warning: Could not save cache: {e}")
+            print(get_default_language_manager().t("cache.save_failed", error=e))
     
     def is_rendered(self, trip_path: Path) -> bool:
         """Check if trip has been rendered."""
@@ -2179,7 +2346,7 @@ def _resolve_index_token(token: str, total: int) -> Optional[int]:
     return None
 
 
-def parse_render_command(cmd_str: str, trips: list, cache_manager: CacheManager) -> dict:
+def parse_render_command(cmd_str: str, trips: list, cache_manager: CacheManager, lang: LanguageManager = None) -> dict:
     """Parse a render command string.
 
     Format: render [flags] [selection]
@@ -2207,6 +2374,7 @@ def parse_render_command(cmd_str: str, trips: list, cache_manager: CacheManager)
     result = {
         'valid': False,
         'error': None,
+        'error_code': None,
         'trips': [],
         'include_rendered': True,  # default: include rendered trips (use -ur to restrict)
         'year': None,
@@ -2216,6 +2384,8 @@ def parse_render_command(cmd_str: str, trips: list, cache_manager: CacheManager)
         'config_overrides': {}
     }
 
+    lang = lang or get_default_language_manager()
+
     # Remove 'render' or 'r' prefix
     cmd = cmd_str.strip()
     if cmd.lower().startswith('render'):
@@ -2223,7 +2393,8 @@ def parse_render_command(cmd_str: str, trips: list, cache_manager: CacheManager)
     elif cmd.lower().startswith('r ') or cmd.lower() == 'r':
         cmd = cmd[1:].strip()
     else:
-        result['error'] = "Command must start with 'render' or 'r'"
+        result['error'] = lang.t("parse.command_must_start")
+        result['error_code'] = "command_must_start"
         return result
 
     # Parse flags and selection
@@ -2250,10 +2421,12 @@ def parse_render_command(cmd_str: str, trips: list, cache_manager: CacheManager)
                     mode_specified = True
                     i += 2
                 except ValueError:
-                    result['error'] = f"Invalid year: {parts[i + 1]}"
+                    result['error'] = lang.t("parse.invalid_year", year=parts[i + 1])
+                    result['error_code'] = "invalid_year"
                     return result
             else:
-                result['error'] = "-y requires a year value"
+                result['error'] = lang.t("parse.year_requires_value")
+                result['error_code'] = "year_requires_value"
                 return result
         elif p in ('-d', '--date'):
             if i + 1 < len(parts):
@@ -2275,10 +2448,12 @@ def parse_render_command(cmd_str: str, trips: list, cache_manager: CacheManager)
                             result['end_date'] = datetime.strptime(date_parts[1].strip(), "%d.%m.%Y")
                             i += advance
                         except ValueError:
-                            result['error'] = "Invalid date format. Use dd.mm.yyyy;dd.mm.yyyy"
+                            result['error'] = lang.t("parse.invalid_date_format_semicolon")
+                            result['error_code'] = "invalid_date_format_semicolon"
                             return result
                     else:
-                        result['error'] = "Date range must be START;END"
+                        result['error'] = lang.t("parse.date_range_required")
+                        result['error_code'] = "date_range_required"
                         return result
 
                 # Support "-d 01.01.2025 01.06.2025" (separate tokens)
@@ -2288,13 +2463,16 @@ def parse_render_command(cmd_str: str, trips: list, cache_manager: CacheManager)
                         result['end_date'] = datetime.strptime(parts[i + 2].strip(), "%d.%m.%Y")
                         i += 3
                     except ValueError:
-                        result['error'] = "Invalid date format. Use dd.mm.yyyy dd.mm.yyyy"
+                        result['error'] = lang.t("parse.invalid_date_format_space")
+                        result['error_code'] = "invalid_date_format_space"
                         return result
                 else:
-                    result['error'] = "Date range must be START;END"
+                    result['error'] = lang.t("parse.date_range_required")
+                    result['error_code'] = "date_range_required"
                     return result
             else:
-                result['error'] = "-d requires a date range"
+                result['error'] = lang.t("parse.date_requires_range")
+                result['error_code'] = "date_requires_range"
                 return result
         elif p.startswith('-config'):
             # Support -config(key=value, key2=value2)
@@ -2321,10 +2499,12 @@ def parse_render_command(cmd_str: str, trips: list, cache_manager: CacheManager)
                             break
                         j += 1
                     if not found:
-                        result['error'] = "-config requires parentheses enclosing key=value pairs"
+                        result['error'] = lang.t("parse.config_requires_parentheses")
+                        result['error_code'] = "config_requires_parentheses"
                         return result
             else:
-                result['error'] = "Invalid -config usage. Use -config(key=value, ...)"
+                result['error'] = lang.t("parse.config_invalid_usage")
+                result['error_code'] = "config_invalid_usage"
                 return result
 
             # Parse comma-separated key=value pairs (ignoring commas inside strings)
@@ -2404,7 +2584,8 @@ def parse_render_command(cmd_str: str, trips: list, cache_manager: CacheManager)
         filtered_trips = [t for t in filtered_trips if not cache_manager.is_rendered(t)]
 
     if not filtered_trips:
-        result['error'] = "No trips match the specified filters"
+        result['error'] = lang.t("parse.no_trips_match")
+        result['error_code'] = "no_trips_match"
         return result
 
     # Apply selection (selection_str may include a trailing -config(...) override)
@@ -2487,13 +2668,15 @@ def parse_render_command(cmd_str: str, trips: list, cache_manager: CacheManager)
         result['selection'] = sel
         indices = parse_selection(sel, len(filtered_trips))
         if not indices:
-            result['error'] = f"Invalid selection: {sel}"
+            result['error'] = lang.t("parse.invalid_selection", selection=sel)
+            result['error_code'] = "invalid_selection"
             return result
         result['trips'] = [filtered_trips[i - 1] for i in indices]
     else:
         # No selection provided: require explicit mode (-a or -ur)
         if not mode_specified:
-            result['error'] = "No selection or mode specified. Use a selection (e.g., '1;4') or flags '-a' or '-ur'."
+            result['error'] = lang.t("parse.no_selection_or_mode")
+            result['error_code'] = "no_selection_or_mode"
             return result
         result['trips'] = filtered_trips
 
@@ -2501,12 +2684,14 @@ def parse_render_command(cmd_str: str, trips: list, cache_manager: CacheManager)
     return result
 
 
-def display_trips(trips: list, cache_manager: CacheManager, title: str = "Available trips"):
+def display_trips(trips: list, cache_manager: CacheManager, title: str = None, lang: LanguageManager = None):
     """Display a numbered list of trips with rendered status."""
+    lang = lang or get_default_language_manager()
+    header_title = title or lang.t("cli.available_trips_title")
     print(f"\n{'='*70}")
-    print(f"  {title}")
+    print(f"  {header_title}")
     print(f"{'='*70}")
-    print(f"Total: {len(trips)} | Rendered: {cache_manager.get_rendered_count()}\n")
+    print(lang.t("cli.list_total", total=len(trips), rendered=cache_manager.get_rendered_count()) + "\n")
 
     for i, trip in enumerate(trips, 1):
         try:
@@ -2514,7 +2699,8 @@ def display_trips(trips: list, cache_manager: CacheManager, title: str = "Availa
                 trip_data = json.load(f)
             name = trip_data.get("name", trip.name)
             start_ts = trip_data.get("start_date", 0)
-            date_str = datetime.fromtimestamp(start_ts).strftime("%d.%m.%Y") if start_ts else "?"
+            date_fmt = lang.get_date_format("date.format.trip", "%d.%m.%Y")
+            date_str = datetime.fromtimestamp(start_ts).strftime(date_fmt) if start_ts else "?"
             rendered_mark = "✓" if cache_manager.is_rendered(trip) else " "
             print(f"  [{i:2d}] [{rendered_mark}] {name} ({date_str})")
         except:
@@ -2523,52 +2709,19 @@ def display_trips(trips: list, cache_manager: CacheManager, title: str = "Availa
     print()
 
 
-def print_command_help():
-    """Print available commands."""
-    print(f"\n{'='*70}")
-    print("  AVAILABLE COMMANDS")
-    print(f"{'='*70}")
-    print("""
-  cancel        - Exit the program
-  clear-cache   - Clear rendered trips cache
-  stop          - During rendering: type 'stop' + Enter to abort
-  trips         - Show all trips
-
-  render [flags] [selection]   (or 'r' for short)
-    Flags:
-      -a, --all           Include already rendered trips (redundant; default includes rendered)
-      -ur, --unrendered   Only unrendered trips (use to restrict)
-      -y YEAR             Filter by year (e.g., -y 2025)
-      -d START;END        Date range (dd.mm.yyyy;dd.mm.yyyy)
-      -config(KEY=VALUE,...)  Override config for this render (e.g., -config(map_style="road", max_photos_per_step=4))
-
-    Selection formats:
-      1           Single trip
-      1;4         Range of trips (1 to 4)
-      1,5,6       Multiple trips
-      l or last   Last trip
-      l-1         Second to last trip
-
-  Examples:
-    # Always provide either a selection or -a/-ur
-    r -a                      Render all trips (including rendered)
-    r -ur -y 2025             Render unrendered trips from 2025
-    r -d 01.01.2025;01.06.2025 -ur   Render trips in date range (only unrendered)
-    r 1;4                     Render trips 1 through 4
-    r -a l                    Render last trip (even if rendered)
-    r 1,3,5                   Render trips 1, 3, and 5
-    r 67 -config(map_style="street", max_photos_per_step=4)  Render trip 67 with overrides
-""")
-    print(f"{'='*70}\n")
+def print_command_help(lang: LanguageManager = None):
+        """Print available commands."""
+        lang = lang or get_default_language_manager()
+        print(lang.t("cli.command_help"))
 
 
-def prompt_loop(trips: list, cache_manager: CacheManager, script_dir: Path, config: dict):
+def prompt_loop(trips: list, cache_manager: CacheManager, script_dir: Path, config: dict, lang: LanguageManager):
     """Unified command prompt loop."""
     import sys
     
     # Display help and trips on start (show trips before first render)
-    print_command_help()
-    display_trips(trips, cache_manager, "POLARSTEPS PDF GENERATOR")
+    print_command_help(lang)
+    display_trips(trips, cache_manager, lang.t("cli.trip_list_title"), lang=lang)
 
     # Dedicated input reader thread to avoid losing commands typed during rendering
     input_queue = queue.Queue()
@@ -2591,7 +2744,7 @@ def prompt_loop(trips: list, cache_manager: CacheManager, script_dir: Path, conf
                 cmd = deferred_commands.popleft()
             else:
                 if input_queue.empty():
-                    print("Command> ", end="", flush=True)
+                    print(lang.t("cli.command_prompt"), end="", flush=True)
                 cmd = input_queue.get()
 
             cmd = cmd.strip()
@@ -2602,61 +2755,70 @@ def prompt_loop(trips: list, cache_manager: CacheManager, script_dir: Path, conf
             
             # Exit commands
             if cmd_lower in ('cancel', 'exit', 'quit', 'q'):
-                print("Exiting.")
+                print(lang.t("cli.exiting"))
                 break
             
             # Clear cache
             if cmd_lower == 'clear-cache':
-                confirm = input("Clear all rendered marks? (yes/no): ").strip().lower()
-                if confirm in ('yes', 'y'):
+                confirm = input(lang.t(
+                    "cli.cache_clear_prompt",
+                    yes=lang.t("general.yes"),
+                    no=lang.t("general.no"),
+                )).strip()
+                if lang.is_yes(confirm):
                     cache_manager.clear_cache()
-                    print("Cache cleared!")
+                    print(lang.t("cli.cache_cleared"))
+                elif lang.is_no(confirm):
+                    print(lang.t("cli.cancelled"))
                 else:
-                    print("Cancelled.")
+                    print(lang.t("cli.cancelled"))
                 continue
             
             # Help
             if cmd_lower in ('help', 'h', '?'):
-                print_command_help()
+                print_command_help(lang)
                 continue
             
             # List/refresh / show all trips
             if cmd_lower in ('list', 'ls', 'trips', 'll'):  # 'll' for list, but 'l' is last
-                display_trips(trips, cache_manager)
+                display_trips(trips, cache_manager, lang=lang)
                 continue
             
             # Render command
             if cmd_lower.startswith('render') or cmd_lower.startswith('r ') or cmd_lower == 'r':
-                result = parse_render_command(cmd, trips, cache_manager)
+                result = parse_render_command(cmd, trips, cache_manager, lang=lang)
 
                 if not result['valid']:
                     # If the only error is missing selection/mode, offer to render ALL
-                    if result['error'] and 'No selection or mode specified' in result['error']:
-                        user_choice = input("No selection or mode given. Render ALL trips? (yes/no) or enter a different command: ").strip()
+                    if result.get('error_code') == 'no_selection_or_mode':
+                        user_choice = input(lang.t(
+                            "cli.no_selection_prompt",
+                            yes=lang.t("general.yes"),
+                            no=lang.t("general.no"),
+                        )).strip()
                         if not user_choice:
-                            print("Cancelled. Returning to command prompt.")
+                            print(lang.t("cli.cancelled_return"))
                             continue
-                        lc = user_choice.lower()
-                        if lc in ('y', 'yes'):
+                        if lang.is_yes(user_choice):
                             # Re-parse using explicit -a to include rendered
                             cmd = 'r -a'
-                            result = parse_render_command(cmd, trips, cache_manager)
+                            result = parse_render_command(cmd, trips, cache_manager, lang=lang)
                             if not result['valid']:
-                                print(f"Error: {result['error']}")
+                                print(lang.t("cli.error_prefix", error=result['error']))
                                 continue
-                        elif lc in ('n', 'no'):
-                            print("Cancelled. Returning to command prompt.")
+                        elif lang.is_no(user_choice):
+                            print(lang.t("cli.cancelled_return"))
                             continue
                         else:
                             # Treat the user's input as a new command and process it
                             cmd = user_choice
                             continue
                     else:
-                        print(f"Error: {result['error']}")
+                        print(lang.t("cli.error_prefix", error=result['error']))
                         continue
 
                 trips_to_render = result['trips']
-                print(f"\n📋 Will render {len(trips_to_render)} trip(s):")
+                print(lang.t("cli.render_will_render", count=len(trips_to_render)))
                 for i, trip in enumerate(trips_to_render, 1):
                     try:
                         with open(trip / "trip.json", "r", encoding="utf-8") as f:
@@ -2667,11 +2829,12 @@ def prompt_loop(trips: list, cache_manager: CacheManager, script_dir: Path, conf
                         print(f"  [{i}] {trip.name}")
 
                 # Start rendering immediately
-                print(f"\n💡 Type 'stop' + Enter to abort after current trip.\n")
+                print(lang.t("cli.render_abort_hint"))
 
                 # Apply config overrides for this render (if any)
                 merged_config = dict(config)
                 merged_config.update(result.get('config_overrides', {}))
+                render_lang = load_language_manager(merged_config.get("language", lang.language_code), script_dir)
 
                 # Setup stop mechanism
                 stop_flag = threading.Event()
@@ -2690,7 +2853,7 @@ def prompt_loop(trips: list, cache_manager: CacheManager, script_dir: Path, conf
                         if not user_input:
                             continue
                         if user_input.lower() == 'stop':
-                            print("\nStop signal received. Finishing current trip...")
+                            print(lang.t("cli.stop_signal_received"))
                             stop_flag.set()
                         else:
                             deferred_commands.append(user_input)
@@ -2706,7 +2869,7 @@ def prompt_loop(trips: list, cache_manager: CacheManager, script_dir: Path, conf
 
                     print(f"\n{'='*70}")
                     print(f"[{i}/{len(trips_to_render)}]", end=" ")
-                    if render_trip(trip, script_dir, merged_config, cache_manager, check_stop):
+                    if render_trip(trip, script_dir, merged_config, cache_manager, check_stop, lang=render_lang):
                         success_count += 1
                     drain_input_for_stop()
 
@@ -2714,41 +2877,42 @@ def prompt_loop(trips: list, cache_manager: CacheManager, script_dir: Path, conf
                 print()
                 print('=' * 70)
                 if stopped:
-                    print(f"Stop requested. Completed: {success_count}/{len(trips_to_render)} trip(s) rendered.")
+                    print(lang.t("cli.stop_requested_summary", success=success_count, total=len(trips_to_render)))
                 else:
-                    print(f"Completed: {success_count}/{len(trips_to_render)} trip(s) rendered.")
+                    print(lang.t("cli.completed_summary", success=success_count, total=len(trips_to_render)))
                 print('=' * 70)
                 print()
 
                 # After rendering: do not automatically show trips (use 'trips' to view)
-                print("Type 'trips' to view the list of available trips.")
+                print(lang.t("cli.type_trips_hint"))
                 continue
         except KeyboardInterrupt:
-            print("\nExiting.")
+            print("\n" + lang.t("cli.exiting"))
             break
         except EOFError:
-            print("\nExiting.")
+            print("\n" + lang.t("cli.exiting"))
             break
 
     def select_trip(trips: list, cache_manager: CacheManager, show_rendered: bool = True) -> Optional[Path]:
         """Let user select a trip from the console."""
         if not trips:
-            print("No trips found!")
+            print(lang.t("cli.no_trips_found"))
             return None
 
         # Filter trips based on show_rendered setting
         display_trips = trips if show_rendered else [t for t in trips if not cache_manager.is_rendered(t)]
 
         if not display_trips:
-            print("No trips to display with current filter!")
+            print(lang.t("cli.no_trips_filtered"))
             return None
 
         print("\n" + "=" * 70)
-        print("  POLARSTEPS PDF GENERATOR")
+        print(f"  {lang.t('cli.trip_list_title')}")
         print("=" * 70)
-        print(f"\nShowing: {'All trips' if show_rendered else 'Only unrendered trips'}")
-        print(f"Total trips: {len(display_trips)} | Rendered: {cache_manager.get_rendered_count()}\n")
-        print("Available trips:\n")
+        showing_text = lang.t("cli.showing_all") if show_rendered else lang.t("cli.showing_unrendered")
+        print(f"\n{lang.t('cli.showing_label')} {showing_text}")
+        print(lang.t("cli.total_trips_rendered", total=len(display_trips), rendered=cache_manager.get_rendered_count()) + "\n")
+        print(lang.t("cli.available_trips") + "\n")
 
         for i, trip in enumerate(display_trips, 1):
             # Load trip name from trip.json
@@ -2759,11 +2923,18 @@ def prompt_loop(trips: list, cache_manager: CacheManager, script_dir: Path, conf
                 total_km = trip_data.get("total_km", 0)
                 step_count = trip_data.get("step_count", 0)
                 start_ts = trip_data.get("start_date", 0)
-                date_str = datetime.fromtimestamp(start_ts).strftime("%Y-%m-%d") if start_ts else "?"
+                date_fmt = lang.get_date_format("date.format.trip", "%d.%m.%Y")
+                date_str = datetime.fromtimestamp(start_ts).strftime(date_fmt) if start_ts else "?"
 
                 rendered_mark = "✓" if cache_manager.is_rendered(trip) else " "
                 print(f"  [{i:2d}] [{rendered_mark}] {name} ({date_str})")
-                print(f"       {step_count} steps • {total_km:.0f} km")
+                print(lang.t(
+                    "cli.trip_summary_line",
+                    steps=step_count,
+                    steps_label=lang.t("pdf.steps_label"),
+                    km=total_km,
+                    km_label=lang.t("units.km"),
+                ))
                 print()
             except Exception:
                 rendered_mark = "✓" if cache_manager.is_rendered(trip) else " "
@@ -2771,19 +2942,14 @@ def prompt_loop(trips: list, cache_manager: CacheManager, script_dir: Path, conf
                 print()
 
         print("\n" + "=" * 70)
-        print("Commands:")
-        print("  [1-99]       Select and render a specific trip")
-        print("  [t]          Toggle show/hide rendered trips")
-        print("  [r]          Render all unrendered trips")
-        print("  [ra]         Render all trips (including rendered)")
-        print("  [c]          Clear cache (remove all rendered marks)")
-        print("  [0]          Exit")
+        print(lang.t("cli.commands_title"))
+        print(lang.t("cli.select_trip_commands"))
         print("=" * 70)
         print()
 
         while True:
             try:
-                choice = input("Select option: ").strip().lower()
+                choice = input(lang.t("cli.select_option")).strip().lower()
 
                 if choice == "0":
                     return None
@@ -2800,9 +2966,9 @@ def prompt_loop(trips: list, cache_manager: CacheManager, script_dir: Path, conf
                     if 0 <= idx < len(display_trips):
                         return display_trips[idx]
                     else:
-                        print("Invalid selection. Try again.")
+                        print(lang.t("cli.invalid_selection"))
             except ValueError:
-                print("Invalid input. Please enter a number or command.")
+                print(lang.t("cli.invalid_input"))
             except KeyboardInterrupt:
                 return None
 
@@ -2829,23 +2995,24 @@ def _parse_aspect_ratio(value, fallback: float = MAP_ASPECT_RATIO) -> float:
         return float(fallback)
 
 
-def render_trip(trip_path: Path, script_dir: Path, config: dict, cache_manager: CacheManager, check_stop=None) -> bool:
+def render_trip(trip_path: Path, script_dir: Path, config: dict, cache_manager: CacheManager, check_stop=None, lang: LanguageManager = None) -> bool:
     """Render a single trip to PDF. Returns True if successful, False if error or stopped."""
+    lang = lang or get_default_language_manager()
     try:
         # Check for stop signal
         if check_stop and check_stop():
-            print("  Stopped by user")
+            print(lang.t("cli.stopped_by_user"))
             return False
         
-        print(f"\nProcessing trip: {trip_path.name}")
+        print(lang.t("render.processing_trip", name=trip_path.name))
         
         # Parse trip
         parser = TripParser(trip_path)
         parser.load()
         
-        print(f"  Trip: {parser.get_trip_name()}")
-        print(f"  Steps: {len(parser.steps)}")
-        print(f"  Total km: {parser.get_total_km():.0f}")
+        print(lang.t("render.trip_name", name=parser.get_trip_name()))
+        print(lang.t("render.steps_count", count=len(parser.steps)))
+        print(lang.t("render.total_km", km=parser.get_total_km()))
         
         # Generate PDF
         trip_name_safe = "".join(c if c.isalnum() or c in " -_" else "_" for c in parser.get_trip_name())
@@ -2867,7 +3034,7 @@ def render_trip(trip_path: Path, script_dir: Path, config: dict, cache_manager: 
 
         label_overlay_url = None
         label_overlay_opacity = float(config.get("hybrid_labels_opacity", 0.7))
-        print(f"  Map style: {map_style}")
+        print(lang.t("render.map_style", style=map_style))
         if map_style == "road":
             map_url = ESRI_ROAD_URL
         elif map_style == "satellite":
@@ -2883,6 +3050,7 @@ def render_trip(trip_path: Path, script_dir: Path, config: dict, cache_manager: 
             label_overlay_url=label_overlay_url,
             label_overlay_opacity=label_overlay_opacity
         )
+        map_gen.lang = lang
         
         # ========== NEW BOUNDING-BOX CONFIG (2026) ==========
         # Load settings from [maps] section if present
@@ -2926,46 +3094,47 @@ def render_trip(trip_path: Path, script_dir: Path, config: dict, cache_manager: 
         
         # No legacy config loading - the new [maps] section is authoritative for map sizing and padding.
 
-        print("  Renderer: HTML (Chromium)")
-        pdf_builder = HtmlPDFBuilder(output_path, parser, map_gen, config=config)
+        print(lang.t("render.renderer"))
+        pdf_builder = HtmlPDFBuilder(output_path, parser, map_gen, config=config, language_manager=lang)
         pdf_builder.build()
         
         # Mark as rendered
         cache_manager.mark_rendered(trip_path)
         
-        print(f"  Done. PDF saved to: {output_path}")
+        print(lang.t("render.done_pdf", path=output_path))
         return True
     except Exception as e:
-        print(f"  ❌ Error rendering trip: {e}")
+        print(lang.t("render.error", error=e))
         return False
 
 
-def get_date_filter_from_user() -> tuple:
+def get_date_filter_from_user(lang: LanguageManager = None) -> tuple:
     """Ask user for date filter (year or date range). Returns (year, start_date, end_date)."""
-    print("\nDate filter options:")
-    print("  [1] Filter by year")
-    print("  [2] Filter by date range")
-    print("  [3] No filter (all trips)")
+    lang = lang or get_default_language_manager()
+    print("\n" + lang.t("cli.date_filter_title"))
+    print(lang.t("cli.date_filter_year"))
+    print(lang.t("cli.date_filter_range"))
+    print(lang.t("cli.date_filter_none"))
     
     while True:
         try:
-            choice = input("Select filter option: ").strip()
+            choice = input(lang.t("cli.date_filter_select")).strip()
             
             if choice == "1":
-                year = int(input("Enter year (e.g., 2025): ").strip())
+                year = int(input(lang.t("cli.date_filter_enter_year")).strip())
                 return (year, None, None)
             elif choice == "2":
-                start_str = input("Enter start date (YYYY-MM-DD): ").strip()
-                end_str = input("Enter end date (YYYY-MM-DD): ").strip()
+                start_str = input(lang.t("cli.date_filter_enter_start")).strip()
+                end_str = input(lang.t("cli.date_filter_enter_end")).strip()
                 start_date = datetime.strptime(start_str, "%Y-%m-%d") if start_str else None
                 end_date = datetime.strptime(end_str, "%Y-%m-%d") if end_str else None
                 return (None, start_date, end_date)
             elif choice == "3":
                 return (None, None, None)
             else:
-                print("Invalid choice. Please enter 1, 2, or 3.")
+                print(lang.t("cli.date_filter_invalid_choice"))
         except ValueError as e:
-            print(f"Invalid input: {e}. Please try again.")
+            print(lang.t("cli.date_filter_invalid_input", error=e))
         except KeyboardInterrupt:
             return (None, None, None)
 
@@ -2974,56 +3143,10 @@ def main():
     """Main entry point."""
     import sys
     
-    parser = argparse.ArgumentParser(
-        description='Polarsteps PDF Generator - Render travel journals from Polarsteps data',
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog='''
-Available commands (at the prompt):
-  cancel        Exit the program
-  clear-cache   Clear rendered trips cache
-  stop          During rendering: type 'stop' + Enter to abort
-
-  render [flags] [selection]   (or 'r' for short)
-    Flags:
-      -a, --all           Include already rendered trips (redundant; default includes already rendered)
-      -ur, --unrendered   Only unrendered trips (use to restrict)
-      -y YEAR             Filter by year (e.g., -y 2025)
-      -d START;END        Date range (dd.mm.yyyy;dd.mm.yyyy)
-      -config(KEY=VALUE,...)  Override config for this render (e.g., -config(map_style="road", max_photos_per_step=4))
-      l-1         Second to last trip
-
-Examples:
-  # Always provide either a selection or -a/-ur
-  r -a                Render all trips (including rendered)
-  r -ur -y 2025       Render unrendered trips from 2025
-  r -d 01.01.2025;01.06.2025 -ur   Render trips in date range (only unrendered)
-  r 1;4               Render trips 1 through 4
-  r -a l              Render last trip (even if rendered)
-  r 1,3,5             Render trips 1, 3, and 5
-        ''')
-    
-    parser.add_argument('bsp_folder', nargs='?', help='Path to BSPData folder (optional)')
-    parser.add_argument('--clear-cache', action='store_true', help='Clear the rendered trips cache and exit')
-    
-    args = parser.parse_args()
-    
-    # Determine BSPData folder
-    if args.bsp_folder:
-        bsp_data_folder = Path(args.bsp_folder)
-    else:
-        script_dir = Path(__file__).parent
-        bsp_data_folder = script_dir / "BSPData"
-        
-        if not bsp_data_folder.exists():
-            bsp_data_folder = Path.cwd() / "BSPData"
-    
-    if not bsp_data_folder.exists():
-        print(f"Error: BSPData folder not found at {bsp_data_folder}")
-        print("Usage: python polarsteps_pdf_generator.py [path/to/BSPData]")
-        sys.exit(1)
-    
     script_dir = Path(__file__).parent
-    
+    global _DEFAULT_LANGUAGE_MANAGER
+    _DEFAULT_LANGUAGE_MANAGER = load_language_manager("en", script_dir)
+
     # Load config (supports TOML with comments; falls back to commented JSON)
     config = {}
     config_toml = script_dir / "config.toml"
@@ -3031,11 +3154,14 @@ Examples:
     try:
         if config_toml.exists():
             if _tomllib is None:
-                raise RuntimeError("TOML config found but tomllib/toml is not available. Install the 'toml' package or run with Python 3.11+.")
-            with open(config_toml, "r", encoding="utf-8") as cf:
-                toml_content = cf.read()
-                # Use loads for both 'toml' package and stdlib 'tomllib'
-                config = _tomllib.loads(toml_content)
+                with open(config_toml, "r", encoding="utf-8") as cf:
+                    toml_content = cf.read()
+                config = _parse_simple_toml(toml_content)
+            else:
+                with open(config_toml, "r", encoding="utf-8") as cf:
+                    toml_content = cf.read()
+                    # Use loads for both 'toml' package and stdlib 'tomllib'
+                    config = _tomllib.loads(toml_content)
         elif config_json.exists():
             with open(config_json, "r", encoding="utf-8") as cf:
                 content = cf.read()
@@ -3044,8 +3170,37 @@ Examples:
                 content = re.sub(r"/\*.*?\*/", "", content, flags=re.DOTALL)
                 config = json.loads(content)
     except Exception as e:
-        print(f"Warning: could not load config: {e}")
+        print(get_default_language_manager().t("cli.config_load_warning", error=e))
         config = {}
+
+    lang = load_language_manager(config.get("language", "en"), script_dir)
+    _DEFAULT_LANGUAGE_MANAGER = lang
+    config["_language_code"] = lang.language_code
+
+    parser = argparse.ArgumentParser(
+        description=lang.t("cli.argparse_description"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=lang.t("cli.argparse_epilog"),
+    )
+    
+    parser.add_argument('bsp_folder', nargs='?', help=lang.t("cli.argparse_bsp_help"))
+    parser.add_argument('--clear-cache', action='store_true', help=lang.t("cli.argparse_clear_cache"))
+    
+    args = parser.parse_args()
+    
+    # Determine BSPData folder
+    if args.bsp_folder:
+        bsp_data_folder = Path(args.bsp_folder)
+    else:
+        bsp_data_folder = script_dir / "BSPData"
+        
+        if not bsp_data_folder.exists():
+            bsp_data_folder = Path.cwd() / "BSPData"
+    
+    if not bsp_data_folder.exists():
+        print(lang.t("cli.error_bsp_not_found", path=bsp_data_folder))
+        print(lang.t("cli.usage"))
+        sys.exit(1)
     
     # Move legacy cache locations into cache/
     _migrate_legacy_cache_paths()
@@ -3056,24 +3211,24 @@ Examples:
     
     # Handle clear cache from CLI
     if args.clear_cache:
-        print("Clearing cache...")
+        print(lang.t("cli.clearing_cache"))
         cache_manager.clear_cache()
-        print("✅ Cache cleared!")
+        print(lang.t("cli.cache_cleared_check"))
         return
     
-    print(f"Scanning for trips in: {bsp_data_folder}")
+    print(lang.t("cli.scanning_trips", path=bsp_data_folder))
     
     # Find all trips
     trips = find_trips(bsp_data_folder)
     
     if not trips:
-        print("No trips found in BSPData folder.")
+        print(lang.t("cli.no_trips_in_bsp"))
         sys.exit(1)
     
-    print(f"Found {len(trips)} trip(s)\n")
+    print(lang.t("cli.found_trips", count=len(trips)))
     
     # Enter the unified prompt loop
-    prompt_loop(trips, cache_manager, script_dir, config)
+    prompt_loop(trips, cache_manager, script_dir, config, lang)
 
 
 if __name__ == "__main__":
