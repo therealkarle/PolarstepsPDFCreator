@@ -1639,12 +1639,14 @@ def trip_parser_get_dates(trip_path: Path):
 class HtmlPDFBuilder:
     """Builds the PDF document using HTML/CSS rendered by Playwright (Chromium)."""
 
-    def __init__(self, output_path: Path, trip_parser: TripParser, map_generator: MapGenerator, config: dict = None, language_manager: LanguageManager = None):
+    def __init__(self, output_path: Path, trip_parser: TripParser, map_generator: MapGenerator, config: dict = None, language_manager: LanguageManager = None, cli_language_manager: LanguageManager = None):
         self.output_path = Path(output_path)
         self.trip_parser = trip_parser
         self.map_generator = map_generator
         self.config = config or {}
+        # language_manager is used for PDF content; cli_language_manager is used for console messages
         self.lang = language_manager or get_default_language_manager()
+        self.cli_lang = cli_language_manager or get_default_language_manager()
 
         # Layout options
         self.max_photos_per_step = int(self.config.get("max_photos_per_step", 6))
@@ -1870,12 +1872,12 @@ class HtmlPDFBuilder:
 
             def _render_overview_map():
                 try:
-                    print(self.lang.t("render.rendering_title_overview"))
+                    print(self.cli_lang.t("render.rendering_title_overview"))
                     t0 = time.perf_counter()
                     mg = self._get_thread_map_generator()
                     data = mg.generate_overview_map(self.trip_parser)
                     dt = time.perf_counter() - t0
-                    print(self.lang.t("render.overview_done", seconds=dt))
+                    print(self.cli_lang.t("render.overview_done", seconds=dt))
                     return data
                 except Exception:
                     return None
@@ -1909,11 +1911,11 @@ class HtmlPDFBuilder:
                 overview_img = ""
         else:
             try:
-                print(self.lang.t("render.rendering_title_overview"))
+                print(self.cli_lang.t("render.rendering_title_overview"))
                 t0 = time.perf_counter()
                 map_bytes = self.map_generator.generate_overview_map(self.trip_parser)
                 dt = time.perf_counter() - t0
-                print(self.lang.t("render.overview_done", seconds=dt))
+                print(self.cli_lang.t("render.overview_done", seconds=dt))
                 if map_bytes:
                     overview_img = f"<img class=\"map\" src=\"{self._map_bytes_to_data_url(map_bytes)}\"/>"
             except Exception:
@@ -1966,7 +1968,7 @@ class HtmlPDFBuilder:
             display_name = step_data.get("display_name", f"{self.lang.t('pdf.step_label')} {step_number}")
             title_text = f"{step_number}. {display_name}"
 
-            print(self.lang.t("render.rendering_step", current=step_number, total=step_count, name=display_name))
+            print(self.cli_lang.t("render.rendering_step", current=step_number, total=step_count, name=display_name))
 
             location = step_data.get("location", {}) if isinstance(step_data, dict) else {}
             location_name = location.get("name", "") if isinstance(location, dict) else ""
@@ -2081,12 +2083,12 @@ class HtmlPDFBuilder:
 
     def build(self):
         if sync_playwright is None:
-            raise RuntimeError(self.lang.t("render.playwright_missing"))
+            raise RuntimeError(self.cli_lang.t("render.playwright_missing"))
 
         t0 = time.perf_counter()
         html_doc = self._build_html()
         t1 = time.perf_counter()
-        print(self.lang.t("render.html_build_done", seconds=t1 - t0))
+        print(self.cli_lang.t("render.html_build_done", seconds=t1 - t0))
 
         # Write HTML to a temp file and load via file:// URL to avoid Chromium crashes
         # when passing very large HTML strings via set_content()
@@ -2120,7 +2122,7 @@ class HtmlPDFBuilder:
                             margin={"top": "15mm", "bottom": "15mm", "left": "15mm", "right": "15mm"},
                             print_background=True,
                         )
-                        print(self.lang.t("render.pdf_render_done", seconds=time.perf_counter() - t_pdf))
+                        print(self.cli_lang.t("render.pdf_render_done", seconds=time.perf_counter() - t_pdf))
                         browser.close()
                         last_error = None
                         break
@@ -2132,7 +2134,7 @@ class HtmlPDFBuilder:
                         except Exception:
                             pass
                         if attempt < 2:
-                            print(self.lang.t("render.html_render_retry"))
+                            print(self.cli_lang.t("render.html_render_retry"))
                 if last_error is not None:
                     raise last_error
         finally:
@@ -2159,7 +2161,7 @@ class HtmlPDFBuilder:
                 else:
                     # Linux/Unix
                     subprocess.run(["xdg-open", str(self.output_path)], check=False)
-                print(self.lang.t("render.open_pdf_done", seconds=time.perf_counter() - t_open))
+                print(self.cli_lang.t("render.open_pdf_done", seconds=time.perf_counter() - t_open))
             except Exception as e:
                 print(self.lang.t("render.open_pdf_failed", error=e))
 
@@ -2834,7 +2836,13 @@ def prompt_loop(trips: list, cache_manager: CacheManager, script_dir: Path, conf
                 # Apply config overrides for this render (if any)
                 merged_config = dict(config)
                 merged_config.update(result.get('config_overrides', {}))
-                render_lang = load_language_manager(merged_config.get("language", lang.language_code), script_dir)
+                
+                # PDF language: use pdf_language if set, otherwise fall back to language
+                pdf_lang_code = merged_config.get("pdf_language", "").strip()
+                if not pdf_lang_code:
+                    pdf_lang_code = merged_config.get("language", lang.language_code)
+                render_lang = load_language_manager(pdf_lang_code, script_dir)
+                merged_config["_pdf_language_manager"] = render_lang
 
                 # Setup stop mechanism
                 stop_flag = threading.Event()
@@ -2869,7 +2877,8 @@ def prompt_loop(trips: list, cache_manager: CacheManager, script_dir: Path, conf
 
                     print(f"\n{'='*70}")
                     print(f"[{i}/{len(trips_to_render)}]", end=" ")
-                    if render_trip(trip, script_dir, merged_config, cache_manager, check_stop, lang=render_lang):
+                    # Use CLI language for console output; PDF language is provided in merged_config
+                    if render_trip(trip, script_dir, merged_config, cache_manager, check_stop, lang=lang):
                         success_count += 1
                     drain_input_for_stop()
 
@@ -3094,8 +3103,11 @@ def render_trip(trip_path: Path, script_dir: Path, config: dict, cache_manager: 
         
         # No legacy config loading - the new [maps] section is authoritative for map sizing and padding.
 
+        # Use PDF-specific language if configured
+        pdf_lang = config.get("_pdf_language_manager", lang)
+        
         print(lang.t("render.renderer"))
-        pdf_builder = HtmlPDFBuilder(output_path, parser, map_gen, config=config, language_manager=lang)
+        pdf_builder = HtmlPDFBuilder(output_path, parser, map_gen, config=config, language_manager=pdf_lang, cli_language_manager=lang)
         pdf_builder.build()
         
         # Mark as rendered
@@ -3176,6 +3188,15 @@ def main():
     lang = load_language_manager(config.get("language", "en"), script_dir)
     _DEFAULT_LANGUAGE_MANAGER = lang
     config["_language_code"] = lang.language_code
+    
+    # Separate PDF language (falls back to CLI language if not set)
+    pdf_lang_code = config.get("pdf_language", "").strip()
+    if pdf_lang_code:
+        pdf_lang = load_language_manager(pdf_lang_code, script_dir)
+    else:
+        pdf_lang = lang
+    config["_pdf_language_code"] = pdf_lang.language_code
+    config["_pdf_language_manager"] = pdf_lang
 
     parser = argparse.ArgumentParser(
         description=lang.t("cli.argparse_description"),
