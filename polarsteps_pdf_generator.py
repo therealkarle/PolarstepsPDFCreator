@@ -1697,6 +1697,9 @@ class HtmlPDFBuilder:
             except Exception:
                 overview_img = ""
 
+        photo_wall_gap = int(self.config.get("photo_wall_gap", 0))
+        photo_wall_columns = int(self.config.get("photo_wall_columns", 3))
+
         html_parts = [
             "<!doctype html>",
             "<html>",
@@ -1713,8 +1716,8 @@ class HtmlPDFBuilder:
             ".step-meta { color: #666; font-size: 10pt; margin: 0 0 4mm; }",
             ".step-desc { font-size: 11pt; line-height: 1.35; margin: 0 0 4mm; }",
             ".step-list { margin: 0 0 4mm 6mm; }",
-            ".photo-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin: 2mm 0 4mm; }",
-            ".photo-grid img { width: 100%; height: auto; display: block; }",
+            f".photo-grid {{ column-count: {photo_wall_columns}; column-gap: {photo_wall_gap}px; margin: 2mm 0 4mm; }}",
+            f".photo-grid img {{ width: 100%; height: auto; display: block; break-inside: avoid; margin: 0 0 {photo_wall_gap}px 0; }}",
             ".video-header { margin-top: 3mm; font-weight: 600; }",
             ".video-link { display: block; color: #0066CC; text-decoration: none; font-size: 10pt; }",
             "</style>",
@@ -2431,10 +2434,8 @@ class PDFBuilder:
 
         # Wall configuration (points ~ pixels at 72 DPI)
         target_width = int(self.CONTENT_WIDTH)
-        gap = int(self.config.get("photo_wall_gap", 6))
-        target_row_height = int(self.config.get("photo_wall_row_height", 140))
-        min_row_height = int(self.config.get("photo_wall_min_row_height", 90))
-        max_row_height = int(self.config.get("photo_wall_max_row_height", 220))
+        gap = int(self.config.get("photo_wall_gap", 0))
+        columns = int(self.config.get("photo_wall_columns", 3))
 
         # Build list of (path, aspect)
         items = []
@@ -2452,61 +2453,39 @@ class PDFBuilder:
         if not items:
             return None
 
-        # Row packing (justified layout)
-        rows = []
-        current = []
-        sum_aspect = 0.0
+        # Masonry column layout (no crop, minimal vertical gaps)
+        columns = max(1, min(columns, len(items)))
+        col_width = int((target_width - gap * (columns - 1)) / columns)
+        if col_width < 1:
+            col_width = 1
+        col_heights = [0 for _ in range(columns)]
+        placements = []  # (path, x, y, w, h)
 
-        for idx, (path, aspect) in enumerate(items):
-            current.append((path, aspect))
-            sum_aspect += aspect
+        for path, aspect in items:
+            if aspect <= 0:
+                continue
+            w = col_width
+            h = max(1, int(round(w / aspect)))
+            col_idx = min(range(columns), key=lambda i: col_heights[i])
+            x = col_idx * (col_width + gap)
+            y = col_heights[col_idx]
+            placements.append((path, x, y, w, h))
+            col_heights[col_idx] += h + gap
 
-            row_height = int(target_width / max(sum_aspect, 0.01))
-            is_last = idx == len(items) - 1
+        total_height = max(col_heights) - gap if col_heights else 1
+        total_height = max(total_height, 1)
 
-            if row_height <= target_row_height or len(current) >= 3 or is_last:
-                # Clamp row height for aesthetics
-                if is_last and row_height > target_row_height * 1.2:
-                    row_height = target_row_height
-                row_height = max(min_row_height, min(row_height, max_row_height))
-                rows.append((list(current), row_height))
-                current = []
-                sum_aspect = 0.0
+        wall = Image.new("RGB", (target_width, total_height), (255, 255, 255))
 
-        # Compute final wall size
-        total_height = 0
-        for row, row_h in rows:
-            total_height += row_h
-        total_height += gap * (len(rows) - 1) if len(rows) > 1 else 0
-
-        wall = Image.new("RGB", (target_width, max(total_height, 1)), (255, 255, 255))
-
-        y = 0
-        for row, row_h in rows:
-            # Compute widths scaled to fit target_width
-            raw_widths = [int(row_h * aspect) for _, aspect in row]
-            total_raw = sum(raw_widths)
-            available = target_width - gap * (len(row) - 1)
-            scale = float(available) / float(max(total_raw, 1))
-            widths = [max(1, int(w * scale)) for w in raw_widths]
-
-            # Adjust last width to fill any rounding error
-            if widths:
-                widths[-1] = max(1, available - sum(widths[:-1]))
-
-            x = 0
-            for (path, _aspect), w in zip(row, widths):
-                try:
-                    with Image.open(path) as img:
-                        if img.mode in ("RGBA", "P"):
-                            img = img.convert("RGB")
-                        fitted = ImageOps.fit(img, (w, row_h), method=Image.LANCZOS)
-                        wall.paste(fitted, (x, y))
-                except Exception as e:
-                    print(f"    Warning: Could not process image {path}: {e}")
-                x += w + gap
-
-            y += row_h + gap
+        for path, x, y, w, h in placements:
+            try:
+                with Image.open(path) as img:
+                    if img.mode in ("RGBA", "P"):
+                        img = img.convert("RGB")
+                    resized = img.resize((w, h), resample=Image.LANCZOS)
+                    wall.paste(resized, (x, y))
+            except Exception as e:
+                print(f"    Warning: Could not process image {path}: {e}")
 
         # Convert wall to ReportLab image
         img_bytes = io.BytesIO()
