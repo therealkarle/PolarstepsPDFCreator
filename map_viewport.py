@@ -433,85 +433,120 @@ def compute_overview_viewport(
     viewport_height_px: int = 450,  # 16:9 at 800px width
     aspect_ratio: float = ASPECT_RATIO,
     extra_padding_px: float = 0.0,
+    algorithm: str = "bbox",
 ) -> MapViewport:
     """
     Compute viewport for trip overview map showing all steps.
-    
-    NEW RADIUS-BASED ALGORITHM:
-    1. Compute geographic center of all points
-    2. Find maximum distance from center to ANY point
-    3. Add padding margin to that radius
-    4. Compute zoom that guarantees that radius fits in viewport
-    
-    This ensures all markers are visible because we explicitly ensure
-    the furthest point (plus margin) fits within the viewport.
-    
-    Args:
-        steps: List of all step locations
-        padding_factor: Padding around steps (0.10 = 10% extra radius)
-        min_width_km: Minimum map width in kilometers
-        viewport_width_px: Logical viewport width (not render-scaled)
-        viewport_height_px: Logical viewport height (not render-scaled)
-        aspect_ratio: Target aspect ratio (width:height)
-        extra_padding_px: Extra pixel padding for markers (added to radius)
-    
-    Returns:
-        MapViewport ready for static map generation
+
+    BOUNDING-BOX-BASED ALGORITHM (more consistent and controllable):
+    1. Compute geographic bounding box of all points
+    2. Apply horizontal and vertical padding factors (vertical scaled by aspect)
+    3. Apply extra pixel padding converted to a fractional expansion
+    4. Enforce minimum width and expand to target aspect ratio
+    5. Compute zoom using the bounding box (compute_zoom_for_bounds)
+
+    This mirrors the step viewport logic and avoids pathologies of the
+    radius-based method (e.g., when points are highly skewed or outliers
+    drastically increase radius).
     """
     if not steps:
         raise ValueError("Cannot compute viewport for empty step list")
-    
+
     # Convert to point tuples (lat, lon)
     points = [(s.lat, s.lon) for s in steps]
-    
-    # Step 1: Compute geographic center
-    center_lat, center_lon = geographic_midpoint(points)
-    
-    # Step 2: Find maximum distance from center to any point
-    max_radius_km = 0.0
-    for lat, lon in points:
-        dist = haversine_km(center_lat, center_lon, lat, lon)
-        if dist > max_radius_km:
-            max_radius_km = dist
-    
-    # Step 3: Apply padding factor (e.g., 0.10 = 10% extra)
-    # Use a minimum padding of 30% to ensure markers don't touch edges
-    effective_padding = max(0.30, padding_factor)
-    padded_radius_km = max_radius_km * (1.0 + effective_padding)
-    
-    # Step 4: Apply extra pixel-based padding converted to km
-    # Approximate: at equator, 1 pixel at zoom 15 ≈ 4.78 meters
-    # This is rough but adds safety margin
+
+    algo = str(algorithm or "").strip().lower()
+    if algo.startswith("radius"):
+        # --------- RADIUS-BASED (legacy) ---------
+        # Center on geographic midpoint and fit max radius from center
+        center_lat, center_lon = geographic_midpoint(points)
+
+        max_radius_km = 0.0
+        for lat, lon in points:
+            dist = haversine_km(center_lat, center_lon, lat, lon)
+            if dist > max_radius_km:
+                max_radius_km = dist
+
+        effective_padding = max(0.0, float(padding_factor))
+        padded_radius_km = max_radius_km * (1.0 + effective_padding)
+
+        try:
+            pad_px = float(extra_padding_px)
+        except Exception:
+            pad_px = 0.0
+        if pad_px > 0 and viewport_width_px > 0:
+            pixel_margin_fraction = (2 * pad_px) / viewport_width_px
+            padded_radius_km *= (1.0 + pixel_margin_fraction)
+
+        min_radius_km = min_width_km / 2.0
+        if padded_radius_km < min_radius_km:
+            padded_radius_km = min_radius_km
+
+        zoom = _compute_zoom_for_radius_km(
+            padded_radius_km,
+            center_lat,
+            viewport_width_px,
+            viewport_height_px,
+            aspect_ratio,
+        )
+
+        bounds = GeoBounds.from_points(points)
+        bounds = bounds.expand_by_factor(effective_padding)
+        bounds = bounds.expand_to_aspect_ratio(aspect_ratio)
+
+        return MapViewport(
+            center_lat=center_lat,
+            center_lon=center_lon,
+            zoom=zoom,
+            bounds=bounds,
+            width_px=viewport_width_px,
+            height_px=viewport_height_px,
+        )
+
+    # --------- BOUNDING-BOX-BASED (default) ---------
+    # Create bounds that contain all points
+    bounds = GeoBounds.from_points(points)
+
+    # Apply padding from config to keep markers inside viewport.
+    # Horizontal padding uses the configured factor; vertical padding is scaled
+    # by the aspect ratio so wide maps don't get excessive vertical buffer.
+    horizontal_padding = max(0.0, float(padding_factor))
+    vertical_padding = horizontal_padding / max(0.1, aspect_ratio)
+
+    lat_expand = bounds.lat_span_deg * vertical_padding
+    lon_expand = bounds.lon_span_deg * horizontal_padding
+    new_lat_south = clamp_lat(bounds.lat_south - lat_expand)
+    new_lat_north = clamp_lat(bounds.lat_north + lat_expand)
+    new_lon_west, new_lon_east = expand_lon_bounds(
+        bounds.lon_west, bounds.lon_east, lon_expand
+    )
+    bounds = GeoBounds(new_lat_south, new_lat_north, new_lon_west, new_lon_east)
+
+    # Apply extra pixel-based padding for marker sizes
     try:
         pad_px = float(extra_padding_px)
     except Exception:
         pad_px = 0.0
     if pad_px > 0 and viewport_width_px > 0:
-        # Assume we need this many pixels of margin, convert to fraction of viewport
-        # and then to fraction of radius
         pixel_margin_fraction = (2 * pad_px) / viewport_width_px
-        padded_radius_km *= (1.0 + pixel_margin_fraction)
-    
-    # Step 5: Enforce minimum width (radius = width/2)
-    min_radius_km = min_width_km / 2.0
-    if padded_radius_km < min_radius_km:
-        padded_radius_km = min_radius_km
-    
-    # Step 6: Compute zoom using radius-based algorithm
-    zoom = _compute_zoom_for_radius_km(
-        padded_radius_km,
-        center_lat,
+        bounds = bounds.expand_by_factor(pixel_margin_fraction)
+
+    # Enforce minimum width
+    bounds = bounds.expand_to_min_width_km(min_width_km)
+
+    # Expand to target aspect ratio (never shrinks, only expands)
+    bounds = bounds.expand_to_aspect_ratio(aspect_ratio)
+
+    # Compute zoom using the actual bounds (ensures rectangular viewport fits)
+    zoom = compute_zoom_for_bounds(
+        bounds,
         viewport_width_px,
         viewport_height_px,
-        aspect_ratio,
     )
-    
-    # Create bounds for compatibility (used for debugging/display)
-    # This is approximate - the actual viewport may differ slightly
-    bounds = GeoBounds.from_points(points)
-    bounds = bounds.expand_by_factor(effective_padding)
-    bounds = bounds.expand_to_aspect_ratio(aspect_ratio)
-    
+
+    # Use the bounds center for the map center
+    center_lat, center_lon = bounds.center
+
     return MapViewport(
         center_lat=center_lat,
         center_lon=center_lon,

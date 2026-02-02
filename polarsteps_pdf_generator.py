@@ -602,6 +602,8 @@ class MapGenerator:
         # Overview map settings
         self.overview_padding_factor = 0.10  # 10% padding on each side
         self.overview_min_width_km = 10.0
+        # Algorithm for overview fitting: 'bbox' (default) or 'radius'
+        self.overview_algorithm = "bbox"
         
         # Step map settings
         self.step_padding_factor = 0.10
@@ -699,6 +701,7 @@ class MapGenerator:
         mg._pixel_scale = self._pixel_scale
         mg.overview_padding_factor = self.overview_padding_factor
         mg.overview_min_width_km = self.overview_min_width_km
+        mg.overview_algorithm = self.overview_algorithm
         mg.step_padding_factor = self.step_padding_factor
         mg.step_min_width_km = self.step_min_width_km
         mg.step_max_distance_farthest_km = self.step_max_distance_farthest_km
@@ -1132,6 +1135,7 @@ class MapGenerator:
                     viewport_height_px=h,
                     aspect_ratio=float(getattr(self, "overview_aspect_ratio", MAP_ASPECT_RATIO)),
                     extra_padding_px=extra_pad_px,
+                    algorithm=str(getattr(self, 'overview_algorithm', 'bbox')),
                 )
                 zoom = max(0, min(19, viewport.zoom))
                 center = (viewport.center_lon, viewport.center_lat)
@@ -3091,6 +3095,8 @@ def render_trip(trip_path: Path, script_dir: Path, config: dict, cache_manager: 
         # Overview map settings
         map_gen.overview_padding_factor = float(overview_config.get("padding_factor", 0.10))
         map_gen.overview_min_width_km = float(overview_config.get("min_width_km", 10.0))
+        # Optional: choose algorithm 'bbox' or 'radius'
+        map_gen.overview_algorithm = str(overview_config.get("algorithm", map_gen.overview_algorithm)).lower()
         # Step-specific config
         map_gen.step_padding_factor = float(step_config.get("padding_factor", map_gen.step_padding_factor))
         map_gen.step_min_width_km = float(step_config.get("min_width_km", map_gen.step_min_width_km))

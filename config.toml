@@ -1,7 +1,7 @@
 # --- App Behavior ---
 # Language selection (see LanguagePack/)
 # Supported: "en", "de" (copy a pack to add more)
-language = "en"
+language = "de"
 # PDF language (if different from CLI language, leave empty to use 'language')
 pdf_language = "de"
 # List already rendered trips in the CLI menu
@@ -65,7 +65,11 @@ vertical_resolution_px = 720
 # Aspect ratio for overview maps (width:height). Bounds are expanded to fit.
 aspect_ratio = "16:9"
 # Padding factor around all steps (0.10 = 10% on each side)
-padding_factor = 0.05
+padding_factor = 0.02
+# Algorithm for overview fitting. Supported values:
+#   - "bbox"  : Bounding-box expansion (default; consistent with step maps)
+#   - "radius": Radius-from-midpoint fitting (legacy behavior)
+algorithm = "bbox"
 # Minimum width in km (expands if all steps are very close)
 min_width_km = 25.0
 

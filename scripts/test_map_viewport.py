@@ -223,6 +223,61 @@ def test_compute_overview_viewport():
     print("✓ compute_overview_viewport tests passed")
 
 
+def test_overview_padding_affects_viewport():
+    """Ensure padding_factor affects viewport bounds and zoom (larger padding -> wider bounds, smaller zoom)"""
+    steps = [
+        StepLocation(lat=48.0, lon=8.0, step_id="0"),
+        StepLocation(lat=48.5, lon=9.0, step_id="1"),
+        StepLocation(lat=47.5, lon=10.0, step_id="2"),
+    ]
+
+    vp_small = compute_overview_viewport(steps=steps, padding_factor=0.03, min_width_km=5.0)
+    vp_large = compute_overview_viewport(steps=steps, padding_factor=0.30, min_width_km=5.0)
+
+    # Larger padding should result in larger bounds width and equal or smaller zoom
+    assert vp_large.bounds.width_km() > vp_small.bounds.width_km(), (
+        f"Expected larger padding to increase bounds width: {vp_large.bounds.width_km():.1f} > {vp_small.bounds.width_km():.1f}"
+    )
+    assert vp_large.zoom <= vp_small.zoom, (
+        f"Expected larger padding to produce equal or smaller zoom (more zoomed out): {vp_large.zoom} <= {vp_small.zoom}"
+    )
+
+    print("✓ overview padding effect tests passed")
+
+
+def test_overview_center_is_bounds_center():
+    """Overview map center should match the bounding box center."""
+    steps = [
+        StepLocation(lat=48.0, lon=8.0, step_id="0"),
+        StepLocation(lat=48.5, lon=9.0, step_id="1"),
+        StepLocation(lat=47.5, lon=10.0, step_id="2"),
+    ]
+
+    vp = compute_overview_viewport(steps=steps, padding_factor=0.05, min_width_km=5.0)
+    b_center = vp.bounds.center
+    assert abs(vp.center_lat - b_center[0]) < 1e-6
+    assert abs(vp.center_lon - b_center[1]) < 1e-6
+
+    print("✓ overview center == bounds.center test passed")
+
+
+def test_overview_algorithm_switch():
+    """Ensure both 'bbox' and 'radius' algorithms run and return a MapViewport."""
+    steps = [
+        StepLocation(lat=48.0, lon=8.0, step_id="0"),
+        StepLocation(lat=48.5, lon=9.0, step_id="1"),
+        StepLocation(lat=47.5, lon=10.0, step_id="2"),
+    ]
+
+    vp_bbox = compute_overview_viewport(steps=steps, padding_factor=0.05, min_width_km=5.0, algorithm='bbox')
+    vp_rad = compute_overview_viewport(steps=steps, padding_factor=0.05, min_width_km=5.0, algorithm='radius')
+
+    assert isinstance(vp_bbox, MapViewport)
+    assert isinstance(vp_rad, MapViewport)
+
+    print("✓ overview algorithm switch tests passed")
+
+
 def test_compute_step_viewport():
     """Test step viewport computation with neighbor filtering."""
     current = StepLocation(lat=48.0, lon=9.0, step_id="current")
