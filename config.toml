@@ -37,7 +37,7 @@ photo_wall_gap = 2
 # Map style: "hybrid" (satellite + labels), "satellite" (imagery only) or "road" (streets)
 map_style = "hybrid"
 # Opacity for hybrid label overlay (0.0-1.0)
-hybrid_labels_opacity = 1
+hybrid_labels_opacity = 1.0
 
 # Base size of the circular photo markers in pixels. This is scaled by the map's
 # vertical resolution and any supersampling/render scale so markers keep consistent

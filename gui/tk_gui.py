@@ -291,6 +291,74 @@ SCRIPT_DIR = Path(__file__).resolve().parents[1]
 DEFAULT_BSP = SCRIPT_DIR / "BSPData"
 
 
+class ScrollableFrame(ttk.Frame):
+    """A simple scrollable frame that keeps its inner frame width in sync
+    with the canvas and supports mousewheel scrolling when the pointer is over it."""
+    def __init__(self, parent, **kwargs):
+        super().__init__(parent, **kwargs)
+        self._canvas = tk.Canvas(self, highlightthickness=0)
+        self._vscroll = ttk.Scrollbar(self, orient=tk.VERTICAL, command=self._canvas.yview)
+        self._canvas.configure(yscrollcommand=self._vscroll.set)
+        self._vscroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self._canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.inner = ttk.Frame(self._canvas)
+        self._window_id = self._canvas.create_window((0, 0), window=self.inner, anchor='nw')
+
+        def _on_inner_config(e):
+            try:
+                self._canvas.configure(scrollregion=self._canvas.bbox('all'))
+            except Exception:
+                pass
+        self.inner.bind('<Configure>', _on_inner_config)
+
+        def _on_canvas_config(e):
+            try:
+                w = e.width
+                if w > 10:
+                    try:
+                        self._canvas.itemconfig(self._window_id, width=w)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+        self._canvas.bind('<Configure>', _on_canvas_config)
+
+        # mouse wheel handling bound while mouse is over inner area
+        def _on_mousewheel(e):
+            delta = 0
+            if getattr(e, 'delta', 0):
+                delta = int(-1 * (e.delta / 120))
+            else:
+                num = getattr(e, 'num', None)
+                if num == 4:
+                    delta = -1
+                elif num == 5:
+                    delta = 1
+            try:
+                self._canvas.yview_scroll(delta, 'units')
+            except Exception:
+                pass
+
+        def _bind_mousewheel():
+            try:
+                self.bind_all('<MouseWheel>', _on_mousewheel)
+                self.bind_all('<Button-4>', _on_mousewheel)
+                self.bind_all('<Button-5>', _on_mousewheel)
+            except Exception:
+                pass
+
+        def _unbind_mousewheel():
+            try:
+                self.unbind_all('<MouseWheel>')
+                self.unbind_all('<Button-4>')
+                self.unbind_all('<Button-5>')
+            except Exception:
+                pass
+
+        self.inner.bind('<Enter>', lambda e: _bind_mousewheel())
+        self.inner.bind('<Leave>', lambda e: _unbind_mousewheel())
+
+
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -469,72 +537,77 @@ class App(tk.Tk):
         # NOTE: Render / Stop buttons moved below the progress bar to a dedicated row
 
         # Settings tab: Config editor and package manager
-        try:
-            # Config editor
-            frm_cfg = ttk.LabelFrame(tab_settings, text='Konfiguration (config.toml)')
-            frm_cfg.pack(fill=tk.BOTH, expand=False, padx=10, pady=(10, 6))
-            self.cfg_text = tk.Text(frm_cfg, height=12, wrap='none')
-            self.cfg_text.pack(fill=tk.BOTH, expand=True, side=tk.LEFT)
-            cfg_scr = ttk.Scrollbar(frm_cfg, orient=tk.VERTICAL, command=self.cfg_text.yview)
-            cfg_scr.pack(side=tk.LEFT, fill=tk.Y)
-            self.cfg_text.config(yscrollcommand=cfg_scr.set)
-            frm_cfg_btn = ttk.Frame(frm_cfg)
-            frm_cfg_btn.pack(fill=tk.X, padx=6, pady=6)
-            ttk.Button(frm_cfg_btn, text='Reload', command=self._load_config_text).pack(side=tk.LEFT)
-            ttk.Button(frm_cfg_btn, text='Save', command=self._save_config_text).pack(side=tk.LEFT, padx=(6, 0))
+        # Config editor (Graphical form + raw editor)
+        frm_cfg = ttk.LabelFrame(tab_settings, text='Konfiguration (config.toml)')
+        frm_cfg.pack(fill=tk.BOTH, expand=False, padx=10, pady=(10, 6))
 
-            # Package manager
-            frm_pkg = ttk.LabelFrame(tab_settings, text='Packages')
-            frm_pkg.pack(fill=tk.BOTH, expand=True, padx=10, pady=(6, 10))
-            # Add a Progress column to show per-package progress / percent
-            self.pkg_tree = ttk.Treeview(frm_pkg, columns=('pkg', 'status', 'progress'), show='headings', height=8)
-            self.pkg_tree.heading('pkg', text='Package')
-            self.pkg_tree.column('pkg', anchor='w')
-            self.pkg_tree.heading('status', text='Status')
-            self.pkg_tree.column('status', width=140, anchor='center')
-            self.pkg_tree.heading('progress', text='Progress')
-            self.pkg_tree.column('progress', width=100, anchor='center')
-            self.pkg_tree.pack(fill=tk.BOTH, expand=True, side=tk.LEFT)
-            pkg_scr = ttk.Scrollbar(frm_pkg, orient=tk.VERTICAL, command=self.pkg_tree.yview)
-            pkg_scr.pack(side=tk.LEFT, fill=tk.Y)
-            self.pkg_tree.config(yscrollcommand=pkg_scr.set)
-            frm_pkg_btn = ttk.Frame(frm_pkg)
-            frm_pkg_btn.pack(fill=tk.X, padx=6, pady=6)
-            self.btn_pkg_refresh = ttk.Button(frm_pkg_btn, text='Refresh', command=self._refresh_packages)
-            self.btn_pkg_refresh.pack(side=tk.LEFT)
-            self.btn_pkg_install_selected = ttk.Button(frm_pkg_btn, text='Install Selected', command=self._install_selected_packages)
-            self.btn_pkg_install_selected.pack(side=tk.LEFT, padx=(6, 0))
-            self.btn_pkg_install_all = ttk.Button(frm_pkg_btn, text='Install All', command=self._install_all_packages)
-            self.btn_pkg_install_all.pack(side=tk.LEFT, padx=(6, 0))
-            self.btn_pkg_install_uninstalled = ttk.Button(frm_pkg_btn, text='Install Uninstalled', command=self._install_uninstalled_packages)
-            self.btn_pkg_install_uninstalled.pack(side=tk.LEFT, padx=(6, 0))
-            # Progress indicator (spinner) for package installs
-            self.pkg_progress = ttk.Progressbar(frm_pkg_btn, mode='indeterminate', length=120)
-            # hidden initially
-            self.pkg_progress.pack(side=tk.RIGHT, padx=(6, 0))
-            self.pkg_progress.pack_forget()
+        # Container frame: use a simple frame so the form can occupy full width
+        container = ttk.Frame(frm_cfg)
+        container.pack(fill=tk.BOTH, expand=True)
 
-            # Current package status and progress (per-package indicator)
-            frm_pkg_status = ttk.Frame(frm_pkg)
-            frm_pkg_status.pack(fill=tk.X, padx=6, pady=(6, 4))
-            self.lbl_pkg_current = ttk.Label(frm_pkg_status, text='')
-            self.lbl_pkg_current.pack(side=tk.LEFT)
-            self.cur_pkg_progress = ttk.Progressbar(frm_pkg_status, mode='indeterminate', length=200)
-            # hidden initially (shown when package installs)
-            # Install log (shows terminal output)
-            frm_pkg_log = ttk.Frame(frm_pkg)
-            frm_pkg_log.pack(fill=tk.BOTH, expand=True, padx=6, pady=(6, 6))
-            self.pkg_log_text = tk.Text(frm_pkg_log, height=8, wrap='none')
-            self.pkg_log_text.pack(fill=tk.BOTH, expand=True, side=tk.LEFT)
-            pkg_log_scr = ttk.Scrollbar(frm_pkg_log, orient=tk.VERTICAL, command=self.pkg_log_text.yview)
-            pkg_log_scr.pack(side=tk.LEFT, fill=tk.Y)
-            self.pkg_log_text.config(yscrollcommand=pkg_log_scr.set)
-            frm_log_btn = ttk.Frame(frm_pkg_log)
-            frm_log_btn.pack(fill=tk.X, padx=6, pady=(6, 0))
-            ttk.Button(frm_log_btn, text='Clear Log', command=self._clear_pkg_log).pack(side=tk.LEFT)
-            ttk.Button(frm_log_btn, text='Save Log', command=self._save_pkg_log).pack(side=tk.LEFT, padx=(6, 0))
-        except Exception:
-            pass
+        # Left: scrollable form (fills the container) using ScrollableFrame
+        self.scrollable_form = ScrollableFrame(container)
+        self.scrollable_form.pack(fill=tk.BOTH, expand=True, side=tk.LEFT)
+        # expose inner for the existing form builder
+        self.form_inner = self.scrollable_form.inner
+# mousewheel binding handled by the ScrollableFrame implementation
+
+        # Build form widgets
+        self._build_config_form()
+
+        # Small helper label
+        ttk.Label(frm_cfg, text='Tip: Use the graphical form for common settings; raw editor kept for advanced edits.', foreground='gray').pack(anchor='w', padx=8, pady=(4, 0))
+
+        # Package manager
+        frm_pkg = ttk.LabelFrame(tab_settings, text='Packages')
+        frm_pkg.pack(fill=tk.BOTH, expand=True, padx=10, pady=(6, 10))
+        # Add a Progress column to show per-package progress / percent
+        self.pkg_tree = ttk.Treeview(frm_pkg, columns=('pkg', 'status', 'progress'), show='headings', height=8)
+        self.pkg_tree.heading('pkg', text='Package')
+        self.pkg_tree.column('pkg', anchor='w')
+        self.pkg_tree.heading('status', text='Status')
+        self.pkg_tree.column('status', width=140, anchor='center')
+        self.pkg_tree.heading('progress', text='Progress')
+        self.pkg_tree.column('progress', width=100, anchor='center')
+        self.pkg_tree.pack(fill=tk.BOTH, expand=True, side=tk.LEFT)
+        pkg_scr = ttk.Scrollbar(frm_pkg, orient=tk.VERTICAL, command=self.pkg_tree.yview)
+        pkg_scr.pack(side=tk.LEFT, fill=tk.Y)
+        self.pkg_tree.config(yscrollcommand=pkg_scr.set)
+        frm_pkg_btn = ttk.Frame(frm_pkg)
+        frm_pkg_btn.pack(fill=tk.X, padx=6, pady=6)
+        self.btn_pkg_refresh = ttk.Button(frm_pkg_btn, text='Refresh', command=self._refresh_packages)
+        self.btn_pkg_refresh.pack(side=tk.LEFT)
+        self.btn_pkg_install_selected = ttk.Button(frm_pkg_btn, text='Install Selected', command=self._install_selected_packages)
+        self.btn_pkg_install_selected.pack(side=tk.LEFT, padx=(6, 0))
+        self.btn_pkg_install_all = ttk.Button(frm_pkg_btn, text='Install All', command=self._install_all_packages)
+        self.btn_pkg_install_all.pack(side=tk.LEFT, padx=(6, 0))
+        self.btn_pkg_install_uninstalled = ttk.Button(frm_pkg_btn, text='Install Uninstalled', command=self._install_uninstalled_packages)
+        self.btn_pkg_install_uninstalled.pack(side=tk.LEFT, padx=(6, 0))
+        # Progress indicator (spinner) for package installs
+        self.pkg_progress = ttk.Progressbar(frm_pkg_btn, mode='indeterminate', length=120)
+        # hidden initially
+        self.pkg_progress.pack(side=tk.RIGHT, padx=(6, 0))
+        self.pkg_progress.pack_forget()
+
+        # Current package status and progress (per-package indicator)
+        frm_pkg_status = ttk.Frame(frm_pkg)
+        frm_pkg_status.pack(fill=tk.X, padx=6, pady=(6, 4))
+        self.lbl_pkg_current = ttk.Label(frm_pkg_status, text='')
+        self.lbl_pkg_current.pack(side=tk.LEFT)
+        self.cur_pkg_progress = ttk.Progressbar(frm_pkg_status, mode='indeterminate', length=200)
+        # hidden initially (shown when package installs)
+        # Install log (shows terminal output)
+        frm_pkg_log = ttk.Frame(frm_pkg)
+        frm_pkg_log.pack(fill=tk.BOTH, expand=True, padx=6, pady=(6, 6))
+        self.pkg_log_text = tk.Text(frm_pkg_log, height=8, wrap='none')
+        self.pkg_log_text.pack(fill=tk.BOTH, expand=True, side=tk.LEFT)
+        pkg_log_scr = ttk.Scrollbar(frm_pkg_log, orient=tk.VERTICAL, command=self.pkg_log_text.yview)
+        pkg_log_scr.pack(side=tk.LEFT, fill=tk.Y)
+        self.pkg_log_text.config(yscrollcommand=pkg_log_scr.set)
+        frm_log_btn = ttk.Frame(frm_pkg_log)
+        frm_log_btn.pack(fill=tk.X, padx=6, pady=(6, 0))
+        ttk.Button(frm_log_btn, text='Clear Log', command=self._clear_pkg_log).pack(side=tk.LEFT)
+        ttk.Button(frm_log_btn, text='Save Log', command=self._save_pkg_log).pack(side=tk.LEFT, padx=(6, 0))
 
         # Progress bar and styles
         self.style = ttk.Style(self)
@@ -565,13 +638,25 @@ class App(tk.Tk):
         self.stop_btn = ttk.Button(frm_bottom, text="Stop", command=self._on_stop, state=tk.DISABLED)
         self.stop_btn.pack(side=tk.RIGHT, padx=(6, 0))
 
-        # Load initial config text and package status
+        # Load initial config text, form values and package status
         try:
             self._load_config_text()
         except Exception:
             pass
         try:
+            self._load_config_form()
+        except Exception:
+            pass
+        try:
             self._refresh_packages()
+        except Exception:
+            pass
+
+        # Intercept combobox mousewheel at class level to prevent Combobox values from changing
+        try:
+            self.bind_class('TCombobox', '<MouseWheel>', self._combobox_mousewheel)
+            self.bind_class('TCombobox', '<Button-4>', self._combobox_mousewheel)
+            self.bind_class('TCombobox', '<Button-5>', self._combobox_mousewheel)
         except Exception:
             pass
 
@@ -652,19 +737,836 @@ class App(tk.Tk):
                 txt = cfg_file.read_text(encoding='utf-8')
             else:
                 txt = '# config.toml not found. Create settings here.'
-            self.cfg_text.delete('1.0', tk.END)
-            self.cfg_text.insert('1.0', txt)
+            # Cache raw content for comment-preserving edits (raw editor removed)
+            self._original_config_text = txt
+            self._original_config_lines = txt.splitlines()
+            # quietly cache raw config on load (no popup) and update status text
+            try:
+                self.status_text.set('Configuration cached')
+            except Exception:
+                pass
         except Exception as e:
             messagebox.showerror('Error', f'Could not load config: {e}')
 
     def _save_config_text(self):
-        cfg_file = SCRIPT_DIR / 'config.toml'
+        # Raw editor has been removed. Saving raw text is not available.
+        messagebox.showinfo('Not available', 'Raw editor removed. Use the graphical form and "Save to file" to write configuration.')
+
+    # --- Mousewheel helpers to ensure scrolling works when hovering controls ---
+    def _hook_widget_for_mouse_scroll(self, widget):
+        """Bind enter/leave on a widget so the mousewheel scrolls the config form while hovering.
+
+        We bind wheel events directly on the hovered widget to scroll the form and
+        return 'break' to prevent the widget from changing its own value (e.g. Spinbox/Combobox).
+        """
         try:
-            content = self.cfg_text.get('1.0', tk.END)
-            cfg_file.write_text(content, encoding='utf-8')
-            messagebox.showinfo('Saved', 'Configuration saved to config.toml')
+            widget.bind('<Enter>', lambda e, w=widget: self._bind_scroll_for(w))
+            widget.bind('<Leave>', lambda e, w=widget: self._unbind_scroll_for(w))
+        except Exception:
+            pass
+
+    def _bind_scroll_for(self, widget):
+        """Bind mousewheel for the widget and all its descendants to prevent widgets
+        from changing their value and to scroll the form instead."""
+        try:
+            if not hasattr(self, '_mousebound_map'):
+                self._mousebound_map = {}
+            if widget in self._mousebound_map:
+                return
+            # collect widget and all descendants
+            stack = [widget]
+            bound = []
+            while stack:
+                w = stack.pop()
+                bound.append(w)
+                try:
+                    children = w.winfo_children()
+                    if children:
+                        stack.extend(children)
+                except Exception:
+                    pass
+            for w in bound:
+                try:
+                    w.bind('<MouseWheel>', self._widget_mousewheel)
+                    w.bind('<Button-4>', self._widget_mousewheel)
+                    w.bind('<Button-5>', self._widget_mousewheel)
+                except Exception:
+                    pass
+            self._mousebound_map[widget] = bound
+        except Exception:
+            pass
+
+    def _unbind_scroll_for(self, widget):
+        """Unbind mousewheel handlers for the widget and its descendants."""
+        try:
+            if not hasattr(self, '_mousebound_map'):
+                return
+            bound = self._mousebound_map.pop(widget, None)
+            if not bound:
+                return
+            for w in bound:
+                try:
+                    w.unbind('<MouseWheel>')
+                    w.unbind('<Button-4>')
+                    w.unbind('<Button-5>')
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    def _widget_mousewheel(self, event):
+        """Scroll the form canvas and return 'break' to prevent widgets handling the wheel."""
+        try:
+            # If scrolling happens on a Listbox that's part of a Combobox popdown, treat it like a combobox
+            try:
+                w = event.widget
+                cls = w.winfo_class()
+                if cls == 'Listbox':
+                    cur = w
+                    while cur is not None:
+                        try:
+                            cname = cur.winfo_class()
+                            if 'Combobox' in cname or 'Popdown' in cname:
+                                # treat as combobox popdown
+                                delta = 0
+                                if getattr(event, 'delta', 0):
+                                    delta = int(-1 * (event.delta / 120))
+                                else:
+                                    num = getattr(event, 'num', None)
+                                    if num == 4:
+                                        delta = -1
+                                    elif num == 5:
+                                        delta = 1
+                                try:
+                                    self.scrollable_form._canvas.yview_scroll(delta, 'units')
+                                except Exception:
+                                    pass
+                                return 'break'
+                        except Exception:
+                            pass
+                        cur = getattr(cur, 'master', None)
+            except Exception:
+                pass
+
+            delta = 0
+            if getattr(event, 'delta', 0):
+                delta = int(-1 * (event.delta / 120))
+            else:
+                num = getattr(event, 'num', None)
+                if num == 4:
+                    delta = -1
+                elif num == 5:
+                    delta = 1
+            try:
+                self.scrollable_form._canvas.yview_scroll(delta, 'units')
+            except Exception:
+                pass
+        except Exception:
+            pass
+        return 'break'
+
+    def _combobox_mousewheel(self, event):
+        """Class-level handler for Combobox mouse wheel that prevents changing the
+        Combobox value and scrolls the form instead. Returns 'break' to stop default handling.
+        """
+        try:
+            # determine widget under pointer
+            x = self.winfo_pointerx()
+            y = self.winfo_pointery()
+            widget = self.winfo_containing(x, y)
+            if widget is None:
+                return 'break'
+            # check if widget or any ancestor is a TCombobox
+            cur = widget
+            is_comb = False
+            while cur is not None:
+                try:
+                    if cur.winfo_class() == 'TCombobox':
+                        is_comb = True
+                        break
+                except Exception:
+                    pass
+                cur = getattr(cur, 'master', None)
+            if not is_comb:
+                return
+            delta = 0
+            if getattr(event, 'delta', 0):
+                delta = int(-1 * (event.delta / 120))
+            else:
+                num = getattr(event, 'num', None)
+                if num == 4:
+                    delta = -1
+                elif num == 5:
+                    delta = 1
+            try:
+                self.scrollable_form._canvas.yview_scroll(delta, 'units')
+            except Exception:
+                pass
+        except Exception:
+            pass
+        return 'break'
+
+    # --- Graphical form helpers for config ---
+    def _build_config_form(self):
+        """Creates form widgets and stores variables in self.config_vars."""
+        self.config_vars = {}
+        # label widgets used for per-field validation feedback
+        self.config_labels = {}
+        # validation status label and save button will be created in the actions section
+
+        def add_entry(parent, label, key, var_type='str', width=20, help_text=None):
+            frm = ttk.Frame(parent)
+            frm.pack(fill=tk.X, pady=2)
+            lbl = ttk.Label(frm, text=label, width=28)
+            lbl.pack(side=tk.LEFT)
+            # keep reference to label for validation feedback
+            self.config_labels[key] = lbl
+            if var_type == 'bool':
+                var = tk.BooleanVar()
+                chk = ttk.Checkbutton(frm, variable=var)
+                chk.pack(side=tk.LEFT)
+            elif var_type == 'int':
+                var = tk.IntVar()
+                sp = ttk.Spinbox(frm, from_=-100000, to=100000, textvariable=var, width=8)
+                sp.pack(side=tk.LEFT)
+            elif var_type == 'float':
+                var = tk.DoubleVar()
+                ent = ttk.Entry(frm, textvariable=var, width=10)
+                ent.pack(side=tk.LEFT)
+            elif var_type == 'path':
+                var = tk.StringVar()
+                ent = ttk.Entry(frm, textvariable=var, width=36)
+                ent.pack(side=tk.LEFT)
+                def _browse_path():
+                    p = filedialog.askopenfilename(initialdir=str(SCRIPT_DIR))
+                    if p:
+                        var.set(p)
+                ttk.Button(frm, text='Browse', command=_browse_path).pack(side=tk.LEFT, padx=(6,0))
+            elif var_type == 'combobox':
+                var = tk.StringVar()
+                cb = ttk.Combobox(frm, textvariable=var, width=14)
+                cb.pack(side=tk.LEFT)
+                # store and hook combobox for validation and mousewheel behavior
+                self.config_vars[key] = var
+                try:
+                    self._hook_widget_for_mouse_scroll(cb)
+                except Exception:
+                    pass
+                return var, cb
+            else:
+                var = tk.StringVar()
+                ent = ttk.Entry(frm, textvariable=var, width=20)
+                ent.pack(side=tk.LEFT)
+            if help_text:
+                ttk.Label(frm, text=help_text, foreground='gray').pack(side=tk.LEFT, padx=(6,0))
+            self.config_vars[key] = var
+            # reactively validate when field changes
+            try:
+                var.trace_add('write', lambda *a, k=key: self._on_var_change(k))
+            except Exception:
+                try:
+                    var.trace('w', lambda *a, k=key: self._on_var_change(k))
+                except Exception:
+                    pass
+            # Hook widgets for mousewheel scrolling when the pointer is over them
+            try:
+                self._hook_widget_for_mouse_scroll(frm)
+                if 'ent' in locals():
+                    self._hook_widget_for_mouse_scroll(ent)
+                if 'sp' in locals():
+                    self._hook_widget_for_mouse_scroll(sp)
+                if 'cb' in locals():
+                    self._hook_widget_for_mouse_scroll(cb)
+                if 'chk' in locals():
+                    self._hook_widget_for_mouse_scroll(chk)
+            except Exception:
+                pass
+            return var
+
+        # Groups
+        grp_general = ttk.LabelFrame(self.form_inner, text='Allgemein')
+        grp_general.pack(fill=tk.X, padx=6, pady=(6,4))
+        add_entry(grp_general, 'Language', 'language')
+        add_entry(grp_general, 'PDF Language', 'pdf_language')
+        add_entry(grp_general, 'Show rendered trips', 'show_rendered_trips', var_type='bool')
+        add_entry(grp_general, 'Open PDF after render', 'open_pdf_after_render', var_type='bool')
+
+        grp_fonts = ttk.LabelFrame(self.form_inner, text='Fonts')
+        grp_fonts.pack(fill=tk.X, padx=6, pady=(6,4))
+        add_entry(grp_fonts, 'Step title font size', 'step_title_font_size', var_type='int')
+        add_entry(grp_fonts, 'Step text font size', 'step_text_font_size', var_type='int')
+        add_entry(grp_fonts, 'Text font path', 'text_font_path', var_type='path')
+        add_entry(grp_fonts, 'Emoji font path', 'emoji_font_path', var_type='path')
+        add_entry(grp_fonts, 'Emoji scale', 'emoji_scale', var_type='float')
+
+        grp_layout = ttk.LabelFrame(self.form_inner, text='Layout')
+        grp_layout.pack(fill=tk.X, padx=6, pady=(6,4))
+        add_entry(grp_layout, 'Page margin (mm)', 'safety_margin_mm', var_type='int')
+        add_entry(grp_layout, 'Max photos per step', 'max_photos_per_step', var_type='int')
+        add_entry(grp_layout, 'Appendix: include undisplayed media', 'appendix_show_undisplayed_media', var_type='bool')
+        add_entry(grp_layout, 'Photo wall columns', 'photo_wall_columns', var_type='int')
+        add_entry(grp_layout, 'Photo wall gap', 'photo_wall_gap', var_type='int')
+
+        grp_map = ttk.LabelFrame(self.form_inner, text='General Map')
+        grp_map.pack(fill=tk.X, padx=6, pady=(6,4))
+        var_map_style, cb = add_entry(grp_map, 'Map style', 'map_style', var_type='combobox')
+        cb['values'] = ('hybrid', 'satellite', 'road')
+        add_entry(grp_map, 'Hybrid labels opacity', 'hybrid_labels_opacity', var_type='float')
+        add_entry(grp_map, 'Marker thumb size', 'marker_thumb_size', var_type='int')
+
+        grp_overview = ttk.LabelFrame(self.form_inner, text='Maps - Overview')
+        grp_overview.pack(fill=tk.X, padx=6, pady=(6,4))
+        add_entry(grp_overview, 'Vertical resolution (px)', 'maps.overview.vertical_resolution_px', var_type='int')
+        add_entry(grp_overview, 'Aspect ratio', 'maps.overview.aspect_ratio')
+        add_entry(grp_overview, 'Padding factor', 'maps.overview.padding_factor', var_type='float')
+        add_entry(grp_overview, 'Algorithm', 'maps.overview.algorithm')
+        add_entry(grp_overview, 'Min width (km)', 'maps.overview.min_width_km', var_type='float')
+
+        grp_step = ttk.LabelFrame(self.form_inner, text='Maps - Step')
+        grp_step.pack(fill=tk.X, padx=6, pady=(6,4))
+        add_entry(grp_step, 'Vertical resolution (px)', 'maps.step.vertical_resolution_px', var_type='int')
+        add_entry(grp_step, 'Aspect ratio', 'maps.step.aspect_ratio')
+        add_entry(grp_step, 'Padding factor', 'maps.step.padding_factor', var_type='float')
+        add_entry(grp_step, 'Min width (km)', 'maps.step.min_width_km', var_type='float')
+        add_entry(grp_step, 'Max distance farthest steps (km)', 'maps.step.max_distance_farthest_steps_km', var_type='float')
+        add_entry(grp_step, 'Cluster distance (km)', 'maps.step.cluster_distance_km', var_type='float')
+        add_entry(grp_step, 'Render scale', 'maps.step.render_scale', var_type='float')
+        # Hook group frame for mouse scroll enter/leave to keep mousewheel active
+        try:
+            self._hook_widget_for_mouse_scroll(grp_general)
+        except Exception:
+            pass
+        try:
+            self._hook_widget_for_mouse_scroll(grp_fonts)
+        except Exception:
+            pass
+        try:
+            self._hook_widget_for_mouse_scroll(grp_layout)
+        except Exception:
+            pass
+        try:
+            self._hook_widget_for_mouse_scroll(grp_map)
+        except Exception:
+            pass
+        try:
+            self._hook_widget_for_mouse_scroll(grp_overview)
+        except Exception:
+            pass
+        try:
+            self._hook_widget_for_mouse_scroll(grp_step)
+        except Exception:
+            pass
+
+        # Actions
+        frm_actions = ttk.Frame(self.form_inner)
+        frm_actions.pack(fill=tk.X, pady=(6,8))
+        ttk.Button(frm_actions, text='Load from file', command=self._load_config_form).pack(side=tk.LEFT)
+        self.btn_save_form = ttk.Button(frm_actions, text='Save to file', command=self._save_config_form)
+        self.btn_save_form.pack(side=tk.LEFT, padx=(6,0))
+        ttk.Button(frm_actions, text='Preview TOML', command=self._apply_form_to_raw).pack(side=tk.LEFT, padx=(6,0))
+        # Validation status label
+        self.lbl_validation_status = ttk.Label(frm_actions, text='', foreground='gray')
+        self.lbl_validation_status.pack(side=tk.RIGHT)
+
+    def _load_config_form(self):
+        """Load values from config.toml into the form widgets.
+
+        Also cache the original file text/lines in memory so we can preserve
+        comments when writing back changes.
+        """
+        cfg_file = SCRIPT_DIR / 'config.toml'
+        # cache original content to allow comment-preserving edits
+        self._original_config_text = None
+        self._original_config_lines = None
+        if not cfg_file.exists():
+            messagebox.showinfo('Info', 'No config.toml found; using defaults in form.')
+            cfg = {}
+        else:
+            try:
+                txt = cfg_file.read_text(encoding='utf-8')
+                # store raw content for later patching (preserve comments)
+                self._original_config_text = txt
+                self._original_config_lines = txt.splitlines()
+
+                # prefer tomllib/toml if available for accurate parsing
+                parsed = None
+                try:
+                    if hasattr(m, '_tomllib') and m._tomllib:
+                        if hasattr(m._tomllib, 'loads'):
+                            parsed = m._tomllib.loads(txt)
+                    # fallback to simple parser
+                except Exception:
+                    parsed = None
+                if parsed is None:
+                    parsed = m._parse_simple_toml(txt)
+                cfg = parsed or {}
+            except Exception as e:
+                messagebox.showerror('Error', f'Could not read config: {e}')
+                return
+
+        def _get(cfg, path, default=None):
+            parts = path.split('.')
+            cur = cfg
+            for p in parts:
+                if not isinstance(cur, dict):
+                    return default
+                if p not in cur:
+                    return default
+                cur = cur[p]
+            return cur
+
+        for path, var in self.config_vars.items():
+            val = _get(cfg, path, None)
+            try:
+                if isinstance(var, tk.BooleanVar):
+                    var.set(bool(val) if val is not None else False)
+                elif isinstance(var, tk.IntVar):
+                    var.set(int(val) if val is not None else 0)
+                elif isinstance(var, tk.DoubleVar):
+                    var.set(float(val) if val is not None else 0.0)
+                else:
+                    # StringVar or others
+                    if val is None:
+                        var.set('')
+                    else:
+                        var.set(str(val))
+            except Exception:
+                try:
+                    var.set(val)
+                except Exception:
+                    pass
+        # validate after loading to update UI feedback (no popup)
+        try:
+            ok, errs = self._validate_config_form()
+            if ok:
+                self.lbl_validation_status.configure(text='All fields valid', foreground='green')
+            else:
+                self.lbl_validation_status.configure(text=f'{len(errs)} issue(s) — see messages', foreground='red')
+            # update per-field label states
+            for k, _ in self.config_vars.items():
+                self._on_var_change(k)
+            try:
+                self.status_text.set('Configuration loaded into form')
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    def _save_config_form(self):
+        """Write form values back to config.toml while preserving comments where possible.
+
+        Strategy:
+        - Build the desired key/value map from the form (same as before)
+        - Validate fields; show errors and allow user to abort or proceed
+        - If we have the original file lines cached (loaded via _load_config_form),
+          try to patch only the value assignments in-place and keep all comments/formatting.
+        - If patching fails for any reason, fall back to a full TOML dump.
+        """
+        try:
+            import toml
+        except Exception:
+            toml = None
+
+        # Validate first
+        ok, errs = self._validate_config_form()
+        if not ok:
+            # show errors and ask user whether to continue
+            msg = 'Configuration has the following issues:\n' + '\n'.join(f'- {e}' for e in errs)
+            msg += '\n\nSave anyway?'
+            if not messagebox.askyesno('Validation warnings', msg):
+                return
+
+        # Build nested dict from form widget values
+        cfg = {}
+        def _set(cfg, path, value):
+            parts = path.split('.')
+            cur = cfg
+            for p in parts[:-1]:
+                cur = cur.setdefault(p, {})
+            cur[parts[-1]] = value
+
+        for path, var in self.config_vars.items():
+            try:
+                if isinstance(var, tk.BooleanVar):
+                    v = bool(var.get())
+                elif isinstance(var, tk.IntVar):
+                    v = int(var.get())
+                elif isinstance(var, tk.DoubleVar):
+                    v = float(var.get())
+                else:
+                    raw = var.get()
+                    if raw is None:
+                        v = ''
+                    else:
+                        s = str(raw).strip()
+                        try:
+                            if s == '':
+                                v = ''
+                            elif s.isdigit() or (s.startswith('-') and s[1:].isdigit()):
+                                v = int(s)
+                            else:
+                                v = float(s) if '.' in s else s
+                        except Exception:
+                            v = s
+                _set(cfg, path, v)
+            except Exception:
+                pass
+
+        cfg_file = SCRIPT_DIR / 'config.toml'
+
+        # Helper utilities for smart line editing
+        def _split_unquoted_hash(s: str):
+            """Split s into (code, comment) at first unquoted '#'."""
+            in_s = False
+            in_d = False
+            escaped = False
+            for i, ch in enumerate(s):
+                if ch == '\\' and not escaped:
+                    escaped = True
+                    continue
+                if ch == '"' and not escaped and not in_s:
+                    in_d = not in_d
+                elif ch == "'" and not escaped and not in_d:
+                    in_s = not in_s
+                if ch == '#' and not in_s and not in_d:
+                    return s[:i].rstrip(), s[i:].rstrip()
+                escaped = False
+            return s.rstrip(), ''
+
+        def _fmt_val(v):
+            # Use simple formatting compatible with TOML for basic types
+            import json
+            if isinstance(v, bool):
+                return 'true' if v else 'false'
+            if isinstance(v, int):
+                return str(v)
+            if isinstance(v, float):
+                # ensure dot decimal
+                return str(v)
+            # fallback to a quoted string with basic escaping
+            return json.dumps(str(v), ensure_ascii=False)
+
+        def _find_section_range(lines, section_name):
+            """Return (start_idx, end_idx) for the section; for top-level (None) returns (0, first_header-1)."""
+            headers = []
+            for idx, line in enumerate(lines):
+                s = line.strip()
+                if s.startswith('[') and s.endswith(']'):
+                    headers.append((idx, s[1:-1].strip()))
+            if section_name is None:
+                if headers:
+                    return 0, headers[0][0] - 1
+                return 0, len(lines) - 1
+            for h_i, (idx, name) in enumerate(headers):
+                if name == section_name:
+                    end = headers[h_i + 1][0] - 1 if h_i + 1 < len(headers) else len(lines) - 1
+                    return idx, end
+            return None
+
+        def _find_key_in_range(lines, key, start, end):
+            for i in range(start + 1 if start is not None and lines[start].strip().startswith('[') else start, end + 1):
+                if i < 0 or i >= len(lines):
+                    continue
+                line = lines[i]
+                stripped = line.lstrip()
+                if not stripped or stripped.startswith('#'):
+                    continue
+                code, _ = _split_unquoted_hash(line)
+                if '=' not in code:
+                    continue
+                left = code.split('=', 1)[0].strip()
+                if left == key:
+                    return i
+            return None
+
+        # Attempt in-place patching if we have original lines cached
+        if getattr(self, '_original_config_lines', None):
+            try:
+                lines = list(self._original_config_lines)
+                # process keys
+                for path, var in self.config_vars.items():
+                    parts = path.split('.')
+                    key = parts[-1]
+                    section = '.'.join(parts[:-1]) if len(parts) > 1 else None
+                    rng = _find_section_range(lines, section)
+                    if rng is None:
+                        # section does not exist; append it
+                        if section is not None:
+                            if lines and lines[-1].strip() != '':
+                                lines.append('')
+                            lines.append(f'[{section}]')
+                            rng = (len(lines) - 1, len(lines) - 1)
+                        else:
+                            rng = (0, len(lines) - 1)
+                    start, end = rng
+
+                    # format value
+                    try:
+                        if isinstance(var, tk.BooleanVar):
+                            val = bool(var.get())
+                        elif isinstance(var, tk.IntVar):
+                            val = int(var.get())
+                        elif isinstance(var, tk.DoubleVar):
+                            val = float(var.get())
+                        else:
+                            raw = var.get()
+                            val = '' if raw is None else raw
+                    except Exception:
+                        val = ''
+                    new_val = _fmt_val(val)
+
+                    idx = _find_key_in_range(lines, key, start, end)
+                    if idx is not None:
+                        orig = lines[idx]
+                        indent = orig[:len(orig) - len(orig.lstrip())]
+                        code, comment = _split_unquoted_hash(orig)
+                        # preserve any inline comment
+                        comment_suffix = (' ' + comment) if comment else ''
+                        lines[idx] = f"{indent}{key} = {new_val}{comment_suffix}"
+                    else:
+                        # append the key=value just before end (or after header)
+                        insert_at = end + 1
+                        # place after header if header exists
+                        if section is not None and lines[start].strip().startswith('['):
+                            insert_at = start + 1
+                        # insert a blank line for readability if needed
+                        if insert_at > 0 and insert_at <= len(lines) and lines[insert_at - 1].strip() != '':
+                            lines.insert(insert_at, '')
+                            insert_at += 1
+                        lines.insert(insert_at, f"{key} = {new_val}")
+                # write back file
+                content = '\n'.join(lines) + '\n'
+                cfg_file.write_text(content, encoding='utf-8')
+                # update cached original
+                self._original_config_lines = content.splitlines()
+                self._original_config_text = content
+                # refresh raw editor + form (keep form values as-is)
+                self._load_config_text()
+                messagebox.showinfo('Saved', 'Configuration saved to config.toml (comments preserved)')
+                return
+            except Exception as e:
+                # fall through to full dump on failure
+                print('Comment-preserving save failed, falling back to full dump:', e)
+
+    def _set_label_state(self, key, ok):
+        """Set label color to red on error, default otherwise."""
+        try:
+            lbl = self.config_labels.get(key)
+            if lbl:
+                if ok:
+                    lbl.configure(foreground='black')
+                else:
+                    lbl.configure(foreground='red')
+        except Exception:
+            pass
+
+    def _on_var_change(self, key):
+        """Callback when a form variable changes; updates per-field validation state and global status."""
+        try:
+            ok, errs = self._validate_config_form(single_key=key)
+            self._set_label_state(key, ok)
+            # update global status label
+            all_ok, all_errs = self._validate_config_form()
+            if all_ok:
+                self.lbl_validation_status.configure(text='All fields valid', foreground='green')
+                try:
+                    self.btn_save_form.state(['!disabled'])
+                except Exception:
+                    pass
+            else:
+                self.lbl_validation_status.configure(text=f'{len(all_errs)} issue(s) — see messages', foreground='red')
+                try:
+                    self.btn_save_form.state(['!disabled'])
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    def _validate_config_form(self, single_key: str = None):
+        """Validate form values. If `single_key` is given, only validate that key and return its state.
+
+        Returns (ok: bool, errors: List[str])."""
+        errs = []
+        import os
+        def _maybe_check_numeric(var, k, kind, minv=None, maxv=None):
+            try:
+                v = None
+                if kind == 'int':
+                    v = int(var.get())
+                else:
+                    v = float(var.get())
+                if minv is not None and v < minv:
+                    return f"{k}: value {v} < min {minv}"
+                if maxv is not None and v > maxv:
+                    return f"{k}: value {v} > max {maxv}"
+            except Exception:
+                return f"{k}: not a valid {kind}"
+            return None
+
+        # check specific fields
+        try:
+            # fonts
+            tp = self.config_vars.get('text_font_path')
+            if tp is not None:
+                p = str(tp.get()).strip()
+                if p:
+                    if not os.path.exists(p):
+                        errs.append('Text font path does not exist')
+            ep = self.config_vars.get('emoji_font_path')
+            if ep is not None:
+                p = str(ep.get()).strip()
+                if p:
+                    if not os.path.exists(p):
+                        errs.append('Emoji font path does not exist')
+
+            # numeric ranges
+            e = _maybe_check_numeric(self.config_vars.get('step_title_font_size'), 'Step title font size', 'int', 6, 200)
+            if e: errs.append(e)
+            e = _maybe_check_numeric(self.config_vars.get('step_text_font_size'), 'Step text font size', 'int', 6, 200)
+            if e: errs.append(e)
+            e = _maybe_check_numeric(self.config_vars.get('emoji_scale'), 'Emoji scale', 'float', 0.1, 10.0)
+            if e: errs.append(e)
+            e = _maybe_check_numeric(self.config_vars.get('safety_margin_mm'), 'Page margin (mm)', 'int', 0, 100)
+            if e: errs.append(e)
+            e = _maybe_check_numeric(self.config_vars.get('max_photos_per_step'), 'Max photos per step', 'int', 1, 100)
+            if e: errs.append(e)
+            e = _maybe_check_numeric(self.config_vars.get('photo_wall_columns'), 'Photo wall columns', 'int', 1, 10)
+            if e: errs.append(e)
+            e = _maybe_check_numeric(self.config_vars.get('photo_wall_gap'), 'Photo wall gap', 'int', 0, 100)
+            if e: errs.append(e)
+            e = _maybe_check_numeric(self.config_vars.get('maps.overview.vertical_resolution_px'), 'Maps overview vertical resolution', 'int', 100, 4000)
+            if e: errs.append(e)
+            e = _maybe_check_numeric(self.config_vars.get('maps.step.vertical_resolution_px'), 'Maps step vertical resolution', 'int', 100, 4000)
+            if e: errs.append(e)
+            e = _maybe_check_numeric(self.config_vars.get('maps.step.render_scale'), 'Maps step render scale', 'float', 1.0, 4.0)
+            if e: errs.append(e)
+            e = _maybe_check_numeric(self.config_vars.get('hybrid_labels_opacity'), 'Hybrid labels opacity', 'float', 0.0, 1.0)
+            if e: errs.append(e)
+
+            # map style
+            ms = self.config_vars.get('map_style')
+            if ms is not None:
+                if ms.get() not in ('hybrid', 'satellite', 'road'):
+                    errs.append('Map style must be one of hybrid/satellite/road')
+        except Exception:
+            pass
+
+        if single_key is not None:
+            # return only status for that key
+            field_errs = [e for e in errs if e.lower().startswith(single_key.replace('_',' ').lower()) or single_key in e]
+            ok = len(field_errs) == 0
+            return ok, field_errs
+        ok = len(errs) == 0
+        return ok, errs
+
+    # ScrollableFrame helper (defined below) now handles mouse wheel and pointer detection.
+
+        # Fallback: full dump (same as previous behavior)
+        out = None
+        if toml:
+            try:
+                out = toml.dumps(cfg)
+            except Exception:
+                out = None
+        if out is None:
+            lines_out = []
+            for k, v in cfg.items():
+                if isinstance(v, dict):
+                    lines_out.append(f"[{k}]")
+                    for sk, sv in v.items():
+                        lines_out.append(f"{sk} = {repr(sv)}")
+                else:
+                    lines_out.append(f"{k} = {repr(v)}")
+            out = '\n'.join(lines_out) + '\n'
+
+        try:
+            cfg_file.write_text(out, encoding='utf-8')
+            self._load_config_text()
+            messagebox.showinfo('Saved', 'Configuration saved to config.toml (full rewrite)')
         except Exception as e:
             messagebox.showerror('Error', f'Could not save config: {e}')
+
+    def _apply_form_to_raw(self):
+        """Apply current form values to a TOML preview dialog (raw editor removed)."""
+        try:
+            import toml
+        except Exception:
+            toml = None
+        # build nested dict similar to _save_config_form
+        cfg = {}
+        def _set(cfg, path, value):
+            parts = path.split('.')
+            cur = cfg
+            for p in parts[:-1]:
+                cur = cur.setdefault(p, {})
+            cur[parts[-1]] = value
+        for path, var in self.config_vars.items():
+            try:
+                if isinstance(var, tk.BooleanVar):
+                    v = bool(var.get())
+                elif isinstance(var, tk.IntVar):
+                    v = int(var.get())
+                elif isinstance(var, tk.DoubleVar):
+                    v = float(var.get())
+                else:
+                    raw = var.get()
+                    v = raw if raw is not None else ''
+                _set(cfg, path, v)
+            except Exception:
+                pass
+        if toml:
+            try:
+                out = toml.dumps(cfg)
+            except Exception:
+                out = None
+        else:
+            out = None
+        if out is None:
+            # naive fallback
+            lines = []
+            for k, v in cfg.items():
+                if isinstance(v, dict):
+                    lines.append(f"[{k}]")
+                    for sk, sv in v.items():
+                        lines.append(f"{sk} = {repr(sv)}")
+                else:
+                    lines.append(f"{k} = {repr(v)}")
+            out = '\n'.join(lines)
+        # Show preview dialog with TOML content (raw editor removed)
+        win = tk.Toplevel(self)
+        win.title('Preview TOML')
+        win.geometry('800x480')
+        txtw = tk.Text(win, height=20, width=80, wrap='none')
+        txtw.pack(fill=tk.BOTH, expand=True, padx=8, pady=(8,0))
+        txtw.insert('1.0', out)
+        txtw.configure(state='disabled')
+        # buttons
+        btn_frame = ttk.Frame(win)
+        btn_frame.pack(fill=tk.X, pady=8)
+        def _copy():
+            try:
+                self.clipboard_clear()
+                self.clipboard_append(out)
+                messagebox.showinfo('Copied', 'TOML copied to clipboard')
+            except Exception:
+                pass
+        ttk.Button(btn_frame, text='Copy to Clipboard', command=_copy).pack(side=tk.LEFT, padx=6)
+        def _save_preview():
+            path = filedialog.asksaveasfilename(defaultextension='.toml', filetypes=[('TOML files', '*.toml'), ('All files','*.*')])
+            if path:
+                open(path, 'w', encoding='utf-8').write(out)
+                messagebox.showinfo('Saved', f'Saved to {path}')
+                win.destroy()
+        ttk.Button(btn_frame, text='Save to file', command=_save_preview).pack(side=tk.LEFT, padx=6)
+        # quick validation button inside preview
+        def _validate_and_show():
+            ok, errs = self._validate_config_form()
+            if ok:
+                messagebox.showinfo('Validation', 'All fields look valid')
+            else:
+                messagebox.showwarning('Validation issues', '\n'.join(errs))
+        ttk.Button(btn_frame, text='Validate', command=_validate_and_show).pack(side=tk.LEFT, padx=6)
+        ttk.Button(btn_frame, text='Close', command=win.destroy).pack(side=tk.RIGHT, padx=6)
 
     # Package log utilities
     def _clear_pkg_log(self):
