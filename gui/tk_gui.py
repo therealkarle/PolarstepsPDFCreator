@@ -88,7 +88,22 @@ class App(tk.Tk):
         self.stop_btn = ttk.Button(frm_controls, text="Stop", command=self._on_stop, state=tk.DISABLED)
         self.stop_btn.pack(side=tk.RIGHT, padx=(6, 0))
 
-        self.progress = ttk.Progressbar(self, orient=tk.HORIZONTAL, mode='determinate')
+        # Progress bar and styles
+        self.style = ttk.Style(self)
+        try:
+            # ensure current theme is initialized
+            self.style.theme_use(self.style.theme_use())
+        except Exception:
+            pass
+        self.success_style = 'Green.Horizontal.TProgressbar'
+        self.default_style = 'Horizontal.TProgressbar'
+        try:
+            # Configure a green style for success (may vary between platforms)
+            self.style.configure(self.success_style, troughcolor='#dff0d8', background='#4caf50')
+        except Exception:
+            pass
+
+        self.progress = ttk.Progressbar(self, orient=tk.HORIZONTAL, mode='determinate', style=self.default_style)
         self.progress.pack(fill=tk.X, padx=10)
 
         self.status_label = ttk.Label(self, textvariable=self.status_text)
@@ -143,8 +158,15 @@ class App(tk.Tk):
         self.render_btn.config(state=tk.DISABLED)
         self.stop_btn.config(state=tk.NORMAL)
         self.stop_flag.clear()
-        self.progress['maximum'] = len(trips)
+        # Track total trips for returning to trip-level progress
+        self._render_total_trips = len(trips)
+        self.progress['maximum'] = self._render_total_trips
         self.progress['value'] = 0
+        # Ensure progress uses default (non-success) style
+        try:
+            self.progress['style'] = self.default_style
+        except Exception:
+            pass
         self.status_text.set(f"Rendering {len(trips)} trip(s)...")
         self.render_thread = threading.Thread(target=self._render_worker, args=(trips,), daemon=True)
         self.render_thread.start()
@@ -171,6 +193,21 @@ class App(tk.Tk):
             except Exception:
                 config = {}
 
+            # Ensure language managers are initialized like in CLI so PDF strings are translated
+            try:
+                gui_lang = m.load_language_manager(config.get("language", "en"), SCRIPT_DIR)
+                # Update module default language manager used when no explicit lang is passed
+                m._DEFAULT_LANGUAGE_MANAGER = gui_lang
+                config["_language_code"] = gui_lang.language_code
+                pdf_lang_code = config.get("pdf_language", "").strip()
+                if not pdf_lang_code:
+                    pdf_lang_code = config.get("language", gui_lang.language_code)
+                pdf_lang = m.load_language_manager(pdf_lang_code, SCRIPT_DIR)
+                config["_pdf_language_manager"] = pdf_lang
+                config["_pdf_language_code"] = pdf_lang.language_code
+            except Exception:
+                pass
+
             total = len(trips)
             done = 0
             for idx, trip in enumerate(trips, start=1):
@@ -179,7 +216,15 @@ class App(tk.Tk):
                     break
                 self.log_queue.put(("status", f"Rendering {idx}/{total}: {trip.name}"))
                 try:
-                    res = m.render_trip(trip, SCRIPT_DIR, config, cm, check_stop=lambda: self.stop_flag.is_set())
+                    # Pass a progress callback to receive per-step updates (current, total, trip_name)
+                    res = m.render_trip(
+                        trip,
+                        SCRIPT_DIR,
+                        config,
+                        cm,
+                        check_stop=lambda: self.stop_flag.is_set(),
+                        progress_callback=lambda cur, tot, _name=trip.name: self.log_queue.put(("step_progress", (cur, tot, _name)))
+                    )
                     if res:
                         # open resulting PDF if exists
                         try:
@@ -245,9 +290,49 @@ class App(tk.Tk):
                 elif typ == "error":
                     messagebox.showerror("Error", payload)
                 elif typ == "progress":
-                    self.progress['value'] = payload
+                    # Trip-level progress (number of trips completed)
+                    try:
+                        total = getattr(self, '_render_total_trips', None)
+                        if total:
+                            self.progress['maximum'] = total
+                        self.progress['value'] = payload
+                        # ensure normal style
+                        try:
+                            self.progress['style'] = self.default_style
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
+                elif typ == "step_progress":
+                    try:
+                        cur, tot, name = payload
+                        # Switch progress bar to per-step mode for current trip
+                        self.progress['maximum'] = tot
+                        self.progress['value'] = cur
+                        # ensure normal style
+                        try:
+                            self.progress['style'] = self.default_style
+                        except Exception:
+                            pass
+                        self.status_text.set(f"{name}: Step {cur}/{tot}")
+                    except Exception:
+                        pass
                 elif typ == "done":
+                    # All rendering finished: show success and fill progress green
                     self.status_text.set("Done")
+                    try:
+                        # if we know total trips, set progress to its maximum
+                        total = getattr(self, '_render_total_trips', None)
+                        if total:
+                            self.progress['maximum'] = total
+                            self.progress['value'] = total
+                        # apply success style
+                        try:
+                            self.progress['style'] = self.success_style
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
                     self.render_btn.config(state=tk.NORMAL)
                     self.stop_btn.config(state=tk.DISABLED)
                 elif typ == "install_done":

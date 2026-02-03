@@ -1643,7 +1643,7 @@ def trip_parser_get_dates(trip_path: Path):
 class HtmlPDFBuilder:
     """Builds the PDF document using HTML/CSS rendered by Playwright (Chromium)."""
 
-    def __init__(self, output_path: Path, trip_parser: TripParser, map_generator: MapGenerator, config: dict = None, language_manager: LanguageManager = None, cli_language_manager: LanguageManager = None):
+    def __init__(self, output_path: Path, trip_parser: TripParser, map_generator: MapGenerator, config: dict = None, language_manager: LanguageManager = None, cli_language_manager: LanguageManager = None, progress_callback=None):
         self.output_path = Path(output_path)
         self.trip_parser = trip_parser
         self.map_generator = map_generator
@@ -1666,6 +1666,8 @@ class HtmlPDFBuilder:
             default_map_workers = 2
         self._map_workers = int(self.config.get("html_map_workers", default_map_workers))
         self._map_thread_local = threading.local()
+        # Optional callback(progress_current:int, progress_total:int)
+        self.progress_callback = progress_callback
 
     def _cache_get(self, cache: OrderedDict, key):
         if key in cache:
@@ -1845,6 +1847,14 @@ class HtmlPDFBuilder:
         start_date, end_date = self.trip_parser.get_trip_dates()
         total_km = self.trip_parser.get_total_km()
         step_count = len(self.trip_parser.steps)
+        # Count overview map + final PDF render as additional steps for progress reporting
+        # (overview = step 1, steps = 2..N+1, final PDF render = last step)
+        total_steps = step_count + 2
+        # store on instance so build() can access it later
+        try:
+            self._total_steps = total_steps
+        except Exception:
+            pass
 
         date_str = ""
         date_fmt = self.lang.get_date_format("date.format.trip", "%d.%m.%Y")
@@ -1876,6 +1886,12 @@ class HtmlPDFBuilder:
 
             def _render_overview_map():
                 try:
+                    # Report overview as first step
+                    try:
+                        if self.progress_callback:
+                            self.progress_callback(1, total_steps, trip_name)
+                    except Exception:
+                        pass
                     print(self.cli_lang.t("render.rendering_title_overview"))
                     t0 = time.perf_counter()
                     mg = self._get_thread_map_generator()
@@ -1915,6 +1931,12 @@ class HtmlPDFBuilder:
                 overview_img = ""
         else:
             try:
+                # Report overview as first step
+                try:
+                    if self.progress_callback:
+                        self.progress_callback(1, total_steps, trip_name)
+                except Exception:
+                    pass
                 print(self.cli_lang.t("render.rendering_title_overview"))
                 t0 = time.perf_counter()
                 map_bytes = self.map_generator.generate_overview_map(self.trip_parser)
@@ -1973,6 +1995,15 @@ class HtmlPDFBuilder:
             title_text = f"{step_number}. {display_name}"
 
             print(self.cli_lang.t("render.rendering_step", current=step_number, total=step_count, name=display_name))
+            try:
+                if self.progress_callback:
+                    # Inform caller about step progress (current step includes overview as first step)
+                    try:
+                        self.progress_callback(step_number + 1, total_steps, trip_name)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
 
             location = step_data.get("location", {}) if isinstance(step_data, dict) else {}
             location_name = location.get("name", "") if isinstance(location, dict) else ""
@@ -2129,6 +2160,16 @@ class HtmlPDFBuilder:
                         print(self.cli_lang.t("render.pdf_render_done", seconds=time.perf_counter() - t_pdf))
                         browser.close()
                         last_error = None
+                        # Notify caller that PDF file has been created (final progress step)
+                        try:
+                            if self.progress_callback:
+                                try:
+                                    steps = getattr(self, '_total_steps', None) or (len(self.trip_parser.steps) + 2)
+                                    self.progress_callback(steps, steps, self.trip_parser.get_trip_name())
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
                         break
                     except Exception as e:
                         last_error = e
@@ -3008,7 +3049,7 @@ def _parse_aspect_ratio(value, fallback: float = MAP_ASPECT_RATIO) -> float:
         return float(fallback)
 
 
-def render_trip(trip_path: Path, script_dir: Path, config: dict, cache_manager: CacheManager, check_stop=None, lang: LanguageManager = None) -> bool:
+def render_trip(trip_path: Path, script_dir: Path, config: dict, cache_manager: CacheManager, check_stop=None, lang: LanguageManager = None, progress_callback=None) -> bool:
     """Render a single trip to PDF. Returns True if successful, False if error or stopped."""
     lang = lang or get_default_language_manager()
     try:
@@ -3113,7 +3154,7 @@ def render_trip(trip_path: Path, script_dir: Path, config: dict, cache_manager: 
         pdf_lang = config.get("_pdf_language_manager", lang)
         
         print(lang.t("render.renderer"))
-        pdf_builder = HtmlPDFBuilder(output_path, parser, map_gen, config=config, language_manager=pdf_lang, cli_language_manager=lang)
+        pdf_builder = HtmlPDFBuilder(output_path, parser, map_gen, config=config, language_manager=pdf_lang, cli_language_manager=lang, progress_callback=progress_callback)
         pdf_builder.build()
         
         # Mark as rendered

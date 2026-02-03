@@ -1,7 +1,8 @@
 @echo off
-REM Launcher for PolarstepsPDFCreator GUI (Windows)
+REM Launcher for PolarstepsPDFCreator (Windows)
 REM Ensure we run from the repository root so the project modules are importable
 pushd "%~dp0.."
+title Polarsteps PDF Creator
 
 REM Prefer project virtualenv Python if present (works well inside VS Code)
 set "PY_EXE="
