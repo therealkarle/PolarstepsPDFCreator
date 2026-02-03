@@ -19,6 +19,10 @@
         "/^python \"f:\\\\AppDevelopment\\\\PolarstepsPDFCreator\\\\scripts\\\\test_map_viewport\\.py\"$/": {
             "approve": true,
             "matchCommandLine": true
+        },
+        "/^python -m py_compile \"f:\\\\AppDevelopment\\\\PolarstepsPDFCreator\\\\gui\\\\tk_gui\\.py\"$/": {
+            "approve": true,
+            "matchCommandLine": true
         }
     }
 }

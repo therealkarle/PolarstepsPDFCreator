@@ -10,7 +10,8 @@ Generate beautiful PDF travel journals from your downloaded Polarsteps data.
 - 📎 **Additional Media Appendix**: Undisplayed photos and all video links at the end
 - 🌡️ **Weather Info**: Temperature and conditions for each step
 - 📝 **Descriptions**: Full travel journal text with formatting
-- 💾 **Cache System**: Tracks rendered trips and provides batch rendering
+- � **GUI Date Picker (optional)**: Improved year/date input in the GUI (requires the optional `tkcalendar` package)- ⚙️ **Settings Tab**: Edit the `config.toml` directly in the GUI and view/install required packages from the built-in package manager
+  - New: **Install Uninstalled** button to install only packages that are not currently installed (uses detected status from `requirements.txt` / optional packages).- �💾 **Cache System**: Tracks rendered trips and provides batch rendering
 - 🔄 **Batch Processing**: Render multiple trips with date filters
 
 ## Installation
@@ -20,6 +21,14 @@ Generate beautiful PDF travel journals from your downloaded Polarsteps data.
 
 ```bash
 pip install -r requirements.txt
+```
+
+Optional: GUI calendar picker
+
+If you want a calendar-based date picker in the GUI, install the optional `tkcalendar` package:
+
+```bash
+pip install tkcalendar
 ```
 
 ## Usage
