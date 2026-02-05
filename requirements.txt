@@ -6,3 +6,7 @@ requests>=2.31.0
 toml>=0.10.2
 emoji>=2.0.0
 playwright>=1.41.0
+pycountry>=24.6.1
+matplotlib>=3.8.0
+reverse_geocoder>=1.5.1
+pycountry_convert>=0.7.5

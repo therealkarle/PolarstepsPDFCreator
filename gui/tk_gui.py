@@ -39,6 +39,22 @@ except Exception:
     Image = ImageDraw = ImageTk = None
     HAVE_PIL = False
 
+# Optional: matplotlib for GUI charts (Agg backend for headless export)
+# Matplotlib is optional for the GUI; Pylance may warn when it's not installed.
+# Use type-ignore comments to suppress unresolved import diagnostics in editor
+try:
+    import matplotlib  # type: ignore[reportMissingModuleSource]
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt  # type: ignore[reportMissingModuleSource]
+    HAVE_MATPLOTLIB = True
+except Exception:
+    # Graceful fallback when matplotlib is not present at runtime
+    plt = None
+    HAVE_MATPLOTLIB = False
+
+import io
+import json
+
 try:
     import tkinter as tk
     from tkinter import ttk, messagebox, filedialog
@@ -633,6 +649,8 @@ class App(tk.Tk):
         # Buttons below progress bar (new dedicated row)
         frm_bottom = ttk.Frame(tab_trips)
         frm_bottom.pack(fill=tk.X, padx=10, pady=(6, 8))
+        self.stats_btn = ttk.Button(frm_bottom, text="Statistics", command=self._on_show_statistics)
+        self.stats_btn.pack(side=tk.RIGHT, padx=(6, 0))
         self.render_btn = ttk.Button(frm_bottom, text="Render Selected", command=self._on_render)
         self.render_btn.pack(side=tk.RIGHT)
         self.stop_btn = ttk.Button(frm_bottom, text="Stop", command=self._on_stop, state=tk.DISABLED)
@@ -1996,6 +2014,63 @@ class App(tk.Tk):
         self.stop_flag.set()
         self.status_text.set("Stopping...")
 
+    def _on_show_statistics(self):
+        """Launch background job to compute statistics for selected or filtered trips."""
+        sel = self.trips_tree.selection()
+        source = getattr(self, '_filtered_trips', None) or getattr(self, '_trips', [])
+        try:
+            if sel:
+                trips = [source[int(iid)] for iid in sel]
+            else:
+                trips = list(source)
+        except Exception:
+            messagebox.showerror("Selection error", "Could not map selection to trips.")
+            return
+        if not trips:
+            messagebox.showinfo("No trips", "No trips selected or available for statistics.")
+            return
+        # disable button while computing
+        try:
+            self.stats_btn.config(state=tk.DISABLED)
+        except Exception:
+            pass
+        t = threading.Thread(target=self._stats_worker, args=(trips,), daemon=True)
+        t.start()
+
+    def _stats_worker(self, trips):
+        try:
+            mg = m.MapGenerator()
+            sg = m.StatisticsGenerator(map_generator=mg)
+            agg = sg.compute_aggregate_stats(trips)
+            map_bytes = b''
+            try:
+                map_bytes = sg.generate_overview_map(trips)
+            except Exception:
+                map_bytes = b''
+            charts = {}
+            if HAVE_MATPLOTLIB and agg.get('countries'):
+                try:
+                    labels = list(agg['countries'].keys())
+                    sizes = list(agg['countries'].values())
+                    fig1, ax1 = plt.subplots(figsize=(4,3))
+                    ax1.pie(sizes, labels=labels, autopct='%1.1f%%', startangle=90)
+                    ax1.axis('equal')
+                    buf = io.BytesIO()
+                    fig1.savefig(buf, format='png', bbox_inches='tight')
+                    plt.close(fig1)
+                    charts['country_pie'] = buf.getvalue()
+                except Exception:
+                    charts = {}
+            # send result to main thread queue
+            self.log_queue.put(('stats_ready', {'agg': agg, 'map': map_bytes, 'charts': charts}))
+        except Exception as e:
+            self.log_queue.put(('stats_error', str(e)))
+        finally:
+            try:
+                self.stats_btn.config(state=tk.NORMAL)
+            except Exception:
+                pass
+
     def _render_worker(self, trips):
         try:
             cache_file = SCRIPT_DIR / 'cache' / 'rendered_trips_cache.json'
@@ -2187,6 +2262,19 @@ class App(tk.Tk):
                         self._refresh_packages()
                     except Exception:
                         pass
+                elif typ == 'stats_ready':
+                    try:
+                        agg = payload.get('agg')
+                        map_bytes = payload.get('map')
+                        charts = payload.get('charts', {}) or {}
+                        try:
+                            StatsDialog(self, agg, map_bytes, charts)
+                        except Exception as e:
+                            messagebox.showinfo('Statistics', f"Stats ready:\n{agg}")
+                    except Exception as e:
+                        messagebox.showerror('Statistics', f"Error showing stats: {e}")
+                elif typ == 'stats_error':
+                    messagebox.showerror('Statistics', f"Statistics generation failed: {payload}")
                 elif typ == 'pkg_install_start':
                     # disable package controls and configure overall progress bar
                     try:
@@ -2384,6 +2472,115 @@ class App(tk.Tk):
             except Exception:
                 pass
             self.after(200, self._poll_queue)
+
+
+class StatsDialog(tk.Toplevel):
+    def __init__(self, parent, agg: dict, map_bytes: bytes = None, charts: dict = None):
+        super().__init__(parent)
+        self.title("Statistics")
+        self.transient(parent)
+        self.grab_set()
+        self.geometry('900x600')
+        frm = ttk.Frame(self)
+        frm.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+
+        left = ttk.Frame(frm)
+        left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        right = ttk.Frame(frm, width=300)
+        right.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # Summary text
+        txt = tk.Text(left, height=10, wrap='word')
+        txt.pack(fill=tk.X)
+        summary_lines = []
+        try:
+            summary_lines.append(f"Trips: {agg.get('trip_count', 0)}")
+            summary_lines.append(f"Steps (gesamt): {agg.get('total_steps', 0)}")
+            summary_lines.append(f"Reisetage (gesamt): {agg.get('total_travel_days', 0)}")
+            # compute period if available and show travel / non-travel ratio
+            try:
+                ps = agg.get('period_start')
+                pe = agg.get('period_end')
+                if ps and pe:
+                    from datetime import date as _date
+                    psd = _date.fromisoformat(ps)
+                    ped = _date.fromisoformat(pe)
+                    period_days = (ped - psd).days + 1
+                    travel_days = agg.get('total_travel_days', 0)
+                    non_travel = max(0, period_days - travel_days)
+                    pct = (travel_days / period_days * 100) if period_days else 0
+                    summary_lines.append(f"Reise/Non-Reise (Zeitraum {ps} bis {pe}): {travel_days} / {non_travel} Tage ({pct:.1f}% Reise)")
+            except Exception:
+                pass
+            summary_lines.append(f"Gereiste km: {agg.get('total_km', 0)}")
+            summary_lines.append(f"Fotos: {agg.get('total_photos', 0)}, Videos: {agg.get('total_videos', 0)}")
+            summary_lines.append(f"Länder bereist: {agg.get('visited_countries_count', 0)} ({agg.get('visited_countries_percent', 0.0)}% der Länder der Welt)")
+            summary_lines.append('')
+            summary_lines.append('Länder (Tage):')
+            for c, cnt in sorted(agg.get('countries', {}).items(), key=lambda x: -x[1]):
+                pct = (cnt / max(1, agg.get('total_travel_days', 1))) * 100 if agg.get('total_travel_days') else 0
+                summary_lines.append(f"  {c}: {cnt} Tage ({pct:.1f}%)")
+            # Continents
+            summary_lines.append('')
+            summary_lines.append(f"Kontinente bereist: {agg.get('visited_continents_count', 0)} ({agg.get('visited_continents_percent', 0.0)}% aller Kontinente)")
+            summary_lines.append('Kontinente (Tage):')
+            for c, cnt in sorted(agg.get('continents', {}).items(), key=lambda x: -x[1]):
+                pct = (cnt / max(1, agg.get('total_travel_days', 1))) * 100 if agg.get('total_travel_days') else 0
+                summary_lines.append(f"  {c}: {cnt} Tage ({pct:.1f}%)")
+        except Exception:
+            summary_lines = [str(agg)]
+        txt.insert(tk.END, "\n".join(summary_lines))
+        txt.config(state=tk.DISABLED)
+
+        # Map preview
+        if map_bytes and HAVE_PIL:
+            try:
+                im = Image.open(io.BytesIO(map_bytes))
+                im.thumbnail((560, 400))
+                self.map_img = ImageTk.PhotoImage(im)
+                lbl_map = ttk.Label(left, image=self.map_img)
+                lbl_map.pack(fill=tk.BOTH, pady=(6,0))
+            except Exception:
+                pass
+
+        # Charts on right
+        if charts:
+            if charts.get('country_pie') and HAVE_PIL:
+                try:
+                    im = Image.open(io.BytesIO(charts.get('country_pie')))
+                    im.thumbnail((260, 200))
+                    self.chart_img = ImageTk.PhotoImage(im)
+                    lbl_chart = ttk.Label(right, image=self.chart_img)
+                    lbl_chart.pack(pady=(6, 8))
+                except Exception:
+                    pass
+        # Buttons
+        btn_frm = ttk.Frame(right)
+        btn_frm.pack(side=tk.BOTTOM, fill=tk.X, pady=(8,0))
+        def _export_json():
+            path = filedialog.asksaveasfilename(defaultextension='.json', filetypes=[('JSON','*.json')])
+            if path:
+                try:
+                    with open(path, 'w', encoding='utf-8') as f:
+                        json.dump(agg, f, indent=2, ensure_ascii=False)
+                    messagebox.showinfo('Export', f'JSON saved to {path}')
+                except Exception as e:
+                    messagebox.showerror('Export', f'Failed to save JSON: {e}')
+        def _save_map():
+            if not map_bytes:
+                messagebox.showinfo('No map', 'No overview map available')
+                return
+            path = filedialog.asksaveasfilename(defaultextension='.png', filetypes=[('PNG','*.png')])
+            if path:
+                try:
+                    with open(path, 'wb') as f:
+                        f.write(map_bytes)
+                    messagebox.showinfo('Export', f'Map saved to {path}')
+                except Exception as e:
+                    messagebox.showerror('Export', f'Failed to save map: {e}')
+        ttk.Button(btn_frm, text='Export JSON', command=_export_json).pack(fill=tk.X, pady=(0,6))
+        ttk.Button(btn_frm, text='Save Map', command=_save_map).pack(fill=tk.X, pady=(0,6))
+        ttk.Button(btn_frm, text='Close', command=self.destroy).pack(fill=tk.X)
 
 
 def main():

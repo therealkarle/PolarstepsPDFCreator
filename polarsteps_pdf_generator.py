@@ -12,7 +12,20 @@ Features:
 import io
 from pathlib import Path
 from typing import Optional, List, Tuple
-from datetime import datetime
+from datetime import datetime, timedelta, date
+import re
+try:
+    import pycountry  # type: ignore[reportMissingImports]
+except Exception:
+    pycountry = None
+try:
+    import reverse_geocoder as rg  # type: ignore[reportMissingImports]
+except Exception:
+    rg = None
+try:
+    import pycountry_convert as pc  # type: ignore[reportMissingImports]
+except Exception:
+    pc = None
 import argparse
 import json
 import re
@@ -513,6 +526,8 @@ ESRI_ROAD_URL = "https://server.arcgisonline.com/ArcGIS/rest/services/World_Stre
 ESRI_LABELS_URL = "https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}"
 # Map colors
 ROUTE_COLOR = "#FFFFFF"  # white
+# Approximate number of countries in the world for percentage calculations
+WORLD_COUNTRY_COUNT = 195  # approximate (UN member states + common recognition)
 # Outline color/width for the route line to ensure visibility over satellite tiles
 ROUTE_OUTLINE_COLOR = "#000000"  # black
 ROUTE_OUTLINE_WIDTH = 5
@@ -1640,6 +1655,804 @@ def trip_parser_get_dates(trip_path: Path):
     return tp.get_trip_dates() if hasattr(tp, 'get_trip_dates') else (None, None)
 
 
+class StatisticsGenerator:
+    """Compute aggregated statistics from TripParser objects and generate overview map."""
+    # Small mapping and heuristics for country normalization
+    _COUNTRY_ALIASES = {
+        'deutschland': 'Germany', 'germany': 'Germany', 'de': 'Germany', 'ger': 'Germany',
+        'schweiz': 'Switzerland', 'switzerland': 'Switzerland', 'ch': 'Switzerland',
+        'frankreich': 'France', 'france': 'France', 'fr': 'France',
+        'italien': 'Italy', 'italy': 'Italy', 'it': 'Italy',
+        'spanien': 'Spain', 'spain': 'Spain', 'es': 'Spain',
+        'niederlande': 'Netherlands', 'netherlands': 'Netherlands', 'nl': 'Netherlands',
+        'belgien': 'Belgium', 'belgium': 'Belgium', 'be': 'Belgium',
+        'oesterreich': 'Austria', 'österreich': 'Austria', 'austria': 'Austria', 'at': 'Austria',
+        'kroatien': 'Croatia', 'croatia': 'Croatia', 'hr': 'Croatia',
+        'portugal': 'Portugal', 'pt': 'Portugal',
+        'usa': 'United States', 'united states': 'United States', 'us': 'United States',
+        'uk': 'United Kingdom', 'united kingdom': 'United Kingdom', 'gb': 'United Kingdom',
+        'andorra': 'Andorra', 'ad': 'Andorra',
+        'san marino': 'San Marino', 'sm': 'San Marino',
+        'united arab emirates': 'United Arab Emirates', 'uae': 'United Arab Emirates', 'ae': 'United Arab Emirates',
+        'united arab emirate': 'United Arab Emirates', 'arabische emirate': 'United Arab Emirates',
+        'vereinigte arabische emirate': 'United Arab Emirates'
+    }
+
+    def __init__(self, map_generator: MapGenerator = None, config: dict = None):
+        self.map_generator = map_generator or MapGenerator()
+        self.config = config or {}
+        # cache for reverse-geocode lookups: key -> country name
+        self._rg_cache = {}
+        # load persistent reverse-geocode cache
+        try:
+            CACHE_ROOT.mkdir(parents=True, exist_ok=True)
+            cache_file = CACHE_ROOT / 'reverse_geocode_cache.json'
+            if cache_file.exists():
+                try:
+                    with open(cache_file, 'r', encoding='utf-8') as f:
+                        try:
+                            data = json.load(f)
+                            # normalize any existing cache values to full country names when possible
+                            for kk, vv in list(data.items()):
+                                try:
+                                    norm = self._normalize_country(vv) or vv
+                                    self._rg_cache[kk] = norm
+                                except Exception:
+                                    self._rg_cache[kk] = vv
+                        except Exception:
+                            # if file corrupted just skip
+                            pass
+                except Exception:
+                    # ignore corrupt cache
+                    pass
+        except Exception:
+            pass
+
+    def _save_rg_cache(self):
+        try:
+            CACHE_ROOT.mkdir(parents=True, exist_ok=True)
+            cache_file = CACHE_ROOT / 'reverse_geocode_cache.json'
+            with open(cache_file, 'w', encoding='utf-8') as f:
+                json.dump(self._rg_cache, f, indent=2, ensure_ascii=False)
+        except Exception:
+            pass
+
+    def _cache_key_from_latlon(self, lat, lon, precision: int = 3) -> str:
+        try:
+            return f"{round(float(lat), precision)},{round(float(lon), precision)}"
+        except Exception:
+            return ''
+
+    def _country_from_coords(self, location_data: dict, debug: bool = False) -> tuple:
+        """Try to determine country from coordinate fields in `location_data`.
+        Returns (country_name, source, raw_value) or ('', 'none', '')."""
+        if rg is None:
+            return '', 'none', ''
+        # extract latitude/longitude from common keys
+        lat = None
+        lon = None
+        # common possible keys
+        try_keys = ['lat', 'latitude', 'lng', 'lon', 'longitude']
+        for k in try_keys:
+            if k in location_data and location_data.get(k) not in (None, ''):
+                try:
+                    val = location_data.get(k)
+                    f = float(val)
+                    if k in ('lat', 'latitude'):
+                        lat = f
+                    else:
+                        lon = f
+                except Exception:
+                    pass
+        # sometimes coords are provided as a tuple/list in 'coords' or 'latlng'
+        if (lat is None or lon is None) and 'coords' in location_data:
+            c = location_data.get('coords')
+            if isinstance(c, (list, tuple)) and len(c) >= 2:
+                try:
+                    lat = float(c[0])
+                    lon = float(c[1])
+                except Exception:
+                    pass
+        if (lat is None or lon is None) and 'latlng' in location_data:
+            c = location_data.get('latlng')
+            if isinstance(c, (list, tuple)) and len(c) >= 2:
+                try:
+                    lat = float(c[0])
+                    lon = float(c[1])
+                except Exception:
+                    pass
+
+        if lat is None or lon is None:
+            return '', 'none', ''
+
+        # heuristics: sometimes coords are (lon,lat). Detect and swap if values look wrong
+        try:
+            if abs(lat) > 90 and abs(lon) <= 90:
+                # probably swapped
+                lat, lon = lon, lat
+                if debug:
+                    print(f"  Swapped coords to lat={lat}, lon={lon}")
+        except Exception:
+            pass
+
+        # round coordinates for caching (3 decimals ~= 110m) to reduce duplicate lookups
+        try:
+            cache_key = f"{round(lat,3)},{round(lon,3)}"
+        except Exception:
+            cache_key = None
+        if cache_key and cache_key in self._rg_cache:
+            c = self._rg_cache[cache_key]
+            # ensure cached value is normalized to a full country name when possible
+            try:
+                norm = self._normalize_country(c) or c
+            except Exception:
+                norm = c
+            if norm != c:
+                try:
+                    self._rg_cache[cache_key] = norm
+                    self._save_rg_cache()
+                except Exception:
+                    pass
+            if debug:
+                print(f"  RG cache hit for {cache_key} -> {norm}")
+            return norm, 'coords_cache', cache_key
+
+        try:
+            # reverse_geocoder expects (lat, lon) as floats; pass as a single tuple
+            # This single-point path remains as a fallback if batching is not used
+            res = rg.search((lat, lon))
+            if res and isinstance(res, (list, tuple)):
+                r = res[0]
+                cc = r.get('cc')
+                raw = f"{lat},{lon}"
+                country_name = ''
+                if cc and pycountry is not None:
+                    try:
+                        ctry = pycountry.countries.get(alpha_2=cc.upper())
+                        if ctry:
+                            country_name = getattr(ctry, 'common_name', None) or getattr(ctry, 'official_name', None) or getattr(ctry, 'name', None) or ''
+                    except Exception:
+                        country_name = ''
+                # fallback to cc code if lookup failed
+                result_value = country_name or (cc or '')
+                # normalize the result to full country name if possible
+                normalized = self._normalize_country(result_value) or result_value
+                # store normalized value in cache
+                if cache_key:
+                    try:
+                        self._rg_cache[cache_key] = normalized
+                    except Exception:
+                        pass
+                if normalized:
+                    if debug:
+                        print(f"  Reverse-geocoded coords {raw} -> {normalized} ({cc})")
+                    return normalized, 'coords', raw
+        except Exception:
+            return '', 'none', ''
+        return '', 'none', ''
+
+    def _extract_country_from_location(self, location_data: dict, debug: bool = False) -> tuple:
+        """Extract country from location data with fallback strategy.
+        Returns tuple: (country_name, source_field, raw_value)"""
+        if not isinstance(location_data, dict):
+            return '', 'none', ''
+        # Prefer coordinate-based lookup when available (reduces missed days)
+        try:
+            ctry, src, raw = self._country_from_coords(location_data, debug=debug)
+            if ctry:
+                return ctry, src, raw
+        except Exception:
+            # fail silently and continue with existing heuristics
+            pass
+        
+        # Known cities/places that should NOT be treated as countries
+        known_cities = {
+            'kathmandu', 'jaipur', 'dubai', 'mumbai', 'delhi', 'beijing', 'tokyo',
+            'bangkok', 'singapore', 'kuala lumpur', 'hong kong', 'macau',
+            'everest base camp', 'island peak basecamp', 'annapurna base camp',
+            'mount everest', 'lukla', 'namche', 'tengboche', 'pheriche', 'lobuche',
+            'gokyo', 'dingboche', 'kala patthar', 'cho la pass', 'renjo pass',
+            'gokyo ri', 'ama dablam base camp', 'mera peak', 'island peak',
+            'manaslu', 'annapurna circuit', 'annapurna sanctuary',
+            'paris', 'london', 'berlin', 'rome', 'madrid', 'barcelona',
+            'vienna', 'zurich', 'geneva', 'milan', 'venice', 'florence',
+            'nice', 'cannes', 'lyon', 'marseille', 'toulouse', 'bordeaux',
+            'munich', 'hamburg', 'cologne', 'frankfurt', 'stuttgart', 'düsseldorf',
+            'salzburg', 'innsbruck', 'graz', 'linz',
+            'basel', 'bern', 'lausanne', 'luzern', 'st. gallen',
+            'zagreb', 'split', 'dubrovnik', 'ljubljana', 'bled',
+            'agra', 'goa', 'kolkata', 'pune', 'hyderabad', 'bangalore',
+            'chennai', 'cochin', 'varanasi', 'rishikesh', 'pushkar',
+            'udaipur', 'jodhpur', 'bikaner', 'jaisalmer', 'mandawa',
+            'mcleod ganj', 'dharamshala', 'manali', 'shimla', 'leh', 'ladakh',
+            'pokhara', 'chitwan', 'lumbini', 'bhaktapur', 'patan',
+            # Common mountain/trekking destinations
+            'base camp', 'peak', 'pass', 'glacier', 'summit', 'ridge'
+        }
+        
+        # Priority order for location fields
+        fields_to_check = [
+            ('country', 'location.country'),
+            ('country_name', 'location.country_name'), 
+            ('countryCode', 'location.countryCode'),
+            ('country_code', 'location.country_code'),
+            ('detail', 'location.detail'),
+            ('full_detail', 'location.full_detail'),
+            ('name', 'location.name'),
+            ('display_name', 'location.display_name')
+        ]
+        
+        for field, source in fields_to_check:
+            raw_value = location_data.get(field, '').strip()
+            if not raw_value:
+                continue
+                
+            normalized = self._normalize_country(raw_value)
+            if not normalized:
+                continue
+                
+            # Check if it's a known city (only for name/display_name fields)
+            if field in ('name', 'display_name'):
+                if normalized.lower() in known_cities:
+                    if debug:
+                        print(f"  Skipping known city: {normalized} from {source}")
+                    continue
+                
+            if debug:
+                print(f"  Found country: {normalized} from {source} (raw: {raw_value})")
+            return normalized, source, raw_value
+            
+        return '', 'none', ''
+
+    def _normalize_country(self, raw: str) -> str:
+        if not raw:
+            return ''
+        s = str(raw).strip()
+        # remove parentheses content
+        if '(' in s and ')' in s:
+            try:
+                s = re.sub(r"\([^)]*\)", "", s)
+            except Exception:
+                pass
+        # common replacing (normalize accents/diacritics is out-of-scope but we can lowercase)
+        s = s.strip()
+        # split on commas and take last token
+        parts = [p.strip() for p in re.split(r'[,\-\/]', s) if p.strip()]
+        token = parts[-1] if parts else s
+        # remove common prepositions and noise
+        token = re.sub(r'\b(bei|in|am|der|die|das|von|den|und|auf|la|le)\b', '', token, flags=re.IGNORECASE).strip()
+        # remove any trailing digits or extra punctuation
+        token = re.sub(r'[^\w\s-]', '', token).strip()
+        token_low = token.lower()
+        # normalization aliases
+        extra_aliases = {
+            'andorra la vella': 'andorra',
+            'andorra la': 'andorra',
+            'andorra la v': 'andorra'
+        }
+        if token_low in extra_aliases:
+            token_low = extra_aliases[token_low]
+        # if 2-letter code, try pycountry lookup directly
+        if len(token_low) == 2 and pycountry is not None:
+            try:
+                c = pycountry.countries.get(alpha_2=token_low.upper())
+                if c:
+                    name = getattr(c, 'common_name', None) or getattr(c, 'official_name', None) or getattr(c, 'name', None)
+                    if name:
+                        return name
+            except Exception:
+                pass
+        # try direct alias match
+        if token_low in self._COUNTRY_ALIASES:
+            return self._COUNTRY_ALIASES[token_low]
+        # discard extremely short tokens (likely abbreviations or noise) unless explicitly known
+        if len(token_low) <= 2 and token_low not in self._COUNTRY_ALIASES:
+            return ''
+        # try to find any alias substring -- require word boundaries to avoid false positives
+        for k, v in self._COUNTRY_ALIASES.items():
+            try:
+                if re.search(r"\b" + re.escape(k) + r"\b", token_low):
+                    return v
+            except Exception:
+                continue
+        # try pycountry lookup for robust country matching
+        if pycountry is not None:
+            try:
+                c = pycountry.countries.lookup(token)
+                name = getattr(c, 'common_name', None) or getattr(c, 'official_name', None) or getattr(c, 'name', None)
+                if name:
+                    return name
+            except Exception:
+                pass
+        # fallback: return capitalized short token if plausible (1-3 words, length < 30)
+        if 0 < len(token) <= 30 and len(token.split()) <= 3:
+            return token.title()
+        return ''
+
+    def _parse_date(self, v):
+        if v is None:
+            return None
+
+    def _batch_reverse_geocode(self, coord_map: dict, debug: bool = False):
+        """coord_map: cache_key -> (lat, lon). Performs batch rg.search and stores normalized names in cache."""
+        if rg is None or not coord_map:
+            return
+        # build a list of unique coords
+        coords = []
+        keys = []
+        for k, (lat, lon) in coord_map.items():
+            try:
+                coords.append((float(lat), float(lon)))
+                keys.append(k)
+            except Exception:
+                continue
+        if not coords:
+            return
+        try:
+            # pre-warm/first call will load the rg dataset
+            res_list = rg.search(coords)
+        except Exception:
+            # fallback: try single lookups
+            for k, (lat, lon) in coord_map.items():
+                try:
+                    r = rg.search((float(lat), float(lon)))
+                    if r and isinstance(r, (list, tuple)):
+                        rr = r[0]
+                        cc = rr.get('cc')
+                        nm = ''
+                        if cc and pycountry is not None:
+                            try:
+                                ctry = pycountry.countries.get(alpha_2=cc.upper())
+                                if ctry:
+                                    nm = getattr(ctry, 'common_name', None) or getattr(ctry, 'official_name', None) or getattr(ctry, 'name', None) or ''
+                            except Exception:
+                                nm = ''
+                        normalized = self._normalize_country(nm or (cc or '')) or (nm or (cc or ''))
+                        self._rg_cache[k] = normalized
+                except Exception:
+                    continue
+            self._save_rg_cache()
+            return
+        # map batch results back
+        for i, rr in enumerate(res_list):
+            try:
+                r = rr
+                cc = r.get('cc')
+                k = keys[i]
+                nm = ''
+                if cc and pycountry is not None:
+                    try:
+                        ctry = pycountry.countries.get(alpha_2=cc.upper())
+                        if ctry:
+                            nm = getattr(ctry, 'common_name', None) or getattr(ctry, 'official_name', None) or getattr(ctry, 'name', None) or ''
+                    except Exception:
+                        nm = ''
+                normalized = self._normalize_country(nm or (cc or '')) or (nm or (cc or ''))
+                self._rg_cache[k] = normalized
+            except Exception:
+                continue
+        # persist cache
+        self._save_rg_cache()
+
+    def _country_to_continent(self, country_name: str) -> str:
+        """Return continent name for a given country name. Uses pycountry_convert when available."""
+        if not country_name:
+            return ''
+        # try pycountry to get alpha_2
+        try:
+            c = None
+            if pycountry is not None:
+                try:
+                    c = pycountry.countries.lookup(country_name)
+                except Exception:
+                    c = None
+            if c and pc is not None:
+                try:
+                    alpha2 = getattr(c, 'alpha_2', None)
+                    if alpha2:
+                        cc = pc.country_alpha2_to_continent_code(alpha2.upper())
+                        if cc:
+                            return {
+                                'AF': 'Africa', 'AS': 'Asia', 'EU': 'Europe', 'NA': 'North America', 'OC': 'Oceania', 'SA': 'South America', 'AN': 'Antarctica'
+                            }.get(cc, cc)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        # fallback: basic mapping for common countries (expandable)
+        fallback = {
+            'United States': 'North America', 'Germany': 'Europe', 'France': 'Europe', 'Italy': 'Europe',
+            'Switzerland': 'Europe', 'Austria': 'Europe', 'India': 'Asia', 'Nepal': 'Asia', 'Croatia': 'Europe',
+            'Slovenia': 'Europe', 'United Arab Emirates': 'Asia'
+        }
+        return fallback.get(country_name, '')
+
+    def _parse_date(self, v):
+        if v is None:
+            return None
+        if isinstance(v, datetime):
+            return v
+        try:
+            if isinstance(v, (int, float)):
+                return datetime.fromtimestamp(int(v))
+            if isinstance(v, str):
+                try:
+                    return datetime.fromisoformat(v)
+                except Exception:
+                    # try common formats
+                    for fmt in ("%Y-%m-%d", "%d.%m.%Y", "%Y/%m/%d"):
+                        try:
+                            return datetime.strptime(v, fmt)
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+        return None
+
+    def compute_trip_stats(self, trip_parser: TripParser) -> dict:
+        """Compute per-trip stats (steps, photos, videos, km, dates, countries).
+        Returns serializable dict."""
+        tp = trip_parser
+        tp.load()
+        name = tp.get_trip_name()
+        start_dt, end_dt = tp.get_trip_dates()
+        total_km = tp.get_total_km()
+        steps = tp.steps or []
+        photos = sum(len(s.get('photos', [])) for s in steps)
+        videos = sum(len(s.get('videos', [])) for s in steps)
+        # collect unique travel dates from step timestamps and trip start/end
+        travel_dates = set()
+        countries = []
+        for s in steps:
+            data = s.get('data', {}) or {}
+            # collect step date/time hints
+            for key in ('start_time', 'startDate', 'start_date', 'time', 'date', 'timestamp'):
+                if key in data and data[key]:
+                    dt = self._parse_date(data[key])
+                    if dt:
+                        travel_dates.add(dt.date())
+                        break
+            # fallback: use trip start date if available
+            if not travel_dates and start_dt:
+                travel_dates.add(start_dt.date())
+            # country detection with improved fallback logic
+            country = ''
+            loc = data.get('location') if isinstance(data.get('location'), dict) else {}
+            if loc:
+                country, _, _ = self._extract_country_from_location(loc)
+            if country:
+                countries.append(country)
+        # if trip-level start/end exist, include their days
+        if start_dt and end_dt:
+            cur = start_dt.date()
+            while cur <= (end_dt.date() or cur):
+                travel_dates.add(cur)
+                cur = cur + timedelta(days=1)
+                # safe guard
+                if len(travel_dates) > 10000:
+                    break
+        stats = {
+            'name': name,
+            'path': str(tp.trip_path),
+            'start_date': start_dt.isoformat() if start_dt else None,
+            'end_date': end_dt.isoformat() if end_dt else None,
+            'steps': len(steps),
+            'photos': photos,
+            'videos': videos,
+            'total_km': total_km,
+            'travel_days': len(travel_dates),
+            'countries': sorted(set([c for c in countries if c])),
+        }
+        return stats
+
+    def compute_aggregate_stats(self, trip_paths: list, year: int = None, start_date: datetime = None, end_date: datetime = None, progress_callback=None, verbose: bool = False, debug_countries: bool = False) -> dict:
+        """Aggregate stats across a list of trip paths (Path objects). Filters by year or date range when provided.
+        Optional progress_callback(processed:int, total:int, trip:Path) called as each trip is processed.
+        If verbose is True, includes per-trip breakdown in returned dict under key 'per_trip'.
+        If debug_countries is True, shows detailed country detection info."""
+        all_stats = []
+        total_km = 0.0
+        total_photos = 0
+        total_videos = 0
+        total_steps = 0
+        travel_dates = set()
+        country_days = {}  # country -> set(dates)
+        unmatched_days = set()  # track days not assigned to any country
+
+        total = len(trip_paths)
+
+        # Pre-scan all steps for coordinates and populate reverse-geocode cache in batch.
+        coord_map = {}  # cache_key -> (lat, lon)
+        for p_scan in trip_paths:
+            try:
+                tp_scan = TripParser(p_scan)
+                tp_scan.load()
+            except Exception:
+                continue
+            for s_scan in tp_scan.steps:
+                data_scan = s_scan.get('data', {}) or {}
+                loc_scan = data_scan.get('location') if isinstance(data_scan.get('location'), dict) else {}
+                if not loc_scan:
+                    continue
+                # extract candidate coords
+                lat = None
+                lon = None
+                for k in ('lat', 'latitude'):
+                    if k in loc_scan and loc_scan.get(k) not in (None, ''):
+                        try:
+                            lat = float(loc_scan.get(k))
+                        except Exception:
+                            lat = None
+                for k in ('lon', 'lng', 'longitude'):
+                    if k in loc_scan and loc_scan.get(k) not in (None, ''):
+                        try:
+                            lon = float(loc_scan.get(k))
+                        except Exception:
+                            lon = None
+                if (lat is None or lon is None) and 'coords' in loc_scan:
+                    c = loc_scan.get('coords')
+                    if isinstance(c, (list, tuple)) and len(c) >= 2:
+                        try:
+                            lat = float(c[0])
+                            lon = float(c[1])
+                        except Exception:
+                            pass
+                if (lat is None or lon is None) and 'latlng' in loc_scan:
+                    c = loc_scan.get('latlng')
+                    if isinstance(c, (list, tuple)) and len(c) >= 2:
+                        try:
+                            lat = float(c[0])
+                            lon = float(c[1])
+                        except Exception:
+                            pass
+                if lat is not None and lon is not None:
+                    k = self._cache_key_from_latlon(lat, lon)
+                    if k and k not in self._rg_cache:
+                        coord_map[k] = (lat, lon)
+        if coord_map:
+            if debug_countries:
+                print(f"Batch reverse-geocoding {len(coord_map)} unique coords...")
+            self._batch_reverse_geocode(coord_map, debug=debug_countries)
+
+        for idx, p in enumerate(trip_paths, start=1):
+            try:
+                tp = TripParser(p)
+                tp.load()
+            except Exception:
+                # still report progress
+                if progress_callback:
+                    try:
+                        progress_callback(idx, total, p)
+                    except Exception:
+                        pass
+                continue
+            # report progress before filtering per-trip
+            if progress_callback:
+                try:
+                    progress_callback(idx, total, p)
+                except Exception:
+                    pass
+
+            # determine if trip should be included by year or date range
+            s_dt, e_dt = tp.get_trip_dates()
+            if year and s_dt:
+                if s_dt.year != int(year):
+                    continue
+            if start_date or end_date:
+                # if trip has no dates, skip
+                if not s_dt and not e_dt:
+                    continue
+                # check overlap
+                s = s_dt.date() if s_dt else None
+                e = e_dt.date() if e_dt else None
+                if start_date and e and e < start_date.date():
+                    continue
+                if end_date and s and s > end_date.date():
+                    continue
+            # collect per-trip stats via compute_trip_stats but filter step dates by range
+            ts = self.compute_trip_stats(tp)
+            total_km += float(ts.get('total_km') or 0)
+            total_photos += int(ts.get('photos') or 0)
+            total_videos += int(ts.get('videos') or 0)
+            total_steps += int(ts.get('steps') or 0)
+            # collect travel dates via step dates and trip dates
+            # Use the same logic as compute_trip_stats: recompute travel date list
+            tmp_dates = set()
+            for s in tp.steps:
+                data = s.get('data', {}) or {}
+                for key in ('start_time', 'startDate', 'start_date', 'time', 'date', 'timestamp'):
+                    if key in data and data[key]:
+                        dt = self._parse_date(data[key])
+                        if dt:
+                            tmp_dates.add(dt.date())
+                            break
+            if tp.get_trip_dates()[0] and tp.get_trip_dates()[1]:
+                s_dt, e_dt = tp.get_trip_dates()
+                cur = s_dt.date()
+                while cur <= e_dt.date():
+                    tmp_dates.add(cur)
+                    cur = cur + timedelta(days=1)
+                    if len(tmp_dates) > 10000:
+                        break
+            # filter tmp_dates by provided date range
+            if start_date:
+                tmp_dates = set(d for d in tmp_dates if d >= start_date.date())
+            if end_date:
+                tmp_dates = set(d for d in tmp_dates if d <= end_date.date())
+            for d in tmp_dates:
+                travel_dates.add(d)
+            per_trip_country_days = {}
+            # map countries to dates with improved detection
+            for s in tp.steps:
+                data = s.get('data', {}) or {}
+                # use improved country detection
+                country = ''
+                loc = data.get('location') if isinstance(data.get('location'), dict) else {}
+                if loc:
+                    country, source, raw = self._extract_country_from_location(loc, debug=debug_countries)
+                    if debug_countries and country:
+                        print(f"    Step country: {country} from {source} (raw: {raw})")
+                
+                # collect dates per country
+                # extract dates for this step
+                step_dates = set()
+                for key in ('start_time', 'startDate', 'start_date', 'time', 'date', 'timestamp'):
+                    if key in data and data[key]:
+                        dt = self._parse_date(data[key])
+                        if dt:
+                            step_dates.add(dt.date())
+                if not step_dates and tp.get_trip_dates()[0] and tp.get_trip_dates()[1]:
+                    s_dt, e_dt = tp.get_trip_dates()
+                    cur = s_dt.date()
+                    while cur <= e_dt.date():
+                        step_dates.add(cur)
+                        cur = cur + timedelta(days=1)
+                if start_date:
+                    step_dates = set(d for d in step_dates if d >= start_date.date())
+                if end_date:
+                    step_dates = set(d for d in step_dates if d <= end_date.date())
+                if country:
+                    country_days.setdefault(country, set()).update(step_dates)
+                    per_trip_country_days.setdefault(country, set()).update(step_dates)
+                else:
+                    # Track days without country assignment
+                    unmatched_days.update(step_dates)
+                    if debug_countries and step_dates:
+                        print(f"    No country found for step with dates: {step_dates}")
+                        if loc:
+                            print(f"      Location data: {loc}")
+
+            # compute per-trip continent aggregation
+            per_trip_continent_days = {}
+            for c, ds in per_trip_country_days.items():
+                cont = self._country_to_continent(c)
+                if cont:
+                    per_trip_continent_days.setdefault(cont, set()).update(ds)
+
+            per_trip_summary = {
+                'path': str(p),
+                'name': ts.get('name'),
+                'steps': len(tp.steps),
+                'travel_days': len(tmp_dates),
+                'total_km': ts.get('total_km'),
+                'photos': ts.get('photos'),
+                'videos': ts.get('videos'),
+                'country_days': {c: len(ds) for c, ds in per_trip_country_days.items()},
+                'continent_days': {c: len(ds) for c, ds in per_trip_continent_days.items()}
+            }
+            # store per-trip summary
+            if verbose:
+                all_stats.append(per_trip_summary)
+
+        # Compute country day counts
+        country_counts = {c: len(ds) for c, ds in country_days.items()}
+        total_travel_days = len(travel_dates)
+        total_country_days = sum(country_counts.values())
+        unmatched_count = len(unmatched_days)
+        
+        # Compute continent aggregation based on country_days
+        continents_days = {}
+        for c, ds in country_days.items():
+            cont = self._country_to_continent(c)
+            if cont:
+                continents_days.setdefault(cont, set()).update(ds)
+        visited_continents_count = len(continents_days)
+        WORLD_CONTINENT_COUNT = 7
+        visited_continents_percent = round((visited_continents_count / float(WORLD_CONTINENT_COUNT)) * 100.0, 2) if WORLD_CONTINENT_COUNT else None
+        
+        if debug_countries:
+            print(f"\nCountry Assignment Summary:")
+            print(f"  Total travel days: {total_travel_days}")
+            print(f"  Days assigned to countries: {total_country_days}")
+            print(f"  Days without country assignment: {unmatched_count}")
+            if unmatched_days:
+                print(f"  Unmatched dates: {sorted(unmatched_days)}")
+            if continents_days:
+                print(f"  Continents assignment: { {k: len(v) for k,v in continents_days.items()} }")
+        
+        # compute overall period for all-time mode
+        period_start = min(travel_dates) if travel_dates else None
+        period_end = max(travel_dates) if travel_dates else None
+        # if all-time, non-travel days = days between first travel day and today minus travel days
+        non_travel_days = None
+        if period_start:
+            non_travel_days = (datetime.now().date() - period_start).days + 1 - total_travel_days
+
+        visited_countries_count = len(country_counts)
+        visited_countries_percent = round((visited_countries_count / float(WORLD_COUNTRY_COUNT)) * 100.0, 2) if WORLD_COUNTRY_COUNT else None
+
+        aggregate = {
+            'trip_count': len(trip_paths),
+            'total_km': round(total_km, 2),
+            'total_photos': total_photos,
+            'total_videos': total_videos,
+            'total_steps': total_steps,
+            'total_travel_days': total_travel_days,
+            'total_country_days': total_country_days,
+            'unmatched_days': unmatched_count,
+            'period_start': period_start.isoformat() if period_start else None,
+            'period_end': period_end.isoformat() if period_end else None,
+            'visited_countries_count': visited_countries_count,
+            'visited_countries_percent': visited_countries_percent,
+            'countries': country_counts,
+            'continents': {c: len(ds) for c, ds in continents_days.items()},
+            'visited_continents_count': visited_continents_count,
+            'visited_continents_percent': visited_continents_percent,
+        }
+        if verbose:
+            aggregate['per_trip'] = all_stats
+        if debug_countries:
+            aggregate['debug_info'] = {
+                'unmatched_dates': [d.isoformat() for d in sorted(unmatched_days)]
+            }
+        return aggregate
+
+    def generate_overview_map(self, trip_paths: list) -> bytes:
+        """Create a combined overview map for the provided trips (list of Path).
+        Uses an in-memory combined object compatible with MapGenerator.generate_overview_map."""
+        steps = []
+        for p in trip_paths:
+            try:
+                tp = TripParser(p)
+                tp.load()
+            except Exception:
+                continue
+            for s in tp.steps:
+                steps.append(s)
+        # Create a tiny wrapper with steps and get_route_coordinates
+        class _Combined:
+            def __init__(self, steps):
+                self.steps = steps
+                self.trip_path = Path('.')
+            def get_route_coordinates(self):
+                coords = []
+                for s in self.steps:
+                    loc = s.get('data', {}).get('location') or {}
+                    if isinstance(loc, dict):
+                        lat = loc.get('lat') or loc.get('latitude')
+                        lon = loc.get('lon') or loc.get('lng') or loc.get('longitude')
+                        try:
+                            if lat is not None and lon is not None:
+                                coords.append((float(lon), float(lat)))
+                        except Exception:
+                            pass
+                return coords
+        combined = _Combined(steps)
+        mg = self.map_generator.clone()
+        try:
+            return mg.generate_overview_map(combined)
+        except Exception:
+            return b''
+
+    def export_stats_json(self, stats: dict, out_path: Path):
+        try:
+            with open(out_path, 'w', encoding='utf-8') as f:
+                json.dump(stats, f, indent=2, ensure_ascii=False)
+            return True
+        except Exception:
+            return False
+
+
 class HtmlPDFBuilder:
     """Builds the PDF document using HTML/CSS rendered by Playwright (Chromium)."""
 
@@ -2760,6 +3573,11 @@ def print_command_help(lang: LanguageManager = None):
         """Print available commands."""
         lang = lang or get_default_language_manager()
         print(lang.t("cli.command_help"))
+        try:
+            # Additional quick stats help
+            print(lang.t("cli.stats_help"))
+        except Exception:
+            pass
 
 
 def prompt_loop(trips: list, cache_manager: CacheManager, script_dir: Path, config: dict, lang: LanguageManager):
@@ -2831,6 +3649,215 @@ def prompt_loop(trips: list, cache_manager: CacheManager, script_dir: Path, conf
                 display_trips(trips, cache_manager, lang=lang)
                 continue
             
+            # Stats command
+            if cmd_lower.startswith('stats') or cmd_lower.startswith('s ') or cmd_lower == 's':
+                # Reuse render selection parsing by prefixing with 'r'
+                rest = cmd[5:].strip() if cmd_lower.startswith('stats') else cmd[1:].strip()
+                # Support verbose flag '-v' in prompt mode
+                tokens = rest.split()
+                verbose = False
+                filtered_tokens = []
+                for t in tokens:
+                    if t in ('-v', '--verbose', '-V'):
+                        verbose = True
+                    else:
+                        filtered_tokens.append(t)
+                rest = ' '.join(filtered_tokens)
+                parse_cmd = 'r ' + rest if rest else 'r'
+                result = parse_render_command(parse_cmd, trips, cache_manager, lang=lang)
+
+                if not result['valid']:
+                    # If the only error is missing selection/mode, offer to run stats for ALL trips
+                    if result.get('error_code') == 'no_selection_or_mode':
+                        user_choice = input(lang.t(
+                            "cli.no_selection_prompt",
+                            yes=lang.t("general.yes"),
+                            no=lang.t("general.no"),
+                        )).strip()
+                        if not user_choice:
+                            print(lang.t("cli.cancelled_return"))
+                            continue
+                        if lang.is_yes(user_choice):
+                            # Re-parse using explicit -a to include rendered
+                            parse_cmd = 'r -a'
+                            result = parse_render_command(parse_cmd, trips, cache_manager, lang=lang)
+                            if not result['valid']:
+                                print(lang.t("cli.error_prefix", error=result['error']))
+                                continue
+                        elif lang.is_no(user_choice):
+                            print(lang.t("cli.cancelled_return"))
+                            continue
+                        else:
+                            # Treat the user's input as a new command and process it
+                            cmd = user_choice
+                            continue
+                    else:
+                        print(lang.t("cli.error_prefix", error=result['error']))
+                        continue
+
+                trips_to_stat = result['trips']
+                # Print a concise header depending on filter
+                if result.get('year'):
+                    print(f"Reise dieses Jahr: {result.get('year')}")
+                elif result.get('start_date') and result.get('end_date'):
+                    print(f"Reise im Zeitraum: {result.get('start_date').date()} bis {result.get('end_date').date()}")
+                else:
+                    print("Reise:")
+
+                for i, trip in enumerate(trips_to_stat, 1):
+                    try:
+                        with open(trip / "trip.json", "r", encoding="utf-8") as f:
+                            trip_data = json.load(f)
+                        name = trip_data.get("name", trip.name)
+                        print(f"  [{i}] {name}")
+                    except Exception:
+                        print(f"  [{i}] {trip.name}")
+
+               
+
+                # compute with progress reporting
+                sg = StatisticsGenerator(map_generator=MapGenerator())
+                def _progress(idx, total, trip):
+                    # Progress reporting disabled for CLI stats (quiet mode)
+                    return
+                # Ensure start/end period variables reflect requested year or explicit range
+                period_start = None
+                period_end = None
+                if result.get('year'):
+                    y = int(result.get('year'))
+                    period_start = datetime(y, 1, 1)
+                    period_end = datetime(y, 12, 31)
+                elif result.get('start_date') and result.get('end_date'):
+                    period_start = result.get('start_date')
+                    period_end = result.get('end_date')
+
+                agg = sg.compute_aggregate_stats(trips_to_stat, year=result.get('year'), start_date=period_start, end_date=period_end, progress_callback=_progress, verbose=verbose)
+
+                # Determine period for ratio calculation
+                if period_start and period_end:
+                    ps_date = period_start.date()
+                    pe_date = period_end.date()
+                else:
+                    # fall back to aggregate's period if available
+                    ps_iso = agg.get('period_start')
+                    pe_iso = agg.get('period_end')
+                    ps_date = date.fromisoformat(ps_iso) if ps_iso else None
+                    pe_date = date.fromisoformat(pe_iso) if pe_iso else None
+
+                # Compute overall period days and non-travel days ratio when possible
+                period_total_days = None
+                non_travel_days = None
+                travel_pct = None
+                if ps_date and pe_date:
+                    period_total_days = (pe_date - ps_date).days + 1
+                    travel_days = agg.get('total_travel_days', 0)
+                    non_travel_days = max(0, period_total_days - travel_days)
+                    travel_pct = (travel_days / period_total_days * 100) if period_total_days else None
+
+                # print final summary to console (German)
+                print("--- Statistik Ergebnis ---")
+                # (headline shown previously) do not repeat the year header here
+                print(f"Trips: {agg.get('trip_count',0)}")
+                print(f"Steps gesamt: {agg.get('total_steps',0)}")
+                print(f"Reisetage gesamt: {agg.get('total_travel_days',0)}")
+                if period_total_days is not None:
+                    print(f"Reise/Non-Reise: {agg.get('total_travel_days',0)} Reisetage • {non_travel_days} Nicht-Reisetage ({travel_pct:.1f}% Reise)")
+                print(f"Gereiste km: {agg.get('total_km',0)}")
+                print(f"Fotos: {agg.get('total_photos',0)}, Videos: {agg.get('total_videos',0)}")
+                print(f"Länder bereist: {agg.get('visited_countries_count',0)} ({agg.get('visited_countries_percent',0.0)}% der Länder der Welt)")
+                print("Länder (Tage):")
+                for c, cnt in sorted(agg.get('countries',{}).items(), key=lambda x: -x[1]):
+                    pct = (cnt / max(1, agg.get('total_travel_days',1))) * 100 if agg.get('total_travel_days') else 0
+                    print(f"  {c}: {cnt} Tage ({pct:.1f}%)")
+                # Continents summary
+                print("")
+                print(f"Kontinente bereist: {agg.get('visited_continents_count',0)} ({agg.get('visited_continents_percent',0.0)}% aller Kontinente)")
+                print("Kontinente (Tage):")
+                for c, cnt in sorted(agg.get('continents',{}).items(), key=lambda x: -x[1]):
+                    pct = (cnt / max(1, agg.get('total_travel_days',1))) * 100 if agg.get('total_travel_days') else 0
+                    print(f"  {c}: {cnt} Tage ({pct:.1f}%)")
+                # Continents summary
+                print("")
+                print(f"Kontinente bereist: {agg.get('visited_continents_count',0)} ({agg.get('visited_continents_percent',0.0)}% aller Kontinente)")
+                print("Kontinente (Tage):")
+                for c, cnt in sorted(agg.get('continents',{}).items(), key=lambda x: -x[1]):
+                    pct = (cnt / max(1, agg.get('total_travel_days',1))) * 100 if agg.get('total_travel_days') else 0
+                    print(f"  {c}: {cnt} Tage ({pct:.1f}%)")
+                # if verbose was requested, print per-trip breakdown
+                if verbose and agg.get('per_trip'):
+                    print('\n--- Per-Trip Breakdown ---')
+                    for i, pt in enumerate(agg.get('per_trip', []), 1):
+                        name = pt.get('name') or pt.get('path')
+                        steps = pt.get('steps', 0)
+                        td = pt.get('travel_days', 0)
+                        km = pt.get('total_km', 0)
+                        countries = pt.get('country_days', {})
+                        country_list = ', '.join([f"{c}({d})" for c, d in sorted(countries.items(), key=lambda x: -x[1])])
+                        print(f" [{i}] {name} — Steps: {steps}, Reisetage (im Zeitraum): {td}, km: {km}")
+                        if country_list:
+                            print(f"      Länder: {country_list}")
+                    print('--- End of per-trip breakdown ---\n')
+
+                # offer a quick export to default TripPdfs folder
+                def _default_name(suffix: str) -> str:
+                    # prefer year if given, else period start-end or 'alltime'
+                    label = 'alltime'
+                    if result.get('year'):
+                        label = str(result.get('year'))
+                    else:
+                        ps = agg.get('period_start')
+                        pe = agg.get('period_end')
+                        if ps and pe:
+                            label = f"{ps}_{pe}"
+                    return f"stats_{label}.{suffix}"
+
+                try:
+                    quick = input('Quick export JSON+Map to default `TripPdfs` folder? [y/N]: ').strip()
+                    if quick and quick.lower() in ('y', 'yes'):
+                        outdir = Path('TripPdfs')
+                        outdir.mkdir(parents=True, exist_ok=True)
+                        json_path = outdir / _default_name('json')
+                        ok = sg.export_stats_json(agg, json_path)
+                        print(f"JSON export {'erfolgreich' if ok else 'fehlgeschlagen'}: {json_path}")
+                        try:
+                            mp = sg.generate_overview_map(trips_to_stat)
+                            if mp:
+                                map_path = outdir / _default_name('png')
+                                with open(map_path, 'wb') as mf:
+                                    mf.write(mp)
+                                print(f"Map export geschrieben: {map_path}")
+                            else:
+                                print('No overview map generated to export.')
+                        except Exception as e:
+                            print(f"Map export fehlgeschlagen: {e}")
+                    else:
+                        # interactive export options
+                        try:
+                            path = input('Export JSON to file (enter path or leave empty to skip): ').strip()
+                            if path:
+                                ok = sg.export_stats_json(agg, Path(path))
+                                print(f"JSON export {'erfolgreich' if ok else 'fehlgeschlagen'}: {path}")
+                        except Exception:
+                            pass
+
+                        try:
+                            path = input('Export overview map to PNG (enter path or leave empty to skip): ').strip()
+                            if path:
+                                mp = sg.generate_overview_map(trips_to_stat)
+                                try:
+                                    with open(path, 'wb') as mf:
+                                        mf.write(mp)
+                                    print(f"Map export geschrieben: {path}")
+                                except Exception as e:
+                                    print(f"Map export fehlgeschlagen: {e}")
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
+                print('Statistics completed.')
+                continue
+
             # Render command
             if cmd_lower.startswith('render') or cmd_lower.startswith('r ') or cmd_lower == 'r':
                 result = parse_render_command(cmd, trips, cache_manager, lang=lang)
@@ -3253,7 +4280,22 @@ def main():
     
     parser.add_argument('bsp_folder', nargs='?', help=lang.t("cli.argparse_bsp_help"))
     parser.add_argument('--clear-cache', action='store_true', help=lang.t("cli.argparse_clear_cache"))
-    
+    # Statistics flags
+    parser.add_argument('--stats', action='store_true', help='Show statistics for trips (prints summary)')
+    parser.add_argument('-y', '--year', dest='stats_year', type=int, help='Filter statistics by year (shorthand -y)')
+    parser.add_argument('--from', dest='stats_from', help='Filter statistics from date YYYY-MM-DD')
+    parser.add_argument('--to', dest='stats_to', help='Filter statistics to date YYYY-MM-DD')
+    parser.add_argument('--unrendered', action='store_true', help='Only include unrendered trips in statistics')
+    parser.add_argument('-v', '--stats-verbose', dest='stats_verbose', action='store_true', help='Show per-trip breakdown')
+    parser.add_argument('--debug-countries', action='store_true', help='Show debug information for country detection')
+    parser.add_argument('--stats-json', help='Write statistics JSON to file')
+    parser.add_argument('--stats-map', help='Write overview map PNG to file')
+    parser.add_argument('--yes', action='store_true', help='Do not prompt for confirmation')
+
+    # Support legacy style: treat first arg 'stats' like '--stats'
+    if len(sys.argv) > 1 and sys.argv[1] in ('stats', 's'):
+        sys.argv[1] = '--stats'
+
     args = parser.parse_args()
     
     # Determine BSPData folder
@@ -3288,6 +4330,124 @@ def main():
     
     # Find all trips
     trips = find_trips(bsp_data_folder)
+
+    # Handle statistics from CLI
+    if args.stats:
+        sg = StatisticsGenerator(map_generator=MapGenerator())
+        # parse date filters
+        start_date = None
+        end_date = None
+        try:
+            if args.stats_from:
+                start_date = datetime.fromisoformat(args.stats_from)
+            if args.stats_to:
+                end_date = datetime.fromisoformat(args.stats_to)
+        except Exception:
+            print("Invalid date format for --from/--to. Use YYYY-MM-DD.")
+            return
+
+        # Apply same filters as trips
+        filtered = filter_trips_by_date(trips, args.stats_year, start_date, end_date)
+        if args.unrendered:
+            cm2 = CacheManager(get_cache_dir() / "rendered_trips_cache.json")
+            filtered = [t for t in filtered if not cm2.is_rendered(t)]
+
+        if not filtered:
+            print("No trips match the requested filters.")
+            return
+
+        # Print concise header and list trips once
+        if args.stats_year:
+            print(f"Reise dieses Jahr: {args.stats_year}")
+        elif start_date and end_date:
+            print(f"Reise im Zeitraum: {start_date.date()} bis {end_date.date()}")
+        else:
+            print("Reise:")
+        for i, t in enumerate(filtered, 1):
+            try:
+                with open(t / 'trip.json', 'r', encoding='utf-8') as f:
+                    td = json.load(f)
+                name = td.get('name', t.name)
+                print(f"  [{i}] {name}")
+            except Exception:
+                print(f"  [{i}] {t.name}")
+
+        # Proceed immediately to compute statistics (no confirmation)
+        print("Computing statistics for the selected trips...")
+
+        # compute with progress reporting
+        def _progress(idx, total, trip):
+            # Progress reporting disabled for CLI stats (quiet mode)
+            return
+
+        agg = sg.compute_aggregate_stats(filtered, year=args.stats_year, start_date=start_date, end_date=end_date, progress_callback=_progress, verbose=args.stats_verbose, debug_countries=args.debug_countries)
+
+        # Determine period for ratio calculation (favor explicit args)
+        if args.stats_year:
+            ps = datetime(args.stats_year, 1, 1).date()
+            pe = datetime(args.stats_year, 12, 31).date()
+        elif start_date and end_date:
+            ps = start_date.date()
+            pe = end_date.date()
+        else:
+            ps_iso = agg.get('period_start')
+            pe_iso = agg.get('period_end')
+            ps = date.fromisoformat(ps_iso) if ps_iso else None
+            pe = date.fromisoformat(pe_iso) if pe_iso else None
+
+        # If verbose, print per-trip breakdown
+        if args.stats_verbose and agg.get('per_trip'):
+            print('\n--- Per-Trip Breakdown ---')
+            for i, pt in enumerate(agg.get('per_trip', []), 1):
+                name = pt.get('name') or pt.get('path')
+                steps = pt.get('steps', 0)
+                td = pt.get('travel_days', 0)
+                km = pt.get('total_km', 0)
+                countries = pt.get('country_days', {})
+                country_list = ', '.join([f"{c}({d})" for c, d in sorted(countries.items(), key=lambda x: -x[1])])
+                print(f" [{i}] {name} — Steps: {steps}, Reisetage (im Zeitraum): {td}, km: {km}")
+                if country_list:
+                    print(f"      Länder: {country_list}")
+            print('--- End of per-trip breakdown ---\n')
+        period_total_days = None
+        non_travel_days = None
+        travel_pct = None
+        if ps and pe:
+            period_total_days = (pe - ps).days + 1
+            travel_days = agg.get('total_travel_days', 0)
+            non_travel_days = max(0, period_total_days - travel_days)
+            travel_pct = (travel_days / period_total_days * 100) if period_total_days else None
+
+        # print final summary to console (German)
+        print("--- Statistik Ergebnis ---")
+        print(f"Trips: {agg.get('trip_count',0)}")
+        print(f"Steps gesamt: {agg.get('total_steps',0)}")
+        print(f"Reisetage gesamt: {agg.get('total_travel_days',0)}")
+        if period_total_days is not None:
+            print(f"Reise/Non-Reise: {agg.get('total_travel_days',0)} Tage Reiset • {non_travel_days} Tage Nicht-Reise ({travel_pct:.1f}% Reise)")
+        print(f"Gereiste km: {agg.get('total_km',0)}")
+        print(f"Fotos: {agg.get('total_photos',0)}, Videos: {agg.get('total_videos',0)}")
+        print(f"Länder bereist: {agg.get('visited_countries_count',0)} ({agg.get('visited_countries_percent',0.0)}% der Länder der Welt)")
+        print("Länder (Tage):")
+        for c, cnt in sorted(agg.get('countries',{}).items(), key=lambda x: -x[1]):
+            pct = (cnt / max(1, agg.get('total_travel_days',1))) * 100 if agg.get('total_travel_days') else 0
+            print(f"  {c}: {cnt} Tage ({pct:.1f}%)")
+
+        # optional JSON export
+        if args.stats_json:
+            ok = sg.export_stats_json(agg, Path(args.stats_json))
+            print(f"JSON export {'erfolgreich' if ok else 'fehlgeschlagen'}: {args.stats_json}")
+        # optional map export
+        if args.stats_map:
+            try:
+                mp = sg.generate_overview_map(filtered)
+                with open(args.stats_map, 'wb') as mf:
+                    mf.write(mp)
+                print(f"Map export geschrieben: {args.stats_map}")
+            except Exception as e:
+                print(f"Map export fehlgeschlagen: {e}")
+        print('Statistics completed.')
+        return
     
     if not trips:
         print(lang.t("cli.no_trips_in_bsp"))

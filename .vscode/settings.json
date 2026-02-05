@@ -23,6 +23,10 @@
         "/^python -m py_compile \"f:\\\\AppDevelopment\\\\PolarstepsPDFCreator\\\\gui\\\\tk_gui\\.py\"$/": {
             "approve": true,
             "matchCommandLine": true
+        },
+        "/^& \"F:/AppDevelopment/PolarstepsPDFCreator/\\.venv/Scripts/python\\.exe\" -m py_compile polarsteps_pdf_generator\\.py$/": {
+            "approve": true,
+            "matchCommandLine": true
         }
     }
 }
