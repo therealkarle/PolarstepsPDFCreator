@@ -1678,6 +1678,14 @@ class StatisticsGenerator:
         'vereinigte arabische emirate': 'United Arab Emirates'
     }
 
+    # Minimal alpha-2 -> name fallback used when pycountry is not available
+    _ALPHA2_FALLBACK = {
+        'IN': 'India', 'NP': 'Nepal', 'AE': 'United Arab Emirates', 'US': 'United States',
+        'DE': 'Germany', 'CH': 'Switzerland', 'FR': 'France', 'IT': 'Italy', 'AT': 'Austria',
+        'ES': 'Spain', 'HR': 'Croatia', 'SI': 'Slovenia', 'SM': 'San Marino', 'AD': 'Andorra',
+        'VA': 'Vatican City', 'GB': 'United Kingdom', 'NL': 'Netherlands', 'BE': 'Belgium'
+    }
+
     def __init__(self, map_generator: MapGenerator = None, config: dict = None):
         self.map_generator = map_generator or MapGenerator()
         self.config = config or {}
@@ -1919,6 +1927,23 @@ class StatisticsGenerator:
         # split on commas and take last token
         parts = [p.strip() for p in re.split(r'[,\-\/]', s) if p.strip()]
         token = parts[-1] if parts else s
+        # QUICK WIN: if token is a 2-letter country code, handle it BEFORE removing common prepositions
+        if len(token.strip()) == 2:
+            code = token.strip().upper()
+            if pycountry is not None:
+                try:
+                    c = pycountry.countries.get(alpha_2=code)
+                    if c:
+                        name = getattr(c, 'common_name', None) or getattr(c, 'official_name', None) or getattr(c, 'name', None)
+                        if name:
+                            return name
+                except Exception:
+                    pass
+            try:
+                if code in self._ALPHA2_FALLBACK:
+                    return self._ALPHA2_FALLBACK[code]
+            except Exception:
+                pass
         # remove common prepositions and noise
         token = re.sub(r'\b(bei|in|am|der|die|das|von|den|und|auf|la|le)\b', '', token, flags=re.IGNORECASE).strip()
         # remove any trailing digits or extra punctuation
@@ -1932,14 +1957,22 @@ class StatisticsGenerator:
         }
         if token_low in extra_aliases:
             token_low = extra_aliases[token_low]
-        # if 2-letter code, try pycountry lookup directly
-        if len(token_low) == 2 and pycountry is not None:
+        # if 2-letter code, try pycountry lookup directly; fallback to built-in map if pycountry missing
+        if len(token_low) == 2:
+            code = token_low.upper()
+            if pycountry is not None:
+                try:
+                    c = pycountry.countries.get(alpha_2=code)
+                    if c:
+                        name = getattr(c, 'common_name', None) or getattr(c, 'official_name', None) or getattr(c, 'name', None)
+                        if name:
+                            return name
+                except Exception:
+                    pass
+            # fallback mapping when pycountry not available or lookup failed
             try:
-                c = pycountry.countries.get(alpha_2=token_low.upper())
-                if c:
-                    name = getattr(c, 'common_name', None) or getattr(c, 'official_name', None) or getattr(c, 'name', None)
-                    if name:
-                        return name
+                if code in self._ALPHA2_FALLBACK:
+                    return self._ALPHA2_FALLBACK[code]
             except Exception:
                 pass
         # try direct alias match
@@ -2282,7 +2315,11 @@ class StatisticsGenerator:
             for d in tmp_dates:
                 travel_dates.add(d)
             per_trip_country_days = {}
-            # map countries to dates with improved detection
+            # two-pass approach: first collect explicit detections, then assign fallbacks so EVERY step has a country
+            step_assigned = []            # list of normalized country (or '' if none yet) per step
+            step_dates_list = []         # list of date sets per step (aligned with steps)
+
+            # map countries to dates with improved detection (first pass)
             for s in tp.steps:
                 data = s.get('data', {}) or {}
                 # use improved country detection
@@ -2292,8 +2329,7 @@ class StatisticsGenerator:
                     country, source, raw = self._extract_country_from_location(loc, debug=debug_countries)
                     if debug_countries and country:
                         print(f"    Step country: {country} from {source} (raw: {raw})")
-                
-                # collect dates per country
+
                 # extract dates for this step
                 step_dates = set()
                 for key in ('start_time', 'startDate', 'start_date', 'time', 'date', 'timestamp'):
@@ -2311,16 +2347,122 @@ class StatisticsGenerator:
                     step_dates = set(d for d in step_dates if d >= start_date.date())
                 if end_date:
                     step_dates = set(d for d in step_dates if d <= end_date.date())
+
+                # record explicit country (normalized) or placeholder for fallback
                 if country:
-                    country_days.setdefault(country, set()).update(step_dates)
-                    per_trip_country_days.setdefault(country, set()).update(step_dates)
+                    norm_ctry = self._normalize_country(country) or country
+                    country_days.setdefault(norm_ctry, set()).update(step_dates)
+                    per_trip_country_days.setdefault(norm_ctry, set()).update(step_dates)
+                    step_assigned.append(norm_ctry)
                 else:
-                    # Track days without country assignment
-                    unmatched_days.update(step_dates)
-                    if debug_countries and step_dates:
-                        print(f"    No country found for step with dates: {step_dates}")
-                        if loc:
-                            print(f"      Location data: {loc}")
+                    # leave for second-pass fallback assignment
+                    step_assigned.append('')
+                step_dates_list.append(step_dates)
+
+            # second pass: ensure every step gets a country (trip meta -> nearest neighbor -> trip-majority -> global-majority -> final fallback)
+            # trip-level metadata country
+            trip_meta_country = ''
+            try:
+                trip_loc = tp.trip_data.get('location') if isinstance(tp.trip_data, dict) else None
+                if isinstance(trip_loc, dict):
+                    trip_meta_country, _, _ = self._extract_country_from_location(trip_loc, debug=debug_countries)
+                if not trip_meta_country and isinstance(tp.trip_data, dict):
+                    for k in ('country', 'country_name', 'country_code'):
+                        v = tp.trip_data.get(k)
+                        if v:
+                            nm = self._normalize_country(v)
+                            if nm:
+                                trip_meta_country = nm
+                                break
+            except Exception:
+                trip_meta_country = ''
+
+            # trip-majority (most frequent explicit country in this trip)
+            trip_majority_country = ''
+            explicit_countries = [c for c in step_assigned if c]
+            if per_trip_country_days:
+                # prefer the country with most assigned days in per_trip_country_days
+                try:
+                    trip_majority_country = max(per_trip_country_days.items(), key=lambda x: len(x[1]))[0]
+                except Exception:
+                    trip_majority_country = ''
+            elif explicit_countries:
+                counts = {}
+                for c in explicit_countries:
+                    counts[c] = counts.get(c, 0) + 1
+                try:
+                    trip_majority_country = max(counts.items(), key=lambda x: x[1])[0]
+                except Exception:
+                    trip_majority_country = ''
+
+
+            # Assign fallbacks for steps that have no explicit country
+            for i, assigned in enumerate(step_assigned):
+                if assigned:
+                    continue
+                assigned_country = ''
+                reason = ''
+                # 1) trip meta
+                if trip_meta_country:
+                    assigned_country = trip_meta_country
+                    reason = 'trip_meta'
+                else:
+                    # 2) nearest neighbor (left then right)
+                    left = None
+                    for j in range(i - 1, -1, -1):
+                        if step_assigned[j]:
+                            left = step_assigned[j]
+                            break
+                    right = None
+                    for j in range(i + 1, len(step_assigned)):
+                        if step_assigned[j]:
+                            right = step_assigned[j]
+                            break
+                    if left:
+                        assigned_country = left
+                        reason = 'neighbor_left'
+                    elif right:
+                        assigned_country = right
+                        reason = 'neighbor_right'
+                    elif trip_majority_country:
+                        assigned_country = trip_majority_country
+                        reason = 'trip_majority'
+                    else:
+                        assigned_country = 'Unknown'
+                        reason = 'fallback_unknown'
+
+                norm_assigned = self._normalize_country(assigned_country) or assigned_country
+                step_assigned[i] = norm_assigned
+                dates_set = step_dates_list[i] or set()
+                country_days.setdefault(norm_assigned, set()).update(dates_set)
+                per_trip_country_days.setdefault(norm_assigned, set()).update(dates_set)
+                if debug_countries:
+                    print(f"  Fallback assigned country for step #{i}: {norm_assigned} ({reason})")
+
+            # Forward-fill trip dates without explicit steps: use previous day's country; leading days remain unassigned.
+            try:
+                # build mapping date -> country for dates already assigned (from steps)
+                date_to_country = {}
+                for c_name, ds in per_trip_country_days.items():
+                    for d in ds:
+                        date_to_country[d] = c_name
+                last_country = None
+                for d in sorted(tmp_dates):
+                    if d in date_to_country:
+                        last_country = date_to_country[d]
+                        continue
+                    if last_country:
+                        # forward-fill from previous assigned day
+                        per_trip_country_days.setdefault(last_country, set()).add(d)
+                        country_days.setdefault(last_country, set()).add(d)
+                        if debug_countries:
+                            print(f"  Forward-fill assigned date {d} -> {last_country}")
+                    else:
+                        # leading day without previous assignment remains unassigned
+                        if debug_countries:
+                            print(f"  Leading unassigned date (no previous step): {d}")
+            except Exception:
+                pass
 
             # compute per-trip continent aggregation
             per_trip_continent_days = {}
@@ -2344,15 +2486,28 @@ class StatisticsGenerator:
             if verbose:
                 all_stats.append(per_trip_summary)
 
-        # Compute country day counts
-        country_counts = {c: len(ds) for c, ds in country_days.items()}
+        # Normalize/merge country keys (handles short codes from cache or inconsistent keys)
+        normalized_country_days = {}
+        for raw_country, dates_set in country_days.items():
+            try:
+                norm = self._normalize_country(raw_country) or raw_country
+            except Exception:
+                norm = raw_country
+            normalized_country_days.setdefault(norm, set()).update(dates_set)
+        # Compute country day counts from normalized data
+        country_counts = {c: len(ds) for c, ds in normalized_country_days.items()}
         total_travel_days = len(travel_dates)
         total_country_days = sum(country_counts.values())
+        # Recompute unmatched days as any travel date not present in the country assignment sets
+        all_country_dates = set()
+        for ds in normalized_country_days.values():
+            all_country_dates.update(ds)
+        unmatched_days = set(d for d in travel_dates if d not in all_country_dates)
         unmatched_count = len(unmatched_days)
-        
-        # Compute continent aggregation based on country_days
+
+        # Compute continent aggregation based on normalized country keys
         continents_days = {}
-        for c, ds in country_days.items():
+        for c, ds in normalized_country_days.items():
             cont = self._country_to_continent(c)
             if cont:
                 continents_days.setdefault(cont, set()).update(ds)
