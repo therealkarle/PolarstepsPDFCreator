@@ -1686,11 +1686,72 @@ class StatisticsGenerator:
         'VA': 'Vatican City', 'GB': 'United Kingdom', 'NL': 'Netherlands', 'BE': 'Belgium'
     }
 
+    _COUNTRY_NAME_FALLBACK_DE = {
+        'Germany': 'Deutschland',
+        'Switzerland': 'Schweiz',
+        'France': 'Frankreich',
+        'Italy': 'Italien',
+        'Spain': 'Spanien',
+        'Netherlands': 'Niederlande',
+        'Belgium': 'Belgien',
+        'Austria': 'Österreich',
+        'Croatia': 'Kroatien',
+        'Slovenia': 'Slowenien',
+        'Portugal': 'Portugal',
+        'United States': 'Vereinigte Staaten',
+        'United Kingdom': 'Vereinigtes Königreich',
+        'Andorra': 'Andorra',
+        'San Marino': 'San Marino',
+        'United Arab Emirates': 'Vereinigte Arabische Emirate',
+        'India': 'Indien',
+        'Nepal': 'Nepal',
+        'Vatican City': 'Vatikanstadt',
+        'Unknown': 'Unbekannt',
+    }
+
+    _COUNTRY_TRANSLATIONS_URL = "https://restcountries.com/v3.1/all?fields=cca2,name,translations"
+    _LANG_ALPHA3_FALLBACK = {
+        'de': 'deu',
+        'en': 'eng',
+        'fr': 'fra',
+        'es': 'spa',
+        'it': 'ita',
+        'pt': 'por',
+        'nl': 'nld',
+    }
+
+    _CONTINENT_NAME_FALLBACK = {
+        'de': {
+            'Africa': 'Afrika',
+            'Asia': 'Asien',
+            'Europe': 'Europa',
+            'North America': 'Nordamerika',
+            'South America': 'Südamerika',
+            'Oceania': 'Ozeanien',
+            'Antarctica': 'Antarktis',
+        },
+        'en': {
+            'Africa': 'Africa',
+            'Asia': 'Asia',
+            'Europe': 'Europe',
+            'North America': 'North America',
+            'South America': 'South America',
+            'Oceania': 'Oceania',
+            'Antarctica': 'Antarctica',
+        },
+    }
+
     def __init__(self, map_generator: MapGenerator = None, config: dict = None):
         self.map_generator = map_generator or MapGenerator()
         self.config = config or {}
         # cache for reverse-geocode lookups: key -> country name
         self._rg_cache = {}
+        self._country_localize_cache = {}
+        self._country_gettext_cache = {}
+        self._country_online_cache = {}
+        self._country_translation_cache = {}
+        self._country_translation_cache_file = CACHE_ROOT / 'country_translation_cache.json'
+        self._load_country_translation_cache()
         # load persistent reverse-geocode cache
         try:
             CACHE_ROOT.mkdir(parents=True, exist_ok=True)
@@ -1724,6 +1785,90 @@ class StatisticsGenerator:
                 json.dump(self._rg_cache, f, indent=2, ensure_ascii=False)
         except Exception:
             pass
+
+    def _load_country_translation_cache(self):
+        try:
+            CACHE_ROOT.mkdir(parents=True, exist_ok=True)
+            if self._country_translation_cache_file.exists():
+                with open(self._country_translation_cache_file, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    if isinstance(data, dict):
+                        self._country_translation_cache = data
+        except Exception:
+            self._country_translation_cache = {}
+
+    def _save_country_translation_cache(self):
+        try:
+            CACHE_ROOT.mkdir(parents=True, exist_ok=True)
+            with open(self._country_translation_cache_file, 'w', encoding='utf-8') as f:
+                json.dump(self._country_translation_cache, f, indent=2, ensure_ascii=False)
+        except Exception:
+            pass
+
+    def _language_to_alpha3(self, language_code: str) -> str:
+        lc = _normalize_language_code(language_code or 'en')
+        if pycountry is not None:
+            try:
+                lang = pycountry.languages.get(alpha_2=lc)
+                if lang:
+                    a3 = getattr(lang, 'alpha_3', None)
+                    if a3:
+                        return str(a3).lower()
+            except Exception:
+                pass
+        return self._LANG_ALPHA3_FALLBACK.get(lc, lc)
+
+    def _load_online_country_translation_map(self, language_code: str) -> dict:
+        lc = _normalize_language_code(language_code or 'en')
+        if lc in self._country_online_cache:
+            return self._country_online_cache[lc]
+
+        cached = self._country_translation_cache.get(lc)
+        if isinstance(cached, dict) and cached:
+            self._country_online_cache[lc] = cached
+            return cached
+
+        try:
+            resp = requests.get(self._COUNTRY_TRANSLATIONS_URL, timeout=15)
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception:
+            self._country_online_cache[lc] = {}
+            return {}
+
+        alpha3 = self._language_to_alpha3(lc)
+        mapping = {}
+        for item in data if isinstance(data, list) else []:
+            try:
+                if not isinstance(item, dict):
+                    continue
+                cca2 = str(item.get('cca2') or '').upper().strip()
+                raw_name_obj = item.get('name')
+                name_obj = raw_name_obj if isinstance(raw_name_obj, dict) else {}
+                en_name = str(name_obj.get('common') or '').strip()
+                raw_translations = item.get('translations')
+                translations = raw_translations if isinstance(raw_translations, dict) else {}
+                trans_obj = translations.get(alpha3)
+                if not isinstance(trans_obj, dict):
+                    trans_obj = translations.get(lc)
+                localized = ''
+                if isinstance(trans_obj, dict):
+                    localized = str(trans_obj.get('common') or trans_obj.get('official') or '').strip()
+                if not localized and lc == 'en':
+                    localized = en_name
+                if localized:
+                    if en_name:
+                        mapping[en_name] = localized
+                    if cca2:
+                        mapping[cca2] = localized
+            except Exception:
+                continue
+
+        self._country_online_cache[lc] = mapping
+        if mapping:
+            self._country_translation_cache[lc] = mapping
+            self._save_country_translation_cache()
+        return mapping
 
     def _cache_key_from_latlon(self, lat, lon, precision: int = 3) -> str:
         try:
@@ -2099,6 +2244,136 @@ class StatisticsGenerator:
             'Slovenia': 'Europe', 'United Arab Emirates': 'Asia'
         }
         return fallback.get(country_name, '')
+
+    def _get_country_gettext_translator(self, language_code: str):
+        lc = _normalize_language_code(language_code or 'en')
+        if lc in self._country_gettext_cache:
+            return self._country_gettext_cache[lc]
+        tr = None
+        if pycountry is not None:
+            try:
+                import gettext
+                locales_dir = getattr(pycountry, 'LOCALES_DIR', None)
+                if locales_dir:
+                    tr = gettext.translation('iso3166-1', locales_dir, languages=[lc], fallback=True)
+            except Exception:
+                tr = None
+        self._country_gettext_cache[lc] = tr
+        return tr
+
+    def localize_country_name(self, country_name: str, language_code: Optional[str] = None) -> str:
+        """Return a localized display name for a normalized English country name."""
+        if not country_name:
+            return country_name
+        lc = _normalize_language_code(language_code or self.config.get('_language_code', 'en'))
+        key = (lc, str(country_name))
+        if key in self._country_localize_cache:
+            return self._country_localize_cache[key]
+
+        normalized = self._normalize_country(country_name) or str(country_name)
+        if lc == 'en':
+            self._country_localize_cache[key] = normalized
+            return normalized
+
+        localized = normalized
+
+        # 1) online country translation map (all countries from restcountries)
+        online_map = self._load_online_country_translation_map(lc)
+        if online_map:
+            try:
+                names_to_try = [normalized]
+                alpha2 = ''
+                if pycountry is not None:
+                    try:
+                        c = pycountry.countries.lookup(normalized)
+                        names_to_try = [
+                            getattr(c, 'name', None),
+                            getattr(c, 'official_name', None),
+                            getattr(c, 'common_name', None),
+                            normalized,
+                        ]
+                        alpha2 = str(getattr(c, 'alpha_2', '') or '').upper()
+                    except Exception:
+                        pass
+                for nm in names_to_try:
+                    if not nm:
+                        continue
+                    val = online_map.get(str(nm))
+                    if val:
+                        localized = str(val)
+                        break
+                if localized == normalized and alpha2:
+                    code_val = online_map.get(alpha2)
+                    if code_val:
+                        localized = str(code_val)
+            except Exception:
+                localized = normalized
+
+        if localized != normalized:
+            self._country_localize_cache[key] = localized
+            return localized
+
+        # 2) local gettext fallback
+        tr = self._get_country_gettext_translator(lc)
+        if tr is not None:
+            try:
+                names_to_try = [normalized]
+                if pycountry is not None:
+                    try:
+                        c = pycountry.countries.lookup(normalized)
+                        names_to_try = [
+                            getattr(c, 'name', None),
+                            getattr(c, 'official_name', None),
+                            getattr(c, 'common_name', None),
+                            normalized,
+                        ]
+                    except Exception:
+                        pass
+                for nm in names_to_try:
+                    if not nm:
+                        continue
+                    translated = tr.gettext(str(nm))
+                    if translated and translated != nm:
+                        localized = translated
+                        break
+            except Exception:
+                localized = normalized
+
+        if localized == normalized and lc == 'de':
+            localized = self._COUNTRY_NAME_FALLBACK_DE.get(normalized, normalized)
+
+        self._country_localize_cache[key] = localized
+        return localized
+
+    def localize_country_counts(self, country_counts: dict, language_code: Optional[str] = None) -> dict:
+        """Localize country dictionary keys while preserving summed counts."""
+        result = {}
+        for country, count in (country_counts or {}).items():
+            display_name = self.localize_country_name(country, language_code=language_code)
+            result[display_name] = result.get(display_name, 0) + int(count or 0)
+        return result
+
+    def localize_continent_name(self, continent_name: str, language_code: Optional[str] = None) -> str:
+        """Return a localized display name for a continent name."""
+        if not continent_name:
+            return continent_name
+        lc = _normalize_language_code(language_code or self.config.get('_language_code', 'en'))
+        key = (f"continent:{lc}", str(continent_name))
+        if key in self._country_localize_cache:
+            return self._country_localize_cache[key]
+
+        fallback_for_lang = self._CONTINENT_NAME_FALLBACK.get(lc, {})
+        localized = fallback_for_lang.get(continent_name, continent_name)
+        self._country_localize_cache[key] = localized
+        return localized
+
+    def localize_continent_counts(self, continent_counts: dict, language_code: Optional[str] = None) -> dict:
+        """Localize continent dictionary keys while preserving summed counts."""
+        result = {}
+        for continent, count in (continent_counts or {}).items():
+            display_name = self.localize_continent_name(continent, language_code=language_code)
+            result[display_name] = result.get(display_name, 0) + int(count or 0)
+        return result
 
     def _parse_date(self, v):
         if v is None:
@@ -3921,21 +4196,16 @@ def prompt_loop(trips: list, cache_manager: CacheManager, script_dir: Path, conf
                 print(f"Fotos: {agg.get('total_photos',0)}, Videos: {agg.get('total_videos',0)}")
                 print(f"Länder bereist: {agg.get('visited_countries_count',0)} ({agg.get('visited_countries_percent',0.0)}% der Länder der Welt)")
                 print("Länder (Tage):")
-                for c, cnt in sorted(agg.get('countries',{}).items(), key=lambda x: -x[1]):
+                display_countries = sg.localize_country_counts(agg.get('countries', {}), language_code=lang.language_code)
+                for c, cnt in sorted(display_countries.items(), key=lambda x: -x[1]):
                     pct = (cnt / max(1, agg.get('total_travel_days',1))) * 100 if agg.get('total_travel_days') else 0
                     print(f"  {c}: {cnt} Tage ({pct:.1f}%)")
                 # Continents summary
                 print("")
                 print(f"Kontinente bereist: {agg.get('visited_continents_count',0)} ({agg.get('visited_continents_percent',0.0)}% aller Kontinente)")
                 print("Kontinente (Tage):")
-                for c, cnt in sorted(agg.get('continents',{}).items(), key=lambda x: -x[1]):
-                    pct = (cnt / max(1, agg.get('total_travel_days',1))) * 100 if agg.get('total_travel_days') else 0
-                    print(f"  {c}: {cnt} Tage ({pct:.1f}%)")
-                # Continents summary
-                print("")
-                print(f"Kontinente bereist: {agg.get('visited_continents_count',0)} ({agg.get('visited_continents_percent',0.0)}% aller Kontinente)")
-                print("Kontinente (Tage):")
-                for c, cnt in sorted(agg.get('continents',{}).items(), key=lambda x: -x[1]):
+                display_continents = sg.localize_continent_counts(agg.get('continents', {}), language_code=lang.language_code)
+                for c, cnt in sorted(display_continents.items(), key=lambda x: -x[1]):
                     pct = (cnt / max(1, agg.get('total_travel_days',1))) * 100 if agg.get('total_travel_days') else 0
                     print(f"  {c}: {cnt} Tage ({pct:.1f}%)")
                 # if verbose was requested, print per-trip breakdown
@@ -3947,7 +4217,8 @@ def prompt_loop(trips: list, cache_manager: CacheManager, script_dir: Path, conf
                         td = pt.get('travel_days', 0)
                         km = pt.get('total_km', 0)
                         countries = pt.get('country_days', {})
-                        country_list = ', '.join([f"{c}({d})" for c, d in sorted(countries.items(), key=lambda x: -x[1])])
+                        display_countries = sg.localize_country_counts(countries, language_code=lang.language_code)
+                        country_list = ', '.join([f"{c}({d})" for c, d in sorted(display_countries.items(), key=lambda x: -x[1])])
                         print(f" [{i}] {name} — Steps: {steps}, Reisetage (im Zeitraum): {td}, km: {km}")
                         if country_list:
                             print(f"      Länder: {country_list}")
@@ -4559,7 +4830,8 @@ def main():
                 td = pt.get('travel_days', 0)
                 km = pt.get('total_km', 0)
                 countries = pt.get('country_days', {})
-                country_list = ', '.join([f"{c}({d})" for c, d in sorted(countries.items(), key=lambda x: -x[1])])
+                display_countries = sg.localize_country_counts(countries, language_code=lang.language_code)
+                country_list = ', '.join([f"{c}({d})" for c, d in sorted(display_countries.items(), key=lambda x: -x[1])])
                 print(f" [{i}] {name} — Steps: {steps}, Reisetage (im Zeitraum): {td}, km: {km}")
                 if country_list:
                     print(f"      Länder: {country_list}")
@@ -4584,7 +4856,15 @@ def main():
         print(f"Fotos: {agg.get('total_photos',0)}, Videos: {agg.get('total_videos',0)}")
         print(f"Länder bereist: {agg.get('visited_countries_count',0)} ({agg.get('visited_countries_percent',0.0)}% der Länder der Welt)")
         print("Länder (Tage):")
-        for c, cnt in sorted(agg.get('countries',{}).items(), key=lambda x: -x[1]):
+        display_countries = sg.localize_country_counts(agg.get('countries', {}), language_code=lang.language_code)
+        for c, cnt in sorted(display_countries.items(), key=lambda x: -x[1]):
+            pct = (cnt / max(1, agg.get('total_travel_days',1))) * 100 if agg.get('total_travel_days') else 0
+            print(f"  {c}: {cnt} Tage ({pct:.1f}%)")
+        print("")
+        print(f"Kontinente bereist: {agg.get('visited_continents_count',0)} ({agg.get('visited_continents_percent',0.0)}% aller Kontinente)")
+        print("Kontinente (Tage):")
+        display_continents = sg.localize_continent_counts(agg.get('continents', {}), language_code=lang.language_code)
+        for c, cnt in sorted(display_continents.items(), key=lambda x: -x[1]):
             pct = (cnt / max(1, agg.get('total_travel_days',1))) * 100 if agg.get('total_travel_days') else 0
             print(f"  {c}: {cnt} Tage ({pct:.1f}%)")
 

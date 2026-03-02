@@ -2042,16 +2042,35 @@ class App(tk.Tk):
             mg = m.MapGenerator()
             sg = m.StatisticsGenerator(map_generator=mg)
             agg = sg.compute_aggregate_stats(trips)
+
+            # Localize country names for display according to configured GUI language
+            language_code = 'en'
+            try:
+                config_file = SCRIPT_DIR / 'config.toml'
+                if config_file.exists():
+                    content = config_file.read_text(encoding='utf-8')
+                    if hasattr(m, '_tomllib') and m._tomllib:
+                        cfg = m._tomllib.loads(content)
+                    else:
+                        cfg = m._parse_simple_toml(content)
+                    language_code = str(cfg.get('language', 'en') or 'en').strip() or 'en'
+            except Exception:
+                language_code = 'en'
+
+            display_agg = dict(agg or {})
+            display_agg['countries'] = sg.localize_country_counts(agg.get('countries', {}), language_code=language_code)
+            display_agg['continents'] = sg.localize_continent_counts(agg.get('continents', {}), language_code=language_code)
+
             map_bytes = b''
             try:
                 map_bytes = sg.generate_overview_map(trips)
             except Exception:
                 map_bytes = b''
             charts = {}
-            if HAVE_MATPLOTLIB and agg.get('countries'):
+            if HAVE_MATPLOTLIB and display_agg.get('countries'):
                 try:
-                    labels = list(agg['countries'].keys())
-                    sizes = list(agg['countries'].values())
+                    labels = list(display_agg['countries'].keys())
+                    sizes = list(display_agg['countries'].values())
                     fig1, ax1 = plt.subplots(figsize=(4,3))
                     ax1.pie(sizes, labels=labels, autopct='%1.1f%%', startangle=90)
                     ax1.axis('equal')
@@ -2062,7 +2081,7 @@ class App(tk.Tk):
                 except Exception:
                     charts = {}
             # send result to main thread queue
-            self.log_queue.put(('stats_ready', {'agg': agg, 'map': map_bytes, 'charts': charts}))
+            self.log_queue.put(('stats_ready', {'agg': display_agg, 'map': map_bytes, 'charts': charts}))
         except Exception as e:
             self.log_queue.put(('stats_error', str(e)))
         finally:
