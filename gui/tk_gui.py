@@ -651,6 +651,32 @@ class App(tk.Tk):
         frm_bottom.pack(fill=tk.X, padx=10, pady=(6, 8))
         self.stats_btn = ttk.Button(frm_bottom, text="Statistics", command=self._on_show_statistics)
         self.stats_btn.pack(side=tk.RIGHT, padx=(6, 0))
+        # add tooltip explaining button action
+        try:
+            # determine language for tooltip (read config if possible)
+            tt_text = "Show statistics for selected or filtered trips"
+            try:
+                cfg = {}
+                config_file = SCRIPT_DIR / 'config.toml'
+                if config_file.exists():
+                    content = config_file.read_text(encoding='utf-8')
+                    if hasattr(m, '_tomllib') and m._tomllib:
+                        cfg = m._tomllib.loads(content)
+                    else:
+                        cfg = m._parse_simple_toml(content)
+                lang_code = str(cfg.get('language', 'en') or 'en').strip() or 'en'
+                try:
+                    lang_mgr = m.load_language_manager(lang_code, SCRIPT_DIR)
+                    tt_text = lang_mgr.t('gui.stats_button_tooltip', default=tt_text)
+                except Exception:
+                    pass
+            except Exception:
+                pass
+            self._stats_tooltip = _Tooltip(self.stats_btn, tt_text)
+            self.stats_btn.bind('<Enter>', lambda e: self._stats_tooltip.show(e.x_root + 10, e.y_root + 10))
+            self.stats_btn.bind('<Leave>', lambda e: self._stats_tooltip.hide())
+        except Exception:
+            self._stats_tooltip = None
         self.render_btn = ttk.Button(frm_bottom, text="Render Selected", command=self._on_render)
         self.render_btn.pack(side=tk.RIGHT)
         self.stop_btn = ttk.Button(frm_bottom, text="Stop", command=self._on_stop, state=tk.DISABLED)
@@ -2014,15 +2040,72 @@ class App(tk.Tk):
         self.stop_flag.set()
         self.status_text.set("Stopping...")
 
+    def _get_filtered_trips(self):
+        """Return list of trips filtered by the current date/year and render settings.
+
+        This is used by statistics so the dialog reflects the current time selection
+        even if the tree has not been refreshed with the Apply button.
+        """
+        trips = getattr(self, '_trips', []) or []
+        cm = m.CacheManager(SCRIPT_DIR / 'cache' / 'rendered_trips_cache.json')
+
+        show_all = bool(self.filter_show_all.get())
+        mode = self.filter_date_mode.get() if hasattr(self, 'filter_date_mode') else 'year'
+        year = None
+        start_date = None
+        end_date = None
+
+        if mode == 'year':
+            year_text = self.filter_year.get().strip()
+            if year_text:
+                try:
+                    year = int(year_text)
+                except ValueError:
+                    # invalid year ignored here
+                    year = None
+        elif mode == 'date':
+            try:
+                if HAVE_TKCALENDAR and hasattr(self, 'start_cal'):
+                    sd = self.start_cal.get_date()
+                    if sd:
+                        start_date = datetime(sd.year, sd.month, sd.day)
+                else:
+                    if self.filter_start_date.get().strip():
+                        sd = datetime.strptime(self.filter_start_date.get().strip(), "%d.%m.%Y")
+                        start_date = sd
+
+                if HAVE_TKCALENDAR and hasattr(self, 'end_cal'):
+                    ed = self.end_cal.get_date()
+                    if ed:
+                        end_date = datetime(ed.year, ed.month, ed.day)
+                else:
+                    if self.filter_end_date.get().strip():
+                        ed = datetime.strptime(self.filter_end_date.get().strip(), "%d.%m.%Y")
+                        end_date = ed
+            except Exception as e:
+                # propagate invalid date so caller can notify user
+                raise ValueError("Invalid date") from e
+        # otherwise leave year,start_date,end_date None for no filter
+
+        filtered = m.filter_trips_by_date(trips, year=year, start_date=start_date, end_date=end_date)
+        if not show_all:
+            filtered = [t for t in filtered if not cm.is_rendered(t)]
+        return filtered
+
     def _on_show_statistics(self):
         """Launch background job to compute statistics for selected or filtered trips."""
         sel = self.trips_tree.selection()
-        source = getattr(self, '_filtered_trips', None) or getattr(self, '_trips', [])
         try:
             if sel:
+                # explicit selection takes precedence; ignore time filter
+                source = getattr(self, '_filtered_trips', None) or getattr(self, '_trips', [])
                 trips = [source[int(iid)] for iid in sel]
             else:
-                trips = list(source)
+                # no selection: use trips matching current time filter
+                trips = self._get_filtered_trips()
+        except ValueError:
+            messagebox.showerror("Invalid date", "Dates must be dd.mm.yyyy or selected from the calendar.")
+            return
         except Exception:
             messagebox.showerror("Selection error", "Could not map selection to trips.")
             return
@@ -2088,8 +2171,13 @@ class App(tk.Tk):
                     charts['country_pie'] = buf.getvalue()
                 except Exception:
                     charts = {}
-            # send result to main thread queue
-            self.log_queue.put(('stats_ready', {'agg': display_agg, 'map': map_bytes, 'charts': charts}))
+            # send result to main thread queue; include language for later localization
+            self.log_queue.put(('stats_ready', {
+                'agg': display_agg,
+                'map': map_bytes,
+                'charts': charts,
+                'language_code': language_code
+            }))
         except Exception as e:
             self.log_queue.put(('stats_error', str(e)))
         finally:
@@ -2294,8 +2382,9 @@ class App(tk.Tk):
                         agg = payload.get('agg')
                         map_bytes = payload.get('map')
                         charts = payload.get('charts', {}) or {}
+                        lang_code = payload.get('language_code', 'en') or 'en'
                         try:
-                            StatsDialog(self, agg, map_bytes, charts)
+                            StatsDialog(self, agg, map_bytes, charts, lang_code)
                         except Exception as e:
                             messagebox.showinfo('Statistics', f"Stats ready:\n{agg}")
                     except Exception as e:
@@ -2502,9 +2591,15 @@ class App(tk.Tk):
 
 
 class StatsDialog(tk.Toplevel):
-    def __init__(self, parent, agg: dict, map_bytes: bytes = None, charts: dict = None):
+    def __init__(self, parent, agg: dict, map_bytes: bytes = None, charts: dict = None, language_code: str = 'en'):
         super().__init__(parent)
-        self.title("Statistics")
+        # load language manager for translations
+        try:
+            self.lang = m.load_language_manager(language_code, SCRIPT_DIR)
+        except Exception:
+            self.lang = m.load_language_manager('en', SCRIPT_DIR)
+
+        self.title(self.lang.t("gui.statistics"))
         self.transient(parent)
         self.grab_set()
         self.geometry('900x600')
@@ -2521,9 +2616,9 @@ class StatsDialog(tk.Toplevel):
         txt.pack(fill=tk.X)
         summary_lines = []
         try:
-            summary_lines.append(f"Trips: {agg.get('trip_count', 0)}")
-            summary_lines.append(f"Steps (gesamt): {agg.get('total_steps', 0)}")
-            summary_lines.append(f"Reisetage (gesamt): {agg.get('total_travel_days', 0)}")
+            summary_lines.append(self.lang.t("gui.stats_trips", count=agg.get('trip_count', 0)))
+            summary_lines.append(self.lang.t("gui.stats_total_steps", count=agg.get('total_steps', 0)))
+            summary_lines.append(self.lang.t("gui.stats_travel_days", count=agg.get('total_travel_days', 0)))
             # compute period if available and show travel / non-travel ratio
             try:
                 ps = agg.get('period_start')
@@ -2536,21 +2631,40 @@ class StatsDialog(tk.Toplevel):
                     travel_days = agg.get('total_travel_days', 0)
                     non_travel = max(0, period_days - travel_days)
                     pct = (travel_days / period_days * 100) if period_days else 0
-                    summary_lines.append(f"Reise/Non-Reise (Zeitraum {ps} bis {pe}): {travel_days} / {non_travel} Tage ({pct:.1f}% Reise)")
+                    summary_lines.append(self.lang.t(
+                        "gui.stats_period_ratio",
+                        start=ps,
+                        end=pe,
+                        travel=travel_days,
+                        non_travel=non_travel,
+                        pct=pct,
+                    ))
             except Exception:
                 pass
-            summary_lines.append(f"Gereiste km: {agg.get('total_km', 0)}")
-            summary_lines.append(f"Fotos: {agg.get('total_photos', 0)}, Videos: {agg.get('total_videos', 0)}")
-            summary_lines.append(f"Länder bereist: {agg.get('visited_countries_count', 0)} ({agg.get('visited_countries_percent', 0.0)}% der Länder der Welt)")
+            summary_lines.append(self.lang.t("gui.stats_total_km", km=agg.get('total_km', 0)))
+            summary_lines.append(self.lang.t(
+                "gui.stats_photos_videos",
+                photos=agg.get('total_photos', 0),
+                videos=agg.get('total_videos', 0),
+            ))
+            summary_lines.append(self.lang.t(
+                "gui.stats_countries",
+                count=agg.get('visited_countries_count', 0),
+                percent=agg.get('visited_countries_percent', 0.0),
+            ))
             summary_lines.append('')
-            summary_lines.append('Länder (Tage):')
+            summary_lines.append(self.lang.t("gui.stats_countries_days"))
             for c, cnt in sorted(agg.get('countries', {}).items(), key=lambda x: -x[1]):
                 pct = (cnt / max(1, agg.get('total_travel_days', 1))) * 100 if agg.get('total_travel_days') else 0
                 summary_lines.append(f"  {c}: {cnt} Tage ({pct:.1f}%)")
             # Continents
             summary_lines.append('')
-            summary_lines.append(f"Kontinente bereist: {agg.get('visited_continents_count', 0)} ({agg.get('visited_continents_percent', 0.0)}% aller Kontinente)")
-            summary_lines.append('Kontinente (Tage):')
+            summary_lines.append(self.lang.t(
+                "gui.stats_continents",
+                count=agg.get('visited_continents_count', 0),
+                percent=agg.get('visited_continents_percent', 0.0),
+            ))
+            summary_lines.append(self.lang.t("gui.stats_continents_days"))
             for c, cnt in sorted(agg.get('continents', {}).items(), key=lambda x: -x[1]):
                 pct = (cnt / max(1, agg.get('total_travel_days', 1))) * 100 if agg.get('total_travel_days') else 0
                 summary_lines.append(f"  {c}: {cnt} Tage ({pct:.1f}%)")
@@ -2605,9 +2719,9 @@ class StatsDialog(tk.Toplevel):
                     messagebox.showinfo('Export', f'Map saved to {path}')
                 except Exception as e:
                     messagebox.showerror('Export', f'Failed to save map: {e}')
-        ttk.Button(btn_frm, text='Export JSON', command=_export_json).pack(fill=tk.X, pady=(0,6))
-        ttk.Button(btn_frm, text='Save Map', command=_save_map).pack(fill=tk.X, pady=(0,6))
-        ttk.Button(btn_frm, text='Close', command=self.destroy).pack(fill=tk.X)
+        ttk.Button(btn_frm, text=self.lang.t('gui.stats_export_json'), command=_export_json).pack(fill=tk.X, pady=(0,6))
+        ttk.Button(btn_frm, text=self.lang.t('gui.stats_save_map'), command=_save_map).pack(fill=tk.X, pady=(0,6))
+        ttk.Button(btn_frm, text=self.lang.t('gui.stats_close'), command=self.destroy).pack(fill=tk.X)
 
 
 def main():
