@@ -1183,49 +1183,62 @@ class MapGenerator:
         # Add step markers (use photo thumbnails when possible)
         draw_markers_on_top = bool(self.label_overlay_url and center is not None)
         markers_to_draw: List[dict] = []
+        marker_entries: List[dict] = []
         for i, step in enumerate(trip_parser.steps):
-            step_data = step["data"]
             coord = coords_cache[i] if i < len(coords_cache) else self._extract_lon_lat(step)
-            if coord:
-                lon, lat = coord
-                # create thumbnail (white ring); prefer IconMarker when available
-                # marker_px is absolute pixels (configured by marker_thumb_size) scaled by render pixel scale
-                thumb = self._get_step_thumbnail(step, size=marker_px, ring_color=(255,255,255,230))
-                if thumb and (IconMarker is not None or draw_markers_on_top):
-                    if draw_markers_on_top:
-                        markers_to_draw.append({
-                            "lon": lon,
-                            "lat": lat,
-                            "thumb": thumb,
-                            "marker_px": marker_px,
-                            "marker_radius": max(4, int(round(marker_px * 0.3))),
-                            "color": MARKER_COLOR_START if i == 0 else MARKER_COLOR_STEP,
-                        })
-                        continue
-                    else:
-                        off_x = int(marker_px / 2)
-                        off_y = int(marker_px / 2)
-                        try:
-                            m.add_marker(IconMarker((lon, lat), str(thumb), off_x, off_y))
-                            continue
-                        except Exception:
-                            pass
+            if not coord:
+                continue
+            lon, lat = coord
+            thumb = self._get_step_thumbnail(step, size=marker_px, ring_color=(255,255,255,230))
+            marker_entries.append({
+                "i": i,
+                "lon": lon,
+                "lat": lat,
+                "thumb": thumb,
+            })
 
-                # fallback to circle marker (no red in overview map)
-                color = MARKER_COLOR_START if i == 0 else MARKER_COLOR_STEP
-                # Use an absolute radius proportional to thumbnail size
-                marker_radius = max(4, int(round(marker_px * 0.3)))
+        # Markers without photos first => always in background.
+        ordered_marker_entries = sorted(marker_entries, key=lambda e: 0 if not e.get("thumb") else 1)
+        for entry in ordered_marker_entries:
+            i = entry["i"]
+            lon = entry["lon"]
+            lat = entry["lat"]
+            thumb = entry.get("thumb")
+
+            if thumb and (IconMarker is not None or draw_markers_on_top):
                 if draw_markers_on_top:
                     markers_to_draw.append({
                         "lon": lon,
                         "lat": lat,
-                        "thumb": None,
+                        "thumb": thumb,
                         "marker_px": marker_px,
-                        "marker_radius": marker_radius,
-                        "color": color,
+                        "marker_radius": max(4, int(round(marker_px * 0.3))),
+                        "color": MARKER_COLOR_START if i == 0 else MARKER_COLOR_STEP,
                     })
+                    continue
                 else:
-                    m.add_marker(CircleMarker((lon, lat), color, marker_radius))
+                    off_x = int(marker_px / 2)
+                    off_y = int(marker_px / 2)
+                    try:
+                        m.add_marker(IconMarker((lon, lat), str(thumb), off_x, off_y))
+                        continue
+                    except Exception:
+                        pass
+
+            # fallback to circle marker (no red in overview map)
+            color = MARKER_COLOR_START if i == 0 else MARKER_COLOR_STEP
+            marker_radius = max(4, int(round(marker_px * 0.3)))
+            if draw_markers_on_top:
+                markers_to_draw.append({
+                    "lon": lon,
+                    "lat": lat,
+                    "thumb": None,
+                    "marker_px": marker_px,
+                    "marker_radius": marker_radius,
+                    "color": color,
+                })
+            else:
+                m.add_marker(CircleMarker((lon, lat), color, marker_radius))
 
         # Render map
         if center is not None:
@@ -1529,13 +1542,13 @@ class MapGenerator:
         draw_markers_on_top = bool(self.label_overlay_url)
         markers_to_draw: List[dict] = []
         
+        marker_entries: List[dict] = []
         for i in draw_order:
             st = trip_parser.steps[i]
             coord = coords_cache[i] if i < len(coords_cache) else self._extract_lon_lat(st)
             if not coord:
                 continue
             lon, lat = coord
-
             is_current = (i == step_index)
             try:
                 has_photo = self._step_has_photo(st)
@@ -1543,6 +1556,34 @@ class MapGenerator:
                 has_photo = True
             ring_color = (255, 80, 80, 220) if is_current else (255, 255, 255, 230)
             thumb = self._get_step_thumbnail(st, size=marker_px, ring_color=ring_color)
+            marker_entries.append({
+                "i": i,
+                "st": st,
+                "lon": lon,
+                "lat": lat,
+                "is_current": is_current,
+                "has_photo": has_photo,
+                "thumb": thumb,
+            })
+
+        # Ensure bubbles without photos are always behind photo markers.
+        # Keep current photo-marker last among photo markers.
+        ordered_marker_entries = sorted(
+            marker_entries,
+            key=lambda e: (
+                0 if not e.get("has_photo") else 1,
+                1 if (e.get("has_photo") and e.get("is_current")) else 0,
+            ),
+        )
+
+        for entry in ordered_marker_entries:
+            i = entry["i"]
+            st = entry["st"]
+            lon = entry["lon"]
+            lat = entry["lat"]
+            is_current = bool(entry.get("is_current"))
+            has_photo = bool(entry.get("has_photo"))
+            thumb = entry.get("thumb")
 
             # Add a red halo under the current step marker only when a photo exists
             if is_current and has_photo:
@@ -4146,7 +4187,8 @@ def prompt_loop(trips: list, cache_manager: CacheManager, script_dir: Path, conf
                
 
                 # compute with progress reporting
-                sg = StatisticsGenerator(map_generator=MapGenerator())
+                stats_map_gen = create_map_generator_from_config(config=config, lang=lang, purpose="stats")
+                sg = StatisticsGenerator(map_generator=stats_map_gen, config=config)
                 def _progress(idx, total, trip):
                     # Progress reporting disabled for CLI stats (quiet mode)
                     return
@@ -4502,6 +4544,86 @@ def _parse_aspect_ratio(value, fallback: float = MAP_ASPECT_RATIO) -> float:
         return float(fallback)
 
 
+def create_map_generator_from_config(config: dict = None, lang: LanguageManager = None, purpose: str = "render") -> MapGenerator:
+    """Create and configure a MapGenerator from app config.
+
+    purpose:
+      - "render": default PDF rendering behavior
+      - "stats": statistics overview map defaults (higher resolution, tighter fit, smaller bubbles)
+    """
+    cfg = config or {}
+    mode = str(purpose or "render").strip().lower()
+
+    map_style = str(cfg.get("map_style", "hybrid")).lower().strip()
+    if map_style in ("street", "streets"):
+        map_style = "road"
+    if map_style in ("sat",):
+        map_style = "satellite"
+
+    label_overlay_url = None
+    label_overlay_opacity = float(cfg.get("hybrid_labels_opacity", 0.7))
+    if map_style == "road":
+        map_url = ESRI_ROAD_URL
+    elif map_style == "satellite":
+        map_url = ESRI_SATELLITE_URL
+    else:
+        map_url = ESRI_SATELLITE_URL
+        label_overlay_url = ESRI_LABELS_URL
+
+    base_marker_thumb_size = int(cfg.get("marker_thumb_size", 40))
+    marker_thumb_size = base_marker_thumb_size
+    if mode == "stats":
+        marker_scale = float(cfg.get("stats_map_marker_scale", 0.55))
+        marker_thumb_size = max(10, int(round(base_marker_thumb_size * marker_scale)))
+        marker_thumb_size = int(cfg.get("stats_map_marker_thumb_size", marker_thumb_size))
+
+    map_gen = MapGenerator(
+        marker_thumb_size=marker_thumb_size,
+        url_template=map_url,
+        label_overlay_url=label_overlay_url,
+        label_overlay_opacity=label_overlay_opacity,
+    )
+    map_gen.lang = lang or get_default_language_manager()
+
+    maps_config = cfg.get("maps", {})
+    overview_config = maps_config.get("overview", {})
+    step_config = maps_config.get("step", {})
+
+    default_vertical_px_fallback = 900 if mode == "stats" else 450
+    default_vertical_px = int(maps_config.get("vertical_resolution_px", default_vertical_px_fallback))
+    overview_vertical_default = max(default_vertical_px, 900) if mode == "stats" else default_vertical_px
+    overview_vertical_px = int(overview_config.get("vertical_resolution_px", overview_vertical_default))
+    step_vertical_px = int(step_config.get("vertical_resolution_px", default_vertical_px))
+
+    default_ratio = _parse_aspect_ratio(maps_config.get("aspect_ratio"), MAP_ASPECT_RATIO)
+    overview_ratio = _parse_aspect_ratio(overview_config.get("aspect_ratio", default_ratio), default_ratio)
+    step_ratio = _parse_aspect_ratio(step_config.get("aspect_ratio", default_ratio), default_ratio)
+
+    map_gen.height = default_vertical_px
+    map_gen.width = int(round(default_vertical_px * default_ratio))
+    map_gen.overview_height = overview_vertical_px
+    map_gen.overview_width = int(round(overview_vertical_px * overview_ratio))
+    map_gen.step_height = step_vertical_px
+    map_gen.step_width = int(round(step_vertical_px * step_ratio))
+    map_gen.overview_aspect_ratio = overview_ratio
+    map_gen.step_aspect_ratio = step_ratio
+    map_gen._pixel_scale = float(default_vertical_px) / 450.0
+
+    overview_padding_default = 0.03 if mode == "stats" else 0.10
+    map_gen.overview_padding_factor = float(overview_config.get("padding_factor", overview_padding_default))
+    map_gen.overview_min_width_km = float(overview_config.get("min_width_km", 10.0))
+    map_gen.overview_algorithm = str(overview_config.get("algorithm", "bbox")).lower()
+
+    map_gen.step_padding_factor = float(step_config.get("padding_factor", map_gen.step_padding_factor))
+    map_gen.step_min_width_km = float(step_config.get("min_width_km", map_gen.step_min_width_km))
+    map_gen.step_max_distance_farthest_km = float(step_config.get("max_distance_farthest_steps_km", map_gen.step_max_distance_farthest_km))
+    map_gen.step_cluster_distance_km = float(step_config.get("cluster_distance_km", map_gen.step_cluster_distance_km))
+    map_gen.step_render_scale = float(step_config.get("render_scale", map_gen.step_render_scale))
+
+    map_gen.debug_map = bool(cfg.get("debug_map", False))
+    return map_gen
+
+
 def render_trip(trip_path: Path, script_dir: Path, config: dict, cache_manager: CacheManager, check_stop=None, lang: LanguageManager = None, progress_callback=None) -> bool:
     """Render a single trip to PDF. Returns True if successful, False if error or stopped."""
     lang = lang or get_default_language_manager()
@@ -4539,67 +4661,8 @@ def render_trip(trip_path: Path, script_dir: Path, config: dict, cache_manager: 
         if map_style in ("sat",):
             map_style = "satellite"
 
-        label_overlay_url = None
-        label_overlay_opacity = float(config.get("hybrid_labels_opacity", 0.7))
         print(lang.t("render.map_style", style=map_style))
-        if map_style == "road":
-            map_url = ESRI_ROAD_URL
-        elif map_style == "satellite":
-            map_url = ESRI_SATELLITE_URL
-        else:
-            # Hybrid: satellite base with label overlay
-            map_url = ESRI_SATELLITE_URL
-            label_overlay_url = ESRI_LABELS_URL
-
-        map_gen = MapGenerator(
-            marker_thumb_size=int(config.get("marker_thumb_size", 40)),
-            url_template=map_url,
-            label_overlay_url=label_overlay_url,
-            label_overlay_opacity=label_overlay_opacity
-        )
-        map_gen.lang = lang
-        
-        # ========== NEW BOUNDING-BOX CONFIG (2026) ==========
-        # Load settings from [maps] section if present
-        maps_config = config.get("maps", {})
-        overview_config = maps_config.get("overview", {})
-        step_config = maps_config.get("step", {})
-        
-        # Vertical resolution controls pixel output and marker sizing. Geographic
-        # coverage is computed from vertical resolution using the configured aspect ratio.
-        default_vertical_px = int(maps_config.get("vertical_resolution_px", 450))
-        overview_vertical_px = int(overview_config.get("vertical_resolution_px", default_vertical_px))
-        step_vertical_px = int(step_config.get("vertical_resolution_px", default_vertical_px))
-
-        default_ratio = _parse_aspect_ratio(maps_config.get("aspect_ratio"), MAP_ASPECT_RATIO)
-        overview_ratio = _parse_aspect_ratio(overview_config.get("aspect_ratio", default_ratio), default_ratio)
-        step_ratio = _parse_aspect_ratio(step_config.get("aspect_ratio", default_ratio), default_ratio)
-
-        map_gen.height = default_vertical_px
-        map_gen.width = int(round(default_vertical_px * default_ratio))
-        map_gen.overview_height = overview_vertical_px
-        map_gen.overview_width = int(round(overview_vertical_px * overview_ratio))
-        map_gen.step_height = step_vertical_px
-        map_gen.step_width = int(round(step_vertical_px * step_ratio))
-        map_gen.overview_aspect_ratio = overview_ratio
-        map_gen.step_aspect_ratio = step_ratio
-        # Internal pixel scale relative to legacy 450px height (used for markers)
-        map_gen._pixel_scale = float(default_vertical_px) / 450.0
-        
-        # Overview map settings
-        map_gen.overview_padding_factor = float(overview_config.get("padding_factor", 0.10))
-        map_gen.overview_min_width_km = float(overview_config.get("min_width_km", 10.0))
-        # Optional: choose algorithm 'bbox' or 'radius'
-        map_gen.overview_algorithm = str(overview_config.get("algorithm", map_gen.overview_algorithm)).lower()
-        # Step-specific config
-        map_gen.step_padding_factor = float(step_config.get("padding_factor", map_gen.step_padding_factor))
-        map_gen.step_min_width_km = float(step_config.get("min_width_km", map_gen.step_min_width_km))
-        map_gen.step_max_distance_farthest_km = float(step_config.get("max_distance_farthest_steps_km", map_gen.step_max_distance_farthest_km))
-        map_gen.step_cluster_distance_km = float(step_config.get("cluster_distance_km", map_gen.step_cluster_distance_km))
-        map_gen.step_render_scale = float(step_config.get("render_scale", map_gen.step_render_scale))
-        
-        # Debug flag
-        map_gen.debug_map = bool(config.get("debug_map", False))
+        map_gen = create_map_generator_from_config(config=config, lang=lang, purpose="render")
         
         # No legacy config loading - the new [maps] section is authoritative for map sizing and padding.
 
@@ -4759,7 +4822,8 @@ def main():
 
     # Handle statistics from CLI
     if args.stats:
-        sg = StatisticsGenerator(map_generator=MapGenerator())
+        stats_map_gen = create_map_generator_from_config(config=config, lang=lang, purpose="stats")
+        sg = StatisticsGenerator(map_generator=stats_map_gen, config=config)
         # parse date filters
         start_date = None
         end_date = None

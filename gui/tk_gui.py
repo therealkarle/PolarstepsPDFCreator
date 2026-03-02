@@ -2039,11 +2039,7 @@ class App(tk.Tk):
 
     def _stats_worker(self, trips):
         try:
-            mg = m.MapGenerator()
-            sg = m.StatisticsGenerator(map_generator=mg)
-            agg = sg.compute_aggregate_stats(trips)
-
-            # Localize country names for display according to configured GUI language
+            cfg = {}
             language_code = 'en'
             try:
                 config_file = SCRIPT_DIR / 'config.toml'
@@ -2055,7 +2051,19 @@ class App(tk.Tk):
                         cfg = m._parse_simple_toml(content)
                     language_code = str(cfg.get('language', 'en') or 'en').strip() or 'en'
             except Exception:
+                cfg = {}
                 language_code = 'en'
+
+            try:
+                if hasattr(m, 'create_map_generator_from_config'):
+                    mg = m.create_map_generator_from_config(config=cfg, purpose='stats')
+                else:
+                    mg = m.MapGenerator()
+            except Exception:
+                mg = m.MapGenerator()
+
+            sg = m.StatisticsGenerator(map_generator=mg, config=cfg)
+            agg = sg.compute_aggregate_stats(trips)
 
             display_agg = dict(agg or {})
             display_agg['countries'] = sg.localize_country_counts(agg.get('countries', {}), language_code=language_code)
