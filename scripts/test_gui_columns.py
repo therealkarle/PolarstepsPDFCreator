@@ -40,6 +40,12 @@ def main():
     try:
         import tkinter as tk
         from gui.tk_gui import App
+        # prevent Playwright missing warning during automated tests
+        import polarsteps_pdf_generator as m
+        try:
+            m.sync_playwright = object()
+        except Exception:
+            pass
         app = App()
         app.withdraw()
         app.bsp_path.set(str(Path('BSPData')))
