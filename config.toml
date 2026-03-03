@@ -12,6 +12,11 @@ pdf_language = "de"
 show_rendered_trips = true
 # Open the generated PDF automatically after rendering
 open_pdf_after_render = true
+# Automatically check GitHub for updates at startup (requires network).
+# If enabled the program will back up your config.toml and perform a
+# git pull or pip upgrade when a newer commit is available. Manual
+# overrides via CLI flags are also supported.
+auto_update = false
 
 # --- Font Settings ---
 # Font size for the step title (e.g., "1. Amsterdam")

@@ -246,6 +246,158 @@ def _migrate_legacy_cache_paths():
     _migrate_dir(SCRIPT_DIR / ".emoji_cache", get_cache_dir("emoji"))
     _migrate_dir(SCRIPT_DIR / ".map_marker_cache", get_cache_dir("map_marker"))
 
+
+def is_git_repo(path: Path) -> bool:
+    """Return True if ``path`` is inside a git working tree."""
+    try:
+        proc = subprocess.run(["git", "rev-parse", "--is-inside-work-tree"], cwd=path,
+                              capture_output=True, text=True)
+        return proc.returncode == 0 and proc.stdout.strip() == "true"
+    except Exception:
+        return False
+
+
+def git_local_head(path: Path) -> Optional[str]:
+    """Return the current HEAD commit hash, or None on error."""
+    try:
+        proc = subprocess.run(["git", "rev-parse", "HEAD"], cwd=path,
+                              capture_output=True, text=True)
+        if proc.returncode == 0:
+            return proc.stdout.strip()
+    except Exception:
+        pass
+    return None
+
+
+def git_remote_head(path: Path) -> Optional[str]:
+    """Fetch from origin and return the remote HEAD hash, or None."""
+    try:
+        # fetch quietly, don't alter working tree
+        proc = subprocess.run(["git", "fetch", "origin", "HEAD"], cwd=path,
+                              capture_output=True, text=True, timeout=30)
+        proc = subprocess.run(["git", "rev-parse", "origin/HEAD"], cwd=path,
+                              capture_output=True, text=True)
+        if proc.returncode == 0:
+            return proc.stdout.strip()
+    except Exception:
+        pass
+    return None
+
+
+def check_git_updates(path: Path) -> bool:
+    """Return True if remote HEAD differs from local HEAD."""
+    if not is_git_repo(path):
+        return False
+    local = git_local_head(path)
+    remote = git_remote_head(path)
+    if local and remote and local != remote:
+        return True
+    return False
+
+
+def backup_config(path: Path) -> None:
+    """Copy config.toml to a timestamped .bak file before modifying the repo."""
+    config_file = path / "config.toml"
+    if config_file.exists():
+        try:
+            ts = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+            dest = path / f"config.toml.bak_{ts}"
+            if not dest.exists():
+                shutil.copy2(str(config_file), str(dest))
+        except Exception:
+            pass
+
+
+def perform_git_pull(path: Path) -> bool:
+    """Attempt a fast-forward git pull on the repository. Returns True on success."""
+    backup_config(path)
+    try:
+        proc = subprocess.run(["git", "pull", "--ff-only"], cwd=path,
+                              capture_output=True, text=True)
+        return proc.returncode == 0
+    except Exception:
+        return False
+
+
+def perform_pip_upgrade() -> bool:
+    """Try to upgrade the package via pip using the GitHub URL."""
+    try:
+        cmd = [sys.executable, "-m", "pip", "install", "--upgrade",
+               "git+https://github.com/therealkarle/PolarstepsPDFCreator.git"]
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        return proc.returncode == 0
+    except Exception:
+        return False
+
+
+def check_for_update(script_dir: Path) -> Tuple[bool, str]:
+    """Check whether an update is available. Returns (available,message)."""
+    # prefer git-based check in repo
+    if is_git_repo(script_dir):
+        try:
+            if check_git_updates(script_dir):
+                return True, "git repository has newer commits"
+            else:
+                return False, "repository is up to date"
+        except Exception as e:
+            return False, f"git check error: {e}"
+    # else fall back to pip upgrade possibility
+    # we cannot easily know remote version, so just always offer upgrade
+    return True, "pip upgrade may be available"
+
+
+def do_update(script_dir: Path) -> bool:
+    """Perform the update (git pull or pip upgrade). Returns True on success."""
+    if is_git_repo(script_dir):
+        return perform_git_pull(script_dir)
+    else:
+        return perform_pip_upgrade()
+
+
+def maybe_update(script_dir: Path, config: dict, args) -> None:
+    """Handle update/check flags and config. May exit the process."""
+    lang = get_default_language_manager()
+    auto_flag = config.get("auto_update", False) or getattr(args, "auto_update", False)
+
+    if getattr(args, "check_update", False):
+        print(lang.t("cli.update_checking"))
+        avail, msg = check_for_update(script_dir)
+        print(lang.t("cli.update_available" if avail else "cli.update_not_available", msg=msg))
+        sys.exit(0)
+
+    if getattr(args, "update", False):
+        proceed = args.yes
+        if not proceed:
+            resp = input(lang.t("cli.update_prompt")).strip().lower()
+            proceed = lang.is_yes(resp)
+        if proceed:
+            ok = do_update(script_dir)
+            print(lang.t("cli.update_success" if ok else "cli.update_failed", error="" if ok else "see above"))
+            if ok:
+                sys.exit(0)
+        else:
+            print(lang.t("cli.cancelled"))
+            sys.exit(0)
+
+    if auto_flag:
+        print(lang.t("cli.update_checking"))
+        avail, msg = check_for_update(script_dir)
+        if avail:
+            print(lang.t("cli.update_available", msg=msg))
+            proceed = args.yes
+            if not proceed:
+                resp = input(lang.t("cli.update_prompt")).strip().lower()
+                proceed = lang.is_yes(resp)
+            if proceed:
+                ok = do_update(script_dir)
+                if ok:
+                    print(lang.t("cli.update_success"))
+                    sys.exit(0)
+                else:
+                    print(lang.t("cli.update_failed", error="see above"))
+        else:
+            print(lang.t("cli.update_not_available"))
+
 # Optional Playwright (HTML -> PDF renderer)
 try:
     from playwright.sync_api import sync_playwright
@@ -4992,12 +5144,19 @@ def main():
     parser.add_argument('--stats-json', help='Write statistics JSON to file')
     parser.add_argument('--stats-map', help='Write overview map PNG to file')
     parser.add_argument('--yes', action='store_true', help='Do not prompt for confirmation')
+    # update flags
+    parser.add_argument('--check-update', action='store_true', help='Check GitHub for a newer version and exit')
+    parser.add_argument('--update', action='store_true', help='Download and install a newer version if available')
+    parser.add_argument('--auto-update', action='store_true', help='Enable auto-update check for this run (overrides config)')
 
     # Support legacy style: treat first arg 'stats' like '--stats'
     if len(sys.argv) > 1 and sys.argv[1] in ('stats', 's'):
         sys.argv[1] = '--stats'
 
     args = parser.parse_args()
+
+    # perform update/check actions before doing anything else
+    maybe_update(script_dir, config, args)
     
 # Determine Polarsteps Data folder(s) (CLI argument overrides config)
     bsp_data_folders = []

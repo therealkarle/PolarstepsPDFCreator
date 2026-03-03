@@ -20,6 +20,7 @@ Purpose: Give AI coding agents a compact, actionable briefing about repository s
 ## DO (practical rules) ✅
 - Run `python scripts/test_render.py` for end-to-end smoke checks where appropriate.
 - When touching CLI flags, update both `parse_render_command()` and `print_command_help()`.
+- New update flags (`--check-update`, `--update`, `--auto-update`) are coordinated by `maybe_update()` in `main()`.
 - When changing layout or font behavior, update `config.json` defaults and mention font fallbacks and OS paths.
 - Respect existing cache files and keys. Use `CacheManager` helper rather than manipulating caches directly.
 - Add a short reproduction / smoke-test in the PR description demonstrating the change.

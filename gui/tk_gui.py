@@ -465,6 +465,11 @@ class App(tk.Tk):
         if m.sync_playwright is None:
             messagebox.showwarning(self.lang.t('gui.playwright_missing_title'), self.lang.t('render.playwright_missing'))
 
+        # automatic update check
+        if cfg.get('auto_update', False):
+            # schedule a short delay so UI finishes initialization
+            self.after(1000, self._on_check_update)
+
         self.load_trips()
 
     def _create_widgets(self):
@@ -622,6 +627,13 @@ class App(tk.Tk):
         # NOTE: Render / Stop buttons moved below the progress bar to a dedicated row
 
         # Settings tab: Config editor and package manager
+        # Update controls (auto-check and manual check button)
+        frm_update = ttk.LabelFrame(tab_settings, text=self.lang.t('gui.update_frame'))
+        frm_update.pack(fill=tk.X, expand=False, padx=10, pady=(10, 6))
+        # display auto-update setting (editable in main config form below)
+        ttk.Label(frm_update, text=self.lang.t('gui.form.auto_update')).pack(side=tk.LEFT)
+        ttk.Button(frm_update, text=self.lang.t('gui.check_update'), command=self._on_check_update).pack(side=tk.LEFT, padx=(6, 0))
+
         # Config editor (Graphical form + raw editor)
         frm_cfg = ttk.LabelFrame(tab_settings, text=self.lang.t('gui.config_frame'))
         frm_cfg.pack(fill=tk.BOTH, expand=False, padx=10, pady=(10, 6))
@@ -1117,6 +1129,7 @@ class App(tk.Tk):
         add_entry(grp_general, self.lang.t('gui.form.output_folder'), 'output_folder', var_type='path')
         add_entry(grp_general, self.lang.t('gui.form.show_rendered_trips'), 'show_rendered_trips', var_type='bool')
         add_entry(grp_general, self.lang.t('gui.form.open_pdf_after_render'), 'open_pdf_after_render', var_type='bool')
+        add_entry(grp_general, self.lang.t('gui.form.auto_update'), 'auto_update', var_type='bool')
 
         grp_fonts = ttk.LabelFrame(self.form_inner, text=self.lang.t('gui.group_fonts'))
         grp_fonts.pack(fill=tk.X, padx=6, pady=(6,4))
@@ -2661,6 +2674,37 @@ class App(tk.Tk):
         self.playwright_btn.config(state=tk.DISABLED)
         t = threading.Thread(target=self._install_playwright_worker, daemon=True)
         t.start()
+
+    def _on_check_update(self):
+        """User requested an update check from the GUI."""
+        def worker():
+            try:
+                self.log_queue.put(('status', self.lang.t('cli.update_checking')))
+                avail, msg = m.check_for_update(SCRIPT_DIR)
+                if not avail:
+                    messagebox.showinfo(self.lang.t('gui.info'), self.lang.t('cli.update_not_available'))
+                    self.log_queue.put(('status', self.lang.t('gui.status_ready')))
+                    return
+                # ask user whether to apply update
+                do_it = messagebox.askyesno(self.lang.t('gui.update'), self.lang.t('cli.update_available', msg=msg) + "\n" + self.lang.t('cli.update_prompt'))
+                if do_it:
+                    self._start_update_thread()
+            except Exception:
+                pass
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _start_update_thread(self):
+        def upd():
+            ok = m.do_update(SCRIPT_DIR)
+            if ok:
+                messagebox.showinfo(self.lang.t('gui.info'), self.lang.t('cli.update_success'))
+                try:
+                    self.quit()
+                except Exception:
+                    pass
+            else:
+                messagebox.showerror(self.lang.t('gui.error'), self.lang.t('cli.update_failed', error=''))
+        threading.Thread(target=upd, daemon=True).start()
 
     def _install_playwright_worker(self):
         try:

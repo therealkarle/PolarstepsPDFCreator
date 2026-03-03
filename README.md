@@ -154,7 +154,15 @@ python polarsteps_pdf_generator.py --clear-cache
 
 # Show help
 python polarsteps_pdf_generator.py -h
+
+# Update checks
+python polarsteps_pdf_generator.py --check-update    # report if a newer version exists
+python polarsteps_pdf_generator.py --update          # download/install newer version and exit
+python polarsteps_pdf_generator.py --auto-update     # perform a one-time update check (overrides config)
 ```
+
+The `config.toml` key `auto_update` (boolean, default `false`) controls whether the
+GUI/CLI will automatically check for a newer release when the program starts.
 
 ## Data Structure
 

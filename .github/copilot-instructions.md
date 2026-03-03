@@ -29,6 +29,7 @@ Purpose: Short, actionable guidance to quickly make safe, useful changes in this
   - `r -ur -y 2025` => unrendered trips from year 2025
   - Selection parsing supports: `1`, `1;4` (range), `1,3,5` (list), `l` or `last` (last), `l-1` (second-to-last)
   - See functions: `parse_selection()` and `parse_render_command()` — modify parsing there when adding flags
+  - New update flags (`--check-update`, `--update`, `--auto-update`) are handled by `maybe_update()` early in `main()`
 
 ## Implementation patterns & conventions
 - Be conservative: functions favor resilience to missing fields, so follow the same approach (safe defaults, try/except around file reads).
