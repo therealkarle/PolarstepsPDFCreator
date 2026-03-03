@@ -378,11 +378,11 @@ class ScrollableFrame(ttk.Frame):
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Polarsteps PDF Creator")
+        self.title("Polarsteps PDF-Creator")
         self.geometry("800x600")
 
         self.bsp_path = tk.StringVar(value=str(DEFAULT_BSP))
-        self.status_text = tk.StringVar(value="Idle")
+        self.status_text = tk.StringVar(value="Bereit")
         
         # Filter variables
         self.filter_show_all = tk.BooleanVar(value=True)  # True = show all (include rendered)
@@ -426,8 +426,8 @@ class App(tk.Tk):
 
         # Warn if Playwright not available (PDF generation may fail)
         if m.sync_playwright is None:
-            messagebox.showwarning("Playwright missing",
-                                   "Playwright not found. HTML->PDF rendering may fail unless Playwright is installed.\n\nYou can run 'pip install playwright' and 'playwright install' to add browsers.")
+            messagebox.showwarning("Playwright fehlt",
+                                   "Playwright wurde nicht gefunden. HTML->PDF-Konvertierung kann fehlschlagen, falls Playwright nicht installiert ist.\n\nFühre 'pip install playwright' und 'playwright install' aus, um Browser hinzuzufügen.")
 
         self.load_trips()
 
@@ -438,24 +438,24 @@ class App(tk.Tk):
 
         tab_trips = ttk.Frame(self.notebook)
         tab_settings = ttk.Frame(self.notebook)
-        self.notebook.add(tab_trips, text='Trips')
+        self.notebook.add(tab_trips, text='Reisen')
         self.notebook.add(tab_settings, text='Einstellungen')
 
         frm_top = ttk.Frame(tab_trips)
         frm_top.pack(fill=tk.X, padx=10, pady=(10, 6))
 
-        ttk.Label(frm_top, text="BSPData folder:").pack(side=tk.LEFT)
+        ttk.Label(frm_top, text="BSPData-Ordner:").pack(side=tk.LEFT)
         ttk.Entry(frm_top, textvariable=self.bsp_path, width=60).pack(side=tk.LEFT, padx=(6, 6))
-        ttk.Button(frm_top, text="Browse...", command=self._on_browse).pack(side=tk.LEFT)
+        ttk.Button(frm_top, text="Durchsuchen...", command=self._on_browse).pack(side=tk.LEFT)
         # If Playwright is missing, show quick-install button
         if m.sync_playwright is None:
-            self.playwright_btn = ttk.Button(frm_top, text="Install Playwright", command=self._on_install_playwright)
+            self.playwright_btn = ttk.Button(frm_top, text="Playwright installieren", command=self._on_install_playwright)
             self.playwright_btn.pack(side=tk.LEFT, padx=(6, 0))
 
         frm_mid = ttk.Frame(tab_trips)
         frm_mid.pack(fill=tk.BOTH, expand=True, padx=10, pady=6)
 
-        lbl = ttk.Label(frm_mid, text="Available trips:")
+        lbl = ttk.Label(frm_mid, text="Verfügbare Reisen:")
         lbl.pack(anchor=tk.W)
 
         # Treeview with a narrow "Rendered" column (symbol header) and trip name column
@@ -463,7 +463,7 @@ class App(tk.Tk):
         # Use a check symbol as header; make column narrow and non-stretching
         self.trips_tree.heading('rendered', text='✔')
         self.trips_tree.column('rendered', width=28, minwidth=24, anchor='center', stretch=False)
-        self.trips_tree.heading('trip', text='Trip')
+        self.trips_tree.heading('trip', text='Reise')
         self.trips_tree.column('trip', anchor='w')
         self.trips_tree.pack(fill=tk.BOTH, expand=True, side=tk.LEFT)
 
@@ -483,8 +483,8 @@ class App(tk.Tk):
         frm_controls.pack(fill=tk.X, padx=10, pady=(6, 10))
 
         # Filters
-        ttk.Label(frm_controls, text="Filters:").pack(side=tk.LEFT)
-        self.chk_show_all = ttk.Checkbutton(frm_controls, text="Include rendered", variable=self.filter_show_all, command=self.load_trips)
+        ttk.Label(frm_controls, text="Filter:").pack(side=tk.LEFT)
+        self.chk_show_all = ttk.Checkbutton(frm_controls, text="Gerenderte einbeziehen", variable=self.filter_show_all, command=self.load_trips)
         self.chk_show_all.pack(side=tk.LEFT, padx=(6, 0))
 
         # Date / Year selector (calendar if available) with mode switch
@@ -506,26 +506,26 @@ class App(tk.Tk):
         except Exception:
             self._toggle_tooltip = None
 
-        ttk.Label(frm_date, text="Year:").grid(row=1, column=0, sticky='w')
+        ttk.Label(frm_date, text="Jahr:").grid(row=1, column=0, sticky='w')
         years = [''] + [str(y) for y in range(datetime.now().year, datetime.now().year - 30, -1)]
         self.cmb_year = ttk.Combobox(frm_date, width=6, values=years, textvariable=self.filter_year)
         self.cmb_year.grid(row=1, column=1, padx=(6, 4))
 
         if HAVE_TKCALENDAR:
-            ttk.Label(frm_date, text="From:").grid(row=1, column=3, sticky='w', padx=(8, 0))
+            ttk.Label(frm_date, text="Von:").grid(row=1, column=3, sticky='w', padx=(8, 0))
             self.start_cal = DateEntry(frm_date, width=12, date_pattern='dd.mm.yyyy')
             self.start_cal.grid(row=1, column=4, padx=(6, 4))
-            ttk.Label(frm_date, text="To:").grid(row=1, column=5, sticky='w', padx=(8, 0))
+            ttk.Label(frm_date, text="Bis:").grid(row=1, column=5, sticky='w', padx=(8, 0))
             self.end_cal = DateEntry(frm_date, width=12, date_pattern='dd.mm.yyyy')
             self.end_cal.grid(row=1, column=6, padx=(6, 0))
         else:
-            ttk.Label(frm_date, text="From:").grid(row=1, column=3, sticky='w', padx=(8, 0))
+            ttk.Label(frm_date, text="Von:").grid(row=1, column=3, sticky='w', padx=(8, 0))
             self.ent_start = ttk.Entry(frm_date, width=10, textvariable=self.filter_start_date)
             self.ent_start.grid(row=1, column=4, padx=(6, 4))
-            ttk.Label(frm_date, text="To:").grid(row=1, column=5, sticky='w', padx=(8, 0))
+            ttk.Label(frm_date, text="Bis:").grid(row=1, column=5, sticky='w', padx=(8, 0))
             self.ent_end = ttk.Entry(frm_date, width=10, textvariable=self.filter_end_date)
             self.ent_end.grid(row=1, column=6, padx=(6, 0))
-            self.lbl_cal_hint = ttk.Label(frm_date, text="(Install 'tkcalendar' for calendar picker)", foreground='gray')
+            self.lbl_cal_hint = ttk.Label(frm_date, text="(Installiere 'tkcalendar' für Kalenderauswahl)", foreground='gray')
             self.lbl_cal_hint.grid(row=2, column=0, columnspan=7, sticky='w')
 
         # Initialize widget states depending on mode
@@ -539,16 +539,16 @@ class App(tk.Tk):
         except Exception:
             pass
 
-        ttk.Label(frm_controls, text="Config:").pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Label(frm_controls, text="Konfiguration:").pack(side=tk.LEFT, padx=(8, 0))
         self.ent_config = ttk.Entry(frm_controls, width=20, textvariable=self.filter_config_overrides)
         self.ent_config.pack(side=tk.LEFT, padx=(6, 0))
-        ttk.Button(frm_controls, text="Apply", command=self.load_trips).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Button(frm_controls, text="Anwenden", command=self.load_trips).pack(side=tk.LEFT, padx=(6, 0))
 
-        ttk.Button(frm_controls, text="Refresh", command=self.load_trips).pack(side=tk.LEFT, padx=(6, 0))
-        ttk.Button(frm_controls, text="Select All", command=self._select_all).pack(side=tk.LEFT, padx=(6, 0))
-        ttk.Button(frm_controls, text="Deselect All", command=self._deselect_all).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Button(frm_controls, text="Aktualisieren", command=self.load_trips).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Button(frm_controls, text="Alle auswählen", command=self._select_all).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Button(frm_controls, text="Auswahl aufheben", command=self._deselect_all).pack(side=tk.LEFT, padx=(6, 0))
         # Select only trips that have not been rendered yet
-        ttk.Button(frm_controls, text="Select Unrendered", command=self._select_unrendered).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Button(frm_controls, text="Nur ungerenderte auswählen", command=self._select_unrendered).pack(side=tk.LEFT, padx=(6, 0))
 
         # NOTE: Render / Stop buttons moved below the progress bar to a dedicated row
 
@@ -572,18 +572,18 @@ class App(tk.Tk):
         self._build_config_form()
 
         # Small helper label
-        ttk.Label(frm_cfg, text='Tip: Use the graphical form for common settings; raw editor kept for advanced edits.', foreground='gray').pack(anchor='w', padx=8, pady=(4, 0))
+        ttk.Label(frm_cfg, text='Tipp: Verwende das grafische Formular für gängige Einstellungen; der Roh-Editor bleibt für fortgeschrittene Bearbeitungen.', foreground='gray').pack(anchor='w', padx=8, pady=(4, 0))
 
         # Package manager
-        frm_pkg = ttk.LabelFrame(tab_settings, text='Packages')
+        frm_pkg = ttk.LabelFrame(tab_settings, text='Pakete')
         frm_pkg.pack(fill=tk.BOTH, expand=True, padx=10, pady=(6, 10))
         # Add a Progress column to show per-package progress / percent
         self.pkg_tree = ttk.Treeview(frm_pkg, columns=('pkg', 'status', 'progress'), show='headings', height=8)
-        self.pkg_tree.heading('pkg', text='Package')
+        self.pkg_tree.heading('pkg', text='Paket')
         self.pkg_tree.column('pkg', anchor='w')
         self.pkg_tree.heading('status', text='Status')
         self.pkg_tree.column('status', width=140, anchor='center')
-        self.pkg_tree.heading('progress', text='Progress')
+        self.pkg_tree.heading('progress', text='Fortschritt')
         self.pkg_tree.column('progress', width=100, anchor='center')
         self.pkg_tree.pack(fill=tk.BOTH, expand=True, side=tk.LEFT)
         pkg_scr = ttk.Scrollbar(frm_pkg, orient=tk.VERTICAL, command=self.pkg_tree.yview)
@@ -591,13 +591,13 @@ class App(tk.Tk):
         self.pkg_tree.config(yscrollcommand=pkg_scr.set)
         frm_pkg_btn = ttk.Frame(frm_pkg)
         frm_pkg_btn.pack(fill=tk.X, padx=6, pady=6)
-        self.btn_pkg_refresh = ttk.Button(frm_pkg_btn, text='Refresh', command=self._refresh_packages)
+        self.btn_pkg_refresh = ttk.Button(frm_pkg_btn, text='Aktualisieren', command=self._refresh_packages)
         self.btn_pkg_refresh.pack(side=tk.LEFT)
-        self.btn_pkg_install_selected = ttk.Button(frm_pkg_btn, text='Install Selected', command=self._install_selected_packages)
+        self.btn_pkg_install_selected = ttk.Button(frm_pkg_btn, text='Ausgewählte installieren', command=self._install_selected_packages)
         self.btn_pkg_install_selected.pack(side=tk.LEFT, padx=(6, 0))
-        self.btn_pkg_install_all = ttk.Button(frm_pkg_btn, text='Install All', command=self._install_all_packages)
+        self.btn_pkg_install_all = ttk.Button(frm_pkg_btn, text='Alle installieren', command=self._install_all_packages)
         self.btn_pkg_install_all.pack(side=tk.LEFT, padx=(6, 0))
-        self.btn_pkg_install_uninstalled = ttk.Button(frm_pkg_btn, text='Install Uninstalled', command=self._install_uninstalled_packages)
+        self.btn_pkg_install_uninstalled = ttk.Button(frm_pkg_btn, text='Nicht installierte installieren', command=self._install_uninstalled_packages)
         self.btn_pkg_install_uninstalled.pack(side=tk.LEFT, padx=(6, 0))
         # Progress indicator (spinner) for package installs
         self.pkg_progress = ttk.Progressbar(frm_pkg_btn, mode='indeterminate', length=120)
@@ -622,8 +622,8 @@ class App(tk.Tk):
         self.pkg_log_text.config(yscrollcommand=pkg_log_scr.set)
         frm_log_btn = ttk.Frame(frm_pkg_log)
         frm_log_btn.pack(fill=tk.X, padx=6, pady=(6, 0))
-        ttk.Button(frm_log_btn, text='Clear Log', command=self._clear_pkg_log).pack(side=tk.LEFT)
-        ttk.Button(frm_log_btn, text='Save Log', command=self._save_pkg_log).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Button(frm_log_btn, text='Log löschen', command=self._clear_pkg_log).pack(side=tk.LEFT)
+        ttk.Button(frm_log_btn, text='Log speichern', command=self._save_pkg_log).pack(side=tk.LEFT, padx=(6, 0))
 
         # Progress bar and styles
         self.style = ttk.Style(self)
@@ -649,12 +649,12 @@ class App(tk.Tk):
         # Buttons below progress bar (new dedicated row)
         frm_bottom = ttk.Frame(tab_trips)
         frm_bottom.pack(fill=tk.X, padx=10, pady=(6, 8))
-        self.stats_btn = ttk.Button(frm_bottom, text="Statistics", command=self._on_show_statistics)
+        self.stats_btn = ttk.Button(frm_bottom, text="Statistiken", command=self._on_show_statistics)
         self.stats_btn.pack(side=tk.RIGHT, padx=(6, 0))
         # add tooltip explaining button action
         try:
             # determine language for tooltip (read config if possible)
-            tt_text = "Show statistics for selected or filtered trips"
+            tt_text = "Zeige Statistiken für ausgewählte oder gefilterte Reisen"
             try:
                 cfg = {}
                 config_file = SCRIPT_DIR / 'config.toml'
@@ -677,9 +677,9 @@ class App(tk.Tk):
             self.stats_btn.bind('<Leave>', lambda e: self._stats_tooltip.hide())
         except Exception:
             self._stats_tooltip = None
-        self.render_btn = ttk.Button(frm_bottom, text="Render Selected", command=self._on_render)
+        self.render_btn = ttk.Button(frm_bottom, text="Ausgewählte rendern", command=self._on_render)
         self.render_btn.pack(side=tk.RIGHT)
-        self.stop_btn = ttk.Button(frm_bottom, text="Stop", command=self._on_stop, state=tk.DISABLED)
+        self.stop_btn = ttk.Button(frm_bottom, text="Stopp", command=self._on_stop, state=tk.DISABLED)
         self.stop_btn.pack(side=tk.RIGHT, padx=(6, 0))
 
         # Load initial config text, form values and package status
@@ -786,15 +786,15 @@ class App(tk.Tk):
             self._original_config_lines = txt.splitlines()
             # quietly cache raw config on load (no popup) and update status text
             try:
-                self.status_text.set('Configuration cached')
+                self.status_text.set('Konfiguration zwischengespeichert')
             except Exception:
                 pass
         except Exception as e:
-            messagebox.showerror('Error', f'Could not load config: {e}')
+            messagebox.showerror('Fehler', f'Konfiguration konnte nicht geladen werden: {e}')
 
     def _save_config_text(self):
         # Raw editor has been removed. Saving raw text is not available.
-        messagebox.showinfo('Not available', 'Raw editor removed. Use the graphical form and "Save to file" to write configuration.')
+        messagebox.showinfo('Nicht verfügbar', 'Roh-Editor entfernt. Verwende das grafische Formular und "In Datei speichern", um die Konfiguration zu schreiben.')
 
     # --- Mousewheel helpers to ensure scrolling works when hovering controls ---
     def _hook_widget_for_mouse_scroll(self, widget):
@@ -985,7 +985,7 @@ class App(tk.Tk):
                     p = filedialog.askopenfilename(initialdir=str(SCRIPT_DIR))
                     if p:
                         var.set(p)
-                ttk.Button(frm, text='Browse', command=_browse_path).pack(side=tk.LEFT, padx=(6,0))
+                ttk.Button(frm, text='Durchsuchen', command=_browse_path).pack(side=tk.LEFT, padx=(6,0))
             elif var_type == 'combobox':
                 var = tk.StringVar()
                 cb = ttk.Combobox(frm, textvariable=var, width=14)
@@ -1030,51 +1030,51 @@ class App(tk.Tk):
         # Groups
         grp_general = ttk.LabelFrame(self.form_inner, text='Allgemein')
         grp_general.pack(fill=tk.X, padx=6, pady=(6,4))
-        add_entry(grp_general, 'Language', 'language')
-        add_entry(grp_general, 'PDF Language', 'pdf_language')
-        add_entry(grp_general, 'Show rendered trips', 'show_rendered_trips', var_type='bool')
-        add_entry(grp_general, 'Open PDF after render', 'open_pdf_after_render', var_type='bool')
+        add_entry(grp_general, 'Sprache', 'language')
+        add_entry(grp_general, 'PDF-Sprache', 'pdf_language')
+        add_entry(grp_general, 'Gerenderte Reisen anzeigen', 'show_rendered_trips', var_type='bool')
+        add_entry(grp_general, 'PDF nach dem Rendern öffnen', 'open_pdf_after_render', var_type='bool')
 
-        grp_fonts = ttk.LabelFrame(self.form_inner, text='Fonts')
+        grp_fonts = ttk.LabelFrame(self.form_inner, text='Schriftarten')
         grp_fonts.pack(fill=tk.X, padx=6, pady=(6,4))
-        add_entry(grp_fonts, 'Step title font size', 'step_title_font_size', var_type='int')
-        add_entry(grp_fonts, 'Step text font size', 'step_text_font_size', var_type='int')
-        add_entry(grp_fonts, 'Text font path', 'text_font_path', var_type='path')
-        add_entry(grp_fonts, 'Emoji font path', 'emoji_font_path', var_type='path')
-        add_entry(grp_fonts, 'Emoji scale', 'emoji_scale', var_type='float')
+        add_entry(grp_fonts, 'Schritt-Titel Schriftgröße', 'step_title_font_size', var_type='int')
+        add_entry(grp_fonts, 'Schritt-Text Schriftgröße', 'step_text_font_size', var_type='int')
+        add_entry(grp_fonts, 'Pfad Textschriftart', 'text_font_path', var_type='path')
+        add_entry(grp_fonts, 'Pfad Emoji-Schriftart', 'emoji_font_path', var_type='path')
+        add_entry(grp_fonts, 'Emoji-Skalierung', 'emoji_scale', var_type='float')
 
         grp_layout = ttk.LabelFrame(self.form_inner, text='Layout')
         grp_layout.pack(fill=tk.X, padx=6, pady=(6,4))
-        add_entry(grp_layout, 'Page margin (mm)', 'safety_margin_mm', var_type='int')
-        add_entry(grp_layout, 'Max photos per step', 'max_photos_per_step', var_type='int')
-        add_entry(grp_layout, 'Appendix: include undisplayed media', 'appendix_show_undisplayed_media', var_type='bool')
-        add_entry(grp_layout, 'Photo wall columns', 'photo_wall_columns', var_type='int')
-        add_entry(grp_layout, 'Photo wall gap', 'photo_wall_gap', var_type='int')
+        add_entry(grp_layout, 'Seitenrand (mm)', 'safety_margin_mm', var_type='int')
+        add_entry(grp_layout, 'Max. Fotos pro Schritt', 'max_photos_per_step', var_type='int')
+        add_entry(grp_layout, 'Anhang: nicht angezeigte Medien einschließen', 'appendix_show_undisplayed_media', var_type='bool')
+        add_entry(grp_layout, 'Foto-Wand Spalten', 'photo_wall_columns', var_type='int')
+        add_entry(grp_layout, 'Foto-Wand Abstand', 'photo_wall_gap', var_type='int')
 
-        grp_map = ttk.LabelFrame(self.form_inner, text='General Map')
+        grp_map = ttk.LabelFrame(self.form_inner, text='Karten - Allgemein')
         grp_map.pack(fill=tk.X, padx=6, pady=(6,4))
-        var_map_style, cb = add_entry(grp_map, 'Map style', 'map_style', var_type='combobox')
+        var_map_style, cb = add_entry(grp_map, 'Kartentyp', 'map_style', var_type='combobox')
         cb['values'] = ('hybrid', 'satellite', 'road')
-        add_entry(grp_map, 'Hybrid labels opacity', 'hybrid_labels_opacity', var_type='float')
-        add_entry(grp_map, 'Marker thumb size', 'marker_thumb_size', var_type='int')
+        add_entry(grp_map, 'Hybrid-Beschriftungs-Deckkraft', 'hybrid_labels_opacity', var_type='float')
+        add_entry(grp_map, 'Marker Vorschaubildgröße', 'marker_thumb_size', var_type='int')
 
-        grp_overview = ttk.LabelFrame(self.form_inner, text='Maps - Overview')
+        grp_overview = ttk.LabelFrame(self.form_inner, text='Karten - Übersicht')
         grp_overview.pack(fill=tk.X, padx=6, pady=(6,4))
-        add_entry(grp_overview, 'Vertical resolution (px)', 'maps.overview.vertical_resolution_px', var_type='int')
-        add_entry(grp_overview, 'Aspect ratio', 'maps.overview.aspect_ratio')
-        add_entry(grp_overview, 'Padding factor', 'maps.overview.padding_factor', var_type='float')
-        add_entry(grp_overview, 'Algorithm', 'maps.overview.algorithm')
-        add_entry(grp_overview, 'Min width (km)', 'maps.overview.min_width_km', var_type='float')
+        add_entry(grp_overview, 'Vertikale Auflösung (px)', 'maps.overview.vertical_resolution_px', var_type='int')
+        add_entry(grp_overview, 'Seitenverhältnis', 'maps.overview.aspect_ratio')
+        add_entry(grp_overview, 'Padding-Faktor', 'maps.overview.padding_factor', var_type='float')
+        add_entry(grp_overview, 'Algorithmus', 'maps.overview.algorithm')
+        add_entry(grp_overview, 'Min. Breite (km)', 'maps.overview.min_width_km', var_type='float')
 
-        grp_step = ttk.LabelFrame(self.form_inner, text='Maps - Step')
+        grp_step = ttk.LabelFrame(self.form_inner, text='Karten - Schritt')
         grp_step.pack(fill=tk.X, padx=6, pady=(6,4))
-        add_entry(grp_step, 'Vertical resolution (px)', 'maps.step.vertical_resolution_px', var_type='int')
-        add_entry(grp_step, 'Aspect ratio', 'maps.step.aspect_ratio')
-        add_entry(grp_step, 'Padding factor', 'maps.step.padding_factor', var_type='float')
-        add_entry(grp_step, 'Min width (km)', 'maps.step.min_width_km', var_type='float')
-        add_entry(grp_step, 'Max distance farthest steps (km)', 'maps.step.max_distance_farthest_steps_km', var_type='float')
-        add_entry(grp_step, 'Cluster distance (km)', 'maps.step.cluster_distance_km', var_type='float')
-        add_entry(grp_step, 'Render scale', 'maps.step.render_scale', var_type='float')
+        add_entry(grp_step, 'Vertikale Auflösung (px)', 'maps.step.vertical_resolution_px', var_type='int')
+        add_entry(grp_step, 'Seitenverhältnis', 'maps.step.aspect_ratio')
+        add_entry(grp_step, 'Padding-Faktor', 'maps.step.padding_factor', var_type='float')
+        add_entry(grp_step, 'Min. Breite (km)', 'maps.step.min_width_km', var_type='float')
+        add_entry(grp_step, 'Max. Entfernung weitester Schritte (km)', 'maps.step.max_distance_farthest_steps_km', var_type='float')
+        add_entry(grp_step, 'Cluster-Abstand (km)', 'maps.step.cluster_distance_km', var_type='float')
+        add_entry(grp_step, 'Render-Skalierung', 'maps.step.render_scale', var_type='float')
         # Hook group frame for mouse scroll enter/leave to keep mousewheel active
         try:
             self._hook_widget_for_mouse_scroll(grp_general)
@@ -1101,16 +1101,18 @@ class App(tk.Tk):
         except Exception:
             pass
 
-        # Actions
-        frm_actions = ttk.Frame(self.form_inner)
-        frm_actions.pack(fill=tk.X, pady=(6,8))
-        ttk.Button(frm_actions, text='Load from file', command=self._load_config_form).pack(side=tk.LEFT)
-        self.btn_save_form = ttk.Button(frm_actions, text='Save to file', command=self._save_config_form)
-        self.btn_save_form.pack(side=tk.LEFT, padx=(6,0))
-        ttk.Button(frm_actions, text='Preview TOML', command=self._apply_form_to_raw).pack(side=tk.LEFT, padx=(6,0))
-        # Validation status label
+        # Actions - pinned outside the scrollable form so they remain clickable
+        frm_actions = ttk.Frame(self.scrollable_form.master)
+        frm_actions.pack(side=tk.RIGHT, fill=tk.Y, padx=(6,8), pady=(6,8))
+        # Buttons stacked vertically for persistent access (not affected by scrolling)
+        ttk.Button(frm_actions, text='Aus Datei laden', command=self._load_config_form).pack(anchor='n', pady=4)
+        self.btn_save_form = ttk.Button(frm_actions, text='In Datei speichern', command=self._save_config_form)
+        self.btn_save_form.pack(anchor='n', pady=4)
+        ttk.Button(frm_actions, text='TOML-Vorschau', command=self._apply_form_to_raw).pack(anchor='n', pady=4)
+        ttk.Button(frm_actions, text='Anwenden', command=self._apply_config).pack(anchor='n', pady=4)
+        # Validation status label pinned in the actions column
         self.lbl_validation_status = ttk.Label(frm_actions, text='', foreground='gray')
-        self.lbl_validation_status.pack(side=tk.RIGHT)
+        self.lbl_validation_status.pack(side=tk.BOTTOM, pady=(6,0))
 
     def _load_config_form(self):
         """Load values from config.toml into the form widgets.
@@ -1123,7 +1125,7 @@ class App(tk.Tk):
         self._original_config_text = None
         self._original_config_lines = None
         if not cfg_file.exists():
-            messagebox.showinfo('Info', 'No config.toml found; using defaults in form.')
+            messagebox.showinfo('Info', 'Keine config.toml gefunden; Standardwerte werden im Formular verwendet.')
             cfg = {}
         else:
             try:
@@ -1145,7 +1147,7 @@ class App(tk.Tk):
                     parsed = m._parse_simple_toml(txt)
                 cfg = parsed or {}
             except Exception as e:
-                messagebox.showerror('Error', f'Could not read config: {e}')
+                messagebox.showerror('Fehler', f'Konfiguration konnte nicht gelesen werden: {e}')
                 return
 
         def _get(cfg, path, default=None):
@@ -1183,14 +1185,14 @@ class App(tk.Tk):
         try:
             ok, errs = self._validate_config_form()
             if ok:
-                self.lbl_validation_status.configure(text='All fields valid', foreground='green')
+                self.lbl_validation_status.configure(text='Alle Felder gültig', foreground='green')
             else:
-                self.lbl_validation_status.configure(text=f'{len(errs)} issue(s) — see messages', foreground='red')
+                self.lbl_validation_status.configure(text=f'{len(errs)} Problem(e) — siehe Meldungen', foreground='red')
             # update per-field label states
             for k, _ in self.config_vars.items():
                 self._on_var_change(k)
             try:
-                self.status_text.set('Configuration loaded into form')
+                self.status_text.set('Konfiguration in Formular geladen')
             except Exception:
                 pass
         except Exception:
@@ -1217,7 +1219,7 @@ class App(tk.Tk):
             # show errors and ask user whether to continue
             msg = 'Configuration has the following issues:\n' + '\n'.join(f'- {e}' for e in errs)
             msg += '\n\nSave anyway?'
-            if not messagebox.askyesno('Validation warnings', msg):
+            if not messagebox.askyesno('Validierungswarnungen', msg):
                 return
 
         # Build nested dict from form widget values
@@ -1386,7 +1388,7 @@ class App(tk.Tk):
                 self._original_config_text = content
                 # refresh raw editor + form (keep form values as-is)
                 self._load_config_text()
-                messagebox.showinfo('Saved', 'Configuration saved to config.toml (comments preserved)')
+                messagebox.showinfo('Gespeichert', 'Konfiguration in config.toml gespeichert (Kommentare erhalten)')
                 return
             except Exception as e:
                 # fall through to full dump on failure
@@ -1412,13 +1414,13 @@ class App(tk.Tk):
             # update global status label
             all_ok, all_errs = self._validate_config_form()
             if all_ok:
-                self.lbl_validation_status.configure(text='All fields valid', foreground='green')
+                self.lbl_validation_status.configure(text='Alle Felder gültig', foreground='green')
                 try:
                     self.btn_save_form.state(['!disabled'])
                 except Exception:
                     pass
             else:
-                self.lbl_validation_status.configure(text=f'{len(all_errs)} issue(s) — see messages', foreground='red')
+                self.lbl_validation_status.configure(text=f'{len(all_errs)} Problem(e) — siehe Meldungen', foreground='red')
                 try:
                     self.btn_save_form.state(['!disabled'])
                 except Exception:
@@ -1526,9 +1528,9 @@ class App(tk.Tk):
         try:
             cfg_file.write_text(out, encoding='utf-8')
             self._load_config_text()
-            messagebox.showinfo('Saved', 'Configuration saved to config.toml (full rewrite)')
+            messagebox.showinfo('Gespeichert', 'Konfiguration in config.toml gespeichert (Vollständiges Überschreiben)')
         except Exception as e:
-            messagebox.showerror('Error', f'Could not save config: {e}')
+            messagebox.showerror('Fehler', f'Konfiguration konnte nicht gespeichert werden: {e}')
 
     def _apply_form_to_raw(self):
         """Apply current form values to a TOML preview dialog (raw editor removed)."""
@@ -1591,26 +1593,91 @@ class App(tk.Tk):
             try:
                 self.clipboard_clear()
                 self.clipboard_append(out)
-                messagebox.showinfo('Copied', 'TOML copied to clipboard')
+                messagebox.showinfo('Kopiert', 'TOML in Zwischenablage kopiert')
             except Exception:
                 pass
-        ttk.Button(btn_frame, text='Copy to Clipboard', command=_copy).pack(side=tk.LEFT, padx=6)
+        ttk.Button(btn_frame, text='In Zwischenablage kopieren', command=_copy).pack(side=tk.LEFT, padx=6)
         def _save_preview():
             path = filedialog.asksaveasfilename(defaultextension='.toml', filetypes=[('TOML files', '*.toml'), ('All files','*.*')])
             if path:
                 open(path, 'w', encoding='utf-8').write(out)
-                messagebox.showinfo('Saved', f'Saved to {path}')
+                messagebox.showinfo('Gespeichert', f'Gezspeichert unter {path}')
                 win.destroy()
-        ttk.Button(btn_frame, text='Save to file', command=_save_preview).pack(side=tk.LEFT, padx=6)
+            ttk.Button(btn_frame, text='In Datei speichern', command=_save_preview).pack(side=tk.LEFT, padx=6)
         # quick validation button inside preview
         def _validate_and_show():
             ok, errs = self._validate_config_form()
             if ok:
-                messagebox.showinfo('Validation', 'All fields look valid')
+                messagebox.showinfo('Validierung', 'Alle Felder sind gültig')
             else:
-                messagebox.showwarning('Validation issues', '\n'.join(errs))
-        ttk.Button(btn_frame, text='Validate', command=_validate_and_show).pack(side=tk.LEFT, padx=6)
-        ttk.Button(btn_frame, text='Close', command=win.destroy).pack(side=tk.RIGHT, padx=6)
+                messagebox.showwarning('Validierungsprobleme', '\n'.join(errs))
+        ttk.Button(btn_frame, text='Validieren', command=_validate_and_show).pack(side=tk.LEFT, padx=6)
+        ttk.Button(btn_frame, text='Schließen', command=win.destroy).pack(side=tk.RIGHT, padx=6)
+
+    def _apply_config(self):
+        """Validate and apply current form values to the running GUI/session.
+
+        This does not write to disk; it validates the form and stores the
+        resulting configuration in-memory as `self._applied_config` so other
+        parts of the GUI can read applied settings without saving the file.
+        """
+        ok, errs = self._validate_config_form()
+        if not ok:
+            try:
+                messagebox.showwarning('Validierungsprobleme', '\n'.join(errs))
+            except Exception:
+                pass
+            return
+
+        # build nested dict from form widget values
+        cfg = {}
+        def _set(cfg, path, value):
+            parts = path.split('.')
+            cur = cfg
+            for p in parts[:-1]:
+                cur = cur.setdefault(p, {})
+            cur[parts[-1]] = value
+
+        for path, var in self.config_vars.items():
+            try:
+                if isinstance(var, tk.BooleanVar):
+                    v = bool(var.get())
+                elif isinstance(var, tk.IntVar):
+                    v = int(var.get())
+                elif isinstance(var, tk.DoubleVar):
+                    v = float(var.get())
+                else:
+                    raw = var.get()
+                    v = raw if raw is not None else ''
+                _set(cfg, path, v)
+            except Exception:
+                pass
+
+        # store applied config in-memory
+        try:
+            self._applied_config = cfg
+        except Exception:
+            self._applied_config = None
+
+        # Try to apply language change immediately (best-effort)
+        try:
+            lang_code = cfg.get('language', '') if isinstance(cfg, dict) else ''
+            if lang_code:
+                try:
+                    m._DEFAULT_LANGUAGE_MANAGER = m.load_language_manager(lang_code, m.SCRIPT_DIR)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        try:
+            self.status_text.set('Einstellungen angewendet')
+        except Exception:
+            pass
+        try:
+            messagebox.showinfo('Angewendet', 'Einstellungen wurden angewendet (vorübergehend).')
+        except Exception:
+            pass
 
     # Package log utilities
     def _clear_pkg_log(self):
@@ -1627,9 +1694,9 @@ class App(tk.Tk):
             content = self.pkg_log_text.get('1.0', tk.END)
             with open(path, 'w', encoding='utf-8') as f:
                 f.write(content)
-            messagebox.showinfo('Saved', f'Log saved to {path}')
+            messagebox.showinfo('Gespeichert', f'Log gespeichert unter {path}')
         except Exception as e:
-            messagebox.showerror('Error', f'Could not save log: {e}')
+            messagebox.showerror('Fehler', f'Log konnte nicht gespeichert werden: {e}')
 
     # Package manager
     def _refresh_packages(self):
@@ -1841,12 +1908,12 @@ class App(tk.Tk):
             self.trips_tree.delete(ch)
         bsp = Path(self.bsp_path.get())
         if not bsp.exists():
-            messagebox.showerror("Folder not found", f"BSPData folder not found: {bsp}")
+            messagebox.showerror("Ordner nicht gefunden", f"BSPData-Ordner nicht gefunden: {bsp}")
             return
         try:
             trips = m.find_trips(bsp)
         except Exception as e:
-            messagebox.showerror("Error", f"Could not list trips: {e}")
+            messagebox.showerror("Fehler", f"Konnte Reisen nicht auflisten: {e}")
             return
         self._trips = trips
         cm = m.CacheManager(SCRIPT_DIR / 'cache' / 'rendered_trips_cache.json')
@@ -2364,9 +2431,9 @@ class App(tk.Tk):
                         pass
                 elif typ == "install_done":
                     if payload:
-                        messagebox.showinfo("Playwright", "Playwright installation succeeded. Please restart the app.")
+                        messagebox.showinfo("Playwright", "Playwright-Installation erfolgreich. Bitte starte die Anwendung neu.")
                     else:
-                        messagebox.showerror("Playwright", "Playwright installation failed. See terminal output.")
+                        messagebox.showerror("Playwright", "Playwright-Installation fehlgeschlagen. Terminalausgabe prüfen.")
                     # re-enable install button if present
                     try:
                         self.playwright_btn.config(state=tk.NORMAL)
@@ -2704,21 +2771,21 @@ class StatsDialog(tk.Toplevel):
                 try:
                     with open(path, 'w', encoding='utf-8') as f:
                         json.dump(agg, f, indent=2, ensure_ascii=False)
-                    messagebox.showinfo('Export', f'JSON saved to {path}')
+                    messagebox.showinfo('Export', f'JSON gespeichert unter {path}')
                 except Exception as e:
-                    messagebox.showerror('Export', f'Failed to save JSON: {e}')
+                        messagebox.showerror('Export', f'Speichern der JSON fehlgeschlagen: {e}')
         def _save_map():
             if not map_bytes:
-                messagebox.showinfo('No map', 'No overview map available')
+                messagebox.showinfo('Keine Karte', 'Keine Übersichts-Karte verfügbar')
                 return
             path = filedialog.asksaveasfilename(defaultextension='.png', filetypes=[('PNG','*.png')])
             if path:
                 try:
                     with open(path, 'wb') as f:
                         f.write(map_bytes)
-                    messagebox.showinfo('Export', f'Map saved to {path}')
+                    messagebox.showinfo('Export', f'Karte gespeichert unter {path}')
                 except Exception as e:
-                    messagebox.showerror('Export', f'Failed to save map: {e}')
+                    messagebox.showerror('Export', f'Speichern der Karte fehlgeschlagen: {e}')
         ttk.Button(btn_frm, text=self.lang.t('gui.stats_export_json'), command=_export_json).pack(fill=tk.X, pady=(0,6))
         ttk.Button(btn_frm, text=self.lang.t('gui.stats_save_map'), command=_save_map).pack(fill=tk.X, pady=(0,6))
         ttk.Button(btn_frm, text=self.lang.t('gui.stats_close'), command=self.destroy).pack(fill=tk.X)
