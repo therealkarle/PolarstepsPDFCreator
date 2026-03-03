@@ -3457,13 +3457,29 @@ class HtmlPDFBuilder:
                         break
                     except Exception as e:
                         last_error = e
+                        # detect missing browser executable or first‑time install message
+                        msg = str(e).lower()
+                        if ("doesn't exist" in msg or "executable" in msg or "just installed" in msg):
+                            if attempt == 1:
+                                print(self.cli_lang.t("render.playwright_browsers_missing"))
+                                try:
+                                    # install all browsers to satisfy Playwright
+                                    subprocess.run([sys.executable, "-m", "playwright", "install"], check=True)
+                                    print(self.cli_lang.t("render.playwright_browsers_installed"))
+                                    # retry immediately
+                                    continue
+                                except Exception:
+                                    print(self.cli_lang.t("render.playwright_browsers_install_failed"))
                         try:
-                            if browser is not None:
+                            if browser:
                                 browser.close()
                         except Exception:
                             pass
+                        # report the error to user
+                        print(self.cli_lang.t("render.error_render", error=e))
                         if attempt < 2:
                             print(self.cli_lang.t("render.html_render_retry"))
+                        time.sleep(1)
                 if last_error is not None:
                     raise last_error
         finally:

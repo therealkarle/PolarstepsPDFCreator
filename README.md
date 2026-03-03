@@ -31,6 +31,15 @@ If you want a calendar-based date picker in the GUI, install the optional `tkcal
 pip install tkcalendar
 ```
 
+**Playwright note:** the package and browser binaries are optional but required for
+HTML→PDF rendering. When you first run a render and the browsers are missing the
+script will automatically invoke `playwright install` (full browser set), so you
+usually don't need to run it manually.
+
+```bash
+pip install tkcalendar
+```
+
 ## Usage
 
 Start the program:

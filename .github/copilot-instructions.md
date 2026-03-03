@@ -40,6 +40,7 @@ Purpose: Short, actionable guidance to quickly make safe, useful changes in this
 ## Testing & manual checks
 - Quick smoke: `python scripts/test_render.py` (runs `render_trip()` for a specific trip path) — useful for end-to-end checks that don't require interactive prompt flows.
 - No test framework is set up; prefer adding small standalone test scripts or simple pytest tests under `scripts/` or `tests/` if you introduce behavior changes.
+- **Avoid attempting to automatically run tests that could execute indefinitely; the AI cannot safely start long‑running or unbounded test suites.**
 
 ## Where to change things for common tasks
 - Change tile source or tile handling: update `ESRI_SATELLITE_URL` at top of `polarsteps_pdf_generator.py`.
