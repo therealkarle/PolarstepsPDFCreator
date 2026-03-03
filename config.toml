@@ -1,7 +1,7 @@
 # --- App Behavior ---
 # Language selection (see LanguagePack/)
 # Supported: "en", "de" (copy a pack to add more)
-language = "en"
+language = "de"
 # PDF language (if different from CLI language, leave empty to use 'language')
 pdf_language = "de"
 # List already rendered trips in the CLI menu

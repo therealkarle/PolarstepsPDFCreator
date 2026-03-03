@@ -378,11 +378,29 @@ class ScrollableFrame(ttk.Frame):
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Polarsteps PDF-Creator")
+        # load language manager early so UI strings come from language packs
+        try:
+            cfg = {}
+            config_file = SCRIPT_DIR / 'config.toml'
+            if config_file.exists():
+                content = config_file.read_text(encoding='utf-8')
+                if hasattr(m, '_tomllib') and m._tomllib:
+                    cfg = m._tomllib.loads(content)
+                else:
+                    cfg = m._parse_simple_toml(content)
+            lang_code = str(cfg.get('language', 'en') or 'en')
+        except Exception:
+            lang_code = 'en'
+        try:
+            self.lang = m.load_language_manager(lang_code, SCRIPT_DIR)
+        except Exception:
+            self.lang = m.load_language_manager('en', SCRIPT_DIR)
+
+        self.title(self.lang.t('gui.app_title'))
         self.geometry("800x600")
 
         self.bsp_path = tk.StringVar(value=str(DEFAULT_BSP))
-        self.status_text = tk.StringVar(value="Bereit")
+        self.status_text = tk.StringVar(value=self.lang.t('gui.status_ready'))
         
         # Filter variables
         self.filter_show_all = tk.BooleanVar(value=True)  # True = show all (include rendered)
@@ -426,8 +444,7 @@ class App(tk.Tk):
 
         # Warn if Playwright not available (PDF generation may fail)
         if m.sync_playwright is None:
-            messagebox.showwarning("Playwright fehlt",
-                                   "Playwright wurde nicht gefunden. HTML->PDF-Konvertierung kann fehlschlagen, falls Playwright nicht installiert ist.\n\nFühre 'pip install playwright' und 'playwright install' aus, um Browser hinzuzufügen.")
+            messagebox.showwarning(self.lang.t('gui.playwright_missing_title'), self.lang.t('render.playwright_missing'))
 
         self.load_trips()
 
@@ -438,24 +455,24 @@ class App(tk.Tk):
 
         tab_trips = ttk.Frame(self.notebook)
         tab_settings = ttk.Frame(self.notebook)
-        self.notebook.add(tab_trips, text='Reisen')
-        self.notebook.add(tab_settings, text='Einstellungen')
+        self.notebook.add(tab_trips, text=self.lang.t('gui.tab_trips'))
+        self.notebook.add(tab_settings, text=self.lang.t('gui.tab_settings'))
 
         frm_top = ttk.Frame(tab_trips)
         frm_top.pack(fill=tk.X, padx=10, pady=(10, 6))
 
-        ttk.Label(frm_top, text="BSPData-Ordner:").pack(side=tk.LEFT)
+        ttk.Label(frm_top, text=self.lang.t('gui.bsp_folder')).pack(side=tk.LEFT)
         ttk.Entry(frm_top, textvariable=self.bsp_path, width=60).pack(side=tk.LEFT, padx=(6, 6))
-        ttk.Button(frm_top, text="Durchsuchen...", command=self._on_browse).pack(side=tk.LEFT)
+        ttk.Button(frm_top, text=self.lang.t('gui.browse'), command=self._on_browse).pack(side=tk.LEFT)
         # If Playwright is missing, show quick-install button
         if m.sync_playwright is None:
-            self.playwright_btn = ttk.Button(frm_top, text="Playwright installieren", command=self._on_install_playwright)
+            self.playwright_btn = ttk.Button(frm_top, text=self.lang.t('gui.install_playwright'), command=self._on_install_playwright)
             self.playwright_btn.pack(side=tk.LEFT, padx=(6, 0))
 
         frm_mid = ttk.Frame(tab_trips)
         frm_mid.pack(fill=tk.BOTH, expand=True, padx=10, pady=6)
 
-        lbl = ttk.Label(frm_mid, text="Verfügbare Reisen:")
+        lbl = ttk.Label(frm_mid, text=self.lang.t('gui.available_trips_label'))
         lbl.pack(anchor=tk.W)
 
         # Treeview with a narrow "Rendered" column (symbol header) and trip name column
@@ -463,7 +480,7 @@ class App(tk.Tk):
         # Use a check symbol as header; make column narrow and non-stretching
         self.trips_tree.heading('rendered', text='✔')
         self.trips_tree.column('rendered', width=28, minwidth=24, anchor='center', stretch=False)
-        self.trips_tree.heading('trip', text='Reise')
+        self.trips_tree.heading('trip', text=self.lang.t('gui.trip'))
         self.trips_tree.column('trip', anchor='w')
         self.trips_tree.pack(fill=tk.BOTH, expand=True, side=tk.LEFT)
 
@@ -473,7 +490,7 @@ class App(tk.Tk):
 
         # Tooltip for the rendered header
         try:
-            self._rendered_tooltip = _Tooltip(self, "Gerendert")
+            self._rendered_tooltip = _Tooltip(self, self.lang.t('gui.rendered'))
             self.trips_tree.bind('<Motion>', self._on_tree_motion)
             self.trips_tree.bind('<Leave>', lambda e: self._rendered_tooltip.hide())
         except Exception:
@@ -483,8 +500,8 @@ class App(tk.Tk):
         frm_controls.pack(fill=tk.X, padx=10, pady=(6, 10))
 
         # Filters
-        ttk.Label(frm_controls, text="Filter:").pack(side=tk.LEFT)
-        self.chk_show_all = ttk.Checkbutton(frm_controls, text="Gerenderte einbeziehen", variable=self.filter_show_all, command=self.load_trips)
+        ttk.Label(frm_controls, text=self.lang.t('gui.filters')).pack(side=tk.LEFT)
+        self.chk_show_all = ttk.Checkbutton(frm_controls, text=self.lang.t('gui.include_rendered'), variable=self.filter_show_all, command=self.load_trips)
         self.chk_show_all.pack(side=tk.LEFT, padx=(6, 0))
 
         # Date / Year selector (calendar if available) with mode switch
@@ -499,33 +516,33 @@ class App(tk.Tk):
         self.chk_date_toggle.grid(row=1, column=2, padx=(6, 10))
         # Tooltip for the toggle (explanatory text shown on hover)
         try:
-            self._toggle_tooltip = _Tooltip(self, "Aktiviert Datumsbereich anstatt Jahr")
+            self._toggle_tooltip = _Tooltip(self, self.lang.t('gui.toggle_date_tooltip'))
             self.chk_date_toggle.bind('<Enter>', lambda e: self._toggle_tooltip.show(e.x_root + 10, e.y_root + 10))
             self.chk_date_toggle.bind('<Motion>', lambda e: self._toggle_tooltip.show(e.x_root + 10, e.y_root + 10))
             self.chk_date_toggle.bind('<Leave>', lambda e: self._toggle_tooltip.hide())
         except Exception:
             self._toggle_tooltip = None
 
-        ttk.Label(frm_date, text="Jahr:").grid(row=1, column=0, sticky='w')
+        ttk.Label(frm_date, text=self.lang.t('gui.year')).grid(row=1, column=0, sticky='w')
         years = [''] + [str(y) for y in range(datetime.now().year, datetime.now().year - 30, -1)]
         self.cmb_year = ttk.Combobox(frm_date, width=6, values=years, textvariable=self.filter_year)
         self.cmb_year.grid(row=1, column=1, padx=(6, 4))
 
         if HAVE_TKCALENDAR:
-            ttk.Label(frm_date, text="Von:").grid(row=1, column=3, sticky='w', padx=(8, 0))
+            ttk.Label(frm_date, text=self.lang.t('gui.from')).grid(row=1, column=3, sticky='w', padx=(8, 0))
             self.start_cal = DateEntry(frm_date, width=12, date_pattern='dd.mm.yyyy')
             self.start_cal.grid(row=1, column=4, padx=(6, 4))
-            ttk.Label(frm_date, text="Bis:").grid(row=1, column=5, sticky='w', padx=(8, 0))
+            ttk.Label(frm_date, text=self.lang.t('gui.to')).grid(row=1, column=5, sticky='w', padx=(8, 0))
             self.end_cal = DateEntry(frm_date, width=12, date_pattern='dd.mm.yyyy')
             self.end_cal.grid(row=1, column=6, padx=(6, 0))
         else:
-            ttk.Label(frm_date, text="Von:").grid(row=1, column=3, sticky='w', padx=(8, 0))
+            ttk.Label(frm_date, text=self.lang.t('gui.from')).grid(row=1, column=3, sticky='w', padx=(8, 0))
             self.ent_start = ttk.Entry(frm_date, width=10, textvariable=self.filter_start_date)
             self.ent_start.grid(row=1, column=4, padx=(6, 4))
-            ttk.Label(frm_date, text="Bis:").grid(row=1, column=5, sticky='w', padx=(8, 0))
+            ttk.Label(frm_date, text=self.lang.t('gui.to')).grid(row=1, column=5, sticky='w', padx=(8, 0))
             self.ent_end = ttk.Entry(frm_date, width=10, textvariable=self.filter_end_date)
             self.ent_end.grid(row=1, column=6, padx=(6, 0))
-            self.lbl_cal_hint = ttk.Label(frm_date, text="(Installiere 'tkcalendar' für Kalenderauswahl)", foreground='gray')
+            self.lbl_cal_hint = ttk.Label(frm_date, text=self.lang.t('gui.install_tkcalendar_hint'), foreground='gray')
             self.lbl_cal_hint.grid(row=2, column=0, columnspan=7, sticky='w')
 
         # Initialize widget states depending on mode
@@ -539,22 +556,22 @@ class App(tk.Tk):
         except Exception:
             pass
 
-        ttk.Label(frm_controls, text="Konfiguration:").pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Label(frm_controls, text=self.lang.t('gui.config')).pack(side=tk.LEFT, padx=(8, 0))
         self.ent_config = ttk.Entry(frm_controls, width=20, textvariable=self.filter_config_overrides)
         self.ent_config.pack(side=tk.LEFT, padx=(6, 0))
-        ttk.Button(frm_controls, text="Anwenden", command=self.load_trips).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Button(frm_controls, text=self.lang.t('gui.apply'), command=self.load_trips).pack(side=tk.LEFT, padx=(6, 0))
 
-        ttk.Button(frm_controls, text="Aktualisieren", command=self.load_trips).pack(side=tk.LEFT, padx=(6, 0))
-        ttk.Button(frm_controls, text="Alle auswählen", command=self._select_all).pack(side=tk.LEFT, padx=(6, 0))
-        ttk.Button(frm_controls, text="Auswahl aufheben", command=self._deselect_all).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Button(frm_controls, text=self.lang.t('gui.refresh'), command=self.load_trips).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Button(frm_controls, text=self.lang.t('gui.select_all'), command=self._select_all).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Button(frm_controls, text=self.lang.t('gui.deselect_all'), command=self._deselect_all).pack(side=tk.LEFT, padx=(6, 0))
         # Select only trips that have not been rendered yet
-        ttk.Button(frm_controls, text="Nur ungerenderte auswählen", command=self._select_unrendered).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Button(frm_controls, text=self.lang.t('gui.select_unrendered'), command=self._select_unrendered).pack(side=tk.LEFT, padx=(6, 0))
 
         # NOTE: Render / Stop buttons moved below the progress bar to a dedicated row
 
         # Settings tab: Config editor and package manager
         # Config editor (Graphical form + raw editor)
-        frm_cfg = ttk.LabelFrame(tab_settings, text='Konfiguration (config.toml)')
+        frm_cfg = ttk.LabelFrame(tab_settings, text=self.lang.t('gui.config_frame'))
         frm_cfg.pack(fill=tk.BOTH, expand=False, padx=10, pady=(10, 6))
 
         # Container frame: use a simple frame so the form can occupy full width
@@ -572,18 +589,18 @@ class App(tk.Tk):
         self._build_config_form()
 
         # Small helper label
-        ttk.Label(frm_cfg, text='Tipp: Verwende das grafische Formular für gängige Einstellungen; der Roh-Editor bleibt für fortgeschrittene Bearbeitungen.', foreground='gray').pack(anchor='w', padx=8, pady=(4, 0))
+        ttk.Label(frm_cfg, text=self.lang.t('gui.config_tip'), foreground='gray').pack(anchor='w', padx=8, pady=(4, 0))
 
         # Package manager
-        frm_pkg = ttk.LabelFrame(tab_settings, text='Pakete')
+        frm_pkg = ttk.LabelFrame(tab_settings, text=self.lang.t('gui.packages'))
         frm_pkg.pack(fill=tk.BOTH, expand=True, padx=10, pady=(6, 10))
         # Add a Progress column to show per-package progress / percent
         self.pkg_tree = ttk.Treeview(frm_pkg, columns=('pkg', 'status', 'progress'), show='headings', height=8)
-        self.pkg_tree.heading('pkg', text='Paket')
+        self.pkg_tree.heading('pkg', text=self.lang.t('gui.package'))
         self.pkg_tree.column('pkg', anchor='w')
-        self.pkg_tree.heading('status', text='Status')
+        self.pkg_tree.heading('status', text=self.lang.t('gui.status'))
         self.pkg_tree.column('status', width=140, anchor='center')
-        self.pkg_tree.heading('progress', text='Fortschritt')
+        self.pkg_tree.heading('progress', text=self.lang.t('gui.progress'))
         self.pkg_tree.column('progress', width=100, anchor='center')
         self.pkg_tree.pack(fill=tk.BOTH, expand=True, side=tk.LEFT)
         pkg_scr = ttk.Scrollbar(frm_pkg, orient=tk.VERTICAL, command=self.pkg_tree.yview)
@@ -591,13 +608,13 @@ class App(tk.Tk):
         self.pkg_tree.config(yscrollcommand=pkg_scr.set)
         frm_pkg_btn = ttk.Frame(frm_pkg)
         frm_pkg_btn.pack(fill=tk.X, padx=6, pady=6)
-        self.btn_pkg_refresh = ttk.Button(frm_pkg_btn, text='Aktualisieren', command=self._refresh_packages)
+        self.btn_pkg_refresh = ttk.Button(frm_pkg_btn, text=self.lang.t('gui.refresh'), command=self._refresh_packages)
         self.btn_pkg_refresh.pack(side=tk.LEFT)
-        self.btn_pkg_install_selected = ttk.Button(frm_pkg_btn, text='Ausgewählte installieren', command=self._install_selected_packages)
+        self.btn_pkg_install_selected = ttk.Button(frm_pkg_btn, text=self.lang.t('gui.install_selected'), command=self._install_selected_packages)
         self.btn_pkg_install_selected.pack(side=tk.LEFT, padx=(6, 0))
-        self.btn_pkg_install_all = ttk.Button(frm_pkg_btn, text='Alle installieren', command=self._install_all_packages)
+        self.btn_pkg_install_all = ttk.Button(frm_pkg_btn, text=self.lang.t('gui.install_all'), command=self._install_all_packages)
         self.btn_pkg_install_all.pack(side=tk.LEFT, padx=(6, 0))
-        self.btn_pkg_install_uninstalled = ttk.Button(frm_pkg_btn, text='Nicht installierte installieren', command=self._install_uninstalled_packages)
+        self.btn_pkg_install_uninstalled = ttk.Button(frm_pkg_btn, text=self.lang.t('gui.install_uninstalled'), command=self._install_uninstalled_packages)
         self.btn_pkg_install_uninstalled.pack(side=tk.LEFT, padx=(6, 0))
         # Progress indicator (spinner) for package installs
         self.pkg_progress = ttk.Progressbar(frm_pkg_btn, mode='indeterminate', length=120)
@@ -622,8 +639,8 @@ class App(tk.Tk):
         self.pkg_log_text.config(yscrollcommand=pkg_log_scr.set)
         frm_log_btn = ttk.Frame(frm_pkg_log)
         frm_log_btn.pack(fill=tk.X, padx=6, pady=(6, 0))
-        ttk.Button(frm_log_btn, text='Log löschen', command=self._clear_pkg_log).pack(side=tk.LEFT)
-        ttk.Button(frm_log_btn, text='Log speichern', command=self._save_pkg_log).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Button(frm_log_btn, text=self.lang.t('gui.clear_log'), command=self._clear_pkg_log).pack(side=tk.LEFT)
+        ttk.Button(frm_log_btn, text=self.lang.t('gui.save_log'), command=self._save_pkg_log).pack(side=tk.LEFT, padx=(6, 0))
 
         # Progress bar and styles
         self.style = ttk.Style(self)
@@ -649,7 +666,7 @@ class App(tk.Tk):
         # Buttons below progress bar (new dedicated row)
         frm_bottom = ttk.Frame(tab_trips)
         frm_bottom.pack(fill=tk.X, padx=10, pady=(6, 8))
-        self.stats_btn = ttk.Button(frm_bottom, text="Statistiken", command=self._on_show_statistics)
+        self.stats_btn = ttk.Button(frm_bottom, text=self.lang.t('gui.statistics'), command=self._on_show_statistics)
         self.stats_btn.pack(side=tk.RIGHT, padx=(6, 0))
         # add tooltip explaining button action
         try:
@@ -677,9 +694,9 @@ class App(tk.Tk):
             self.stats_btn.bind('<Leave>', lambda e: self._stats_tooltip.hide())
         except Exception:
             self._stats_tooltip = None
-        self.render_btn = ttk.Button(frm_bottom, text="Ausgewählte rendern", command=self._on_render)
+        self.render_btn = ttk.Button(frm_bottom, text=self.lang.t('gui.render_selected'), command=self._on_render)
         self.render_btn.pack(side=tk.RIGHT)
-        self.stop_btn = ttk.Button(frm_bottom, text="Stopp", command=self._on_stop, state=tk.DISABLED)
+        self.stop_btn = ttk.Button(frm_bottom, text=self.lang.t('gui.stop'), command=self._on_stop, state=tk.DISABLED)
         self.stop_btn.pack(side=tk.RIGHT, padx=(6, 0))
 
         # Load initial config text, form values and package status
@@ -786,15 +803,15 @@ class App(tk.Tk):
             self._original_config_lines = txt.splitlines()
             # quietly cache raw config on load (no popup) and update status text
             try:
-                self.status_text.set('Konfiguration zwischengespeichert')
+                self.status_text.set(self.lang.t('gui.configuration_cached'))
             except Exception:
                 pass
         except Exception as e:
-            messagebox.showerror('Fehler', f'Konfiguration konnte nicht geladen werden: {e}')
+            messagebox.showerror(self.lang.t('gui.error'), self.lang.t('gui.error_load_config').format(error=e))
 
     def _save_config_text(self):
         # Raw editor has been removed. Saving raw text is not available.
-        messagebox.showinfo('Nicht verfügbar', 'Roh-Editor entfernt. Verwende das grafische Formular und "In Datei speichern", um die Konfiguration zu schreiben.')
+        messagebox.showinfo(self.lang.t('gui.not_available'), self.lang.t('gui.raw_editor_removed'))
 
     # --- Mousewheel helpers to ensure scrolling works when hovering controls ---
     def _hook_widget_for_mouse_scroll(self, widget):
@@ -985,7 +1002,7 @@ class App(tk.Tk):
                     p = filedialog.askopenfilename(initialdir=str(SCRIPT_DIR))
                     if p:
                         var.set(p)
-                ttk.Button(frm, text='Durchsuchen', command=_browse_path).pack(side=tk.LEFT, padx=(6,0))
+                ttk.Button(frm, text=self.lang.t('gui.browse'), command=_browse_path).pack(side=tk.LEFT, padx=(6,0))
             elif var_type == 'combobox':
                 var = tk.StringVar()
                 cb = ttk.Combobox(frm, textvariable=var, width=14)
@@ -1028,53 +1045,53 @@ class App(tk.Tk):
             return var
 
         # Groups
-        grp_general = ttk.LabelFrame(self.form_inner, text='Allgemein')
+        grp_general = ttk.LabelFrame(self.form_inner, text=self.lang.t('gui.group_general'))
         grp_general.pack(fill=tk.X, padx=6, pady=(6,4))
-        add_entry(grp_general, 'Sprache', 'language')
-        add_entry(grp_general, 'PDF-Sprache', 'pdf_language')
-        add_entry(grp_general, 'Gerenderte Reisen anzeigen', 'show_rendered_trips', var_type='bool')
-        add_entry(grp_general, 'PDF nach dem Rendern öffnen', 'open_pdf_after_render', var_type='bool')
+        add_entry(grp_general, self.lang.t('gui.form.language'), 'language')
+        add_entry(grp_general, self.lang.t('gui.form.pdf_language'), 'pdf_language')
+        add_entry(grp_general, self.lang.t('gui.form.show_rendered_trips'), 'show_rendered_trips', var_type='bool')
+        add_entry(grp_general, self.lang.t('gui.form.open_pdf_after_render'), 'open_pdf_after_render', var_type='bool')
 
-        grp_fonts = ttk.LabelFrame(self.form_inner, text='Schriftarten')
+        grp_fonts = ttk.LabelFrame(self.form_inner, text=self.lang.t('gui.group_fonts'))
         grp_fonts.pack(fill=tk.X, padx=6, pady=(6,4))
-        add_entry(grp_fonts, 'Schritt-Titel Schriftgröße', 'step_title_font_size', var_type='int')
-        add_entry(grp_fonts, 'Schritt-Text Schriftgröße', 'step_text_font_size', var_type='int')
-        add_entry(grp_fonts, 'Pfad Textschriftart', 'text_font_path', var_type='path')
-        add_entry(grp_fonts, 'Pfad Emoji-Schriftart', 'emoji_font_path', var_type='path')
-        add_entry(grp_fonts, 'Emoji-Skalierung', 'emoji_scale', var_type='float')
+        add_entry(grp_fonts, self.lang.t('gui.form.step_title_font_size'), 'step_title_font_size', var_type='int')
+        add_entry(grp_fonts, self.lang.t('gui.form.step_text_font_size'), 'step_text_font_size', var_type='int')
+        add_entry(grp_fonts, self.lang.t('gui.form.text_font_path'), 'text_font_path', var_type='path')
+        add_entry(grp_fonts, self.lang.t('gui.form.emoji_font_path'), 'emoji_font_path', var_type='path')
+        add_entry(grp_fonts, self.lang.t('gui.form.emoji_scale'), 'emoji_scale', var_type='float')
 
-        grp_layout = ttk.LabelFrame(self.form_inner, text='Layout')
+        grp_layout = ttk.LabelFrame(self.form_inner, text=self.lang.t('gui.group_layout'))
         grp_layout.pack(fill=tk.X, padx=6, pady=(6,4))
-        add_entry(grp_layout, 'Seitenrand (mm)', 'safety_margin_mm', var_type='int')
-        add_entry(grp_layout, 'Max. Fotos pro Schritt', 'max_photos_per_step', var_type='int')
-        add_entry(grp_layout, 'Anhang: nicht angezeigte Medien einschließen', 'appendix_show_undisplayed_media', var_type='bool')
-        add_entry(grp_layout, 'Foto-Wand Spalten', 'photo_wall_columns', var_type='int')
-        add_entry(grp_layout, 'Foto-Wand Abstand', 'photo_wall_gap', var_type='int')
+        add_entry(grp_layout, self.lang.t('gui.form.safety_margin_mm'), 'safety_margin_mm', var_type='int')
+        add_entry(grp_layout, self.lang.t('gui.form.max_photos_per_step'), 'max_photos_per_step', var_type='int')
+        add_entry(grp_layout, self.lang.t('gui.appendix_include_undisplayed_media'), 'appendix_show_undisplayed_media', var_type='bool')
+        add_entry(grp_layout, self.lang.t('gui.form.photo_wall_columns'), 'photo_wall_columns', var_type='int')
+        add_entry(grp_layout, self.lang.t('gui.form.photo_wall_gap'), 'photo_wall_gap', var_type='int')
 
-        grp_map = ttk.LabelFrame(self.form_inner, text='Karten - Allgemein')
+        grp_map = ttk.LabelFrame(self.form_inner, text=self.lang.t('gui.group_map_general'))
         grp_map.pack(fill=tk.X, padx=6, pady=(6,4))
-        var_map_style, cb = add_entry(grp_map, 'Kartentyp', 'map_style', var_type='combobox')
+        var_map_style, cb = add_entry(grp_map, self.lang.t('gui.form.map_style'), 'map_style', var_type='combobox')
         cb['values'] = ('hybrid', 'satellite', 'road')
-        add_entry(grp_map, 'Hybrid-Beschriftungs-Deckkraft', 'hybrid_labels_opacity', var_type='float')
-        add_entry(grp_map, 'Marker Vorschaubildgröße', 'marker_thumb_size', var_type='int')
+        add_entry(grp_map, self.lang.t('gui.form.hybrid_labels_opacity'), 'hybrid_labels_opacity', var_type='float')
+        add_entry(grp_map, self.lang.t('gui.form.marker_thumb_size'), 'marker_thumb_size', var_type='int')
 
-        grp_overview = ttk.LabelFrame(self.form_inner, text='Karten - Übersicht')
+        grp_overview = ttk.LabelFrame(self.form_inner, text=self.lang.t('gui.group_map_overview'))
         grp_overview.pack(fill=tk.X, padx=6, pady=(6,4))
-        add_entry(grp_overview, 'Vertikale Auflösung (px)', 'maps.overview.vertical_resolution_px', var_type='int')
-        add_entry(grp_overview, 'Seitenverhältnis', 'maps.overview.aspect_ratio')
-        add_entry(grp_overview, 'Padding-Faktor', 'maps.overview.padding_factor', var_type='float')
-        add_entry(grp_overview, 'Algorithmus', 'maps.overview.algorithm')
-        add_entry(grp_overview, 'Min. Breite (km)', 'maps.overview.min_width_km', var_type='float')
+        add_entry(grp_overview, self.lang.t('gui.form.overview_vertical_resolution_px'), 'maps.overview.vertical_resolution_px', var_type='int')
+        add_entry(grp_overview, self.lang.t('gui.form.overview_aspect_ratio'), 'maps.overview.aspect_ratio')
+        add_entry(grp_overview, self.lang.t('gui.form.overview_padding_factor'), 'maps.overview.padding_factor', var_type='float')
+        add_entry(grp_overview, self.lang.t('gui.form.overview_algorithm'), 'maps.overview.algorithm')
+        add_entry(grp_overview, self.lang.t('gui.form.overview_min_width_km'), 'maps.overview.min_width_km', var_type='float')
 
-        grp_step = ttk.LabelFrame(self.form_inner, text='Karten - Schritt')
+        grp_step = ttk.LabelFrame(self.form_inner, text=self.lang.t('gui.group_map_step'))
         grp_step.pack(fill=tk.X, padx=6, pady=(6,4))
-        add_entry(grp_step, 'Vertikale Auflösung (px)', 'maps.step.vertical_resolution_px', var_type='int')
-        add_entry(grp_step, 'Seitenverhältnis', 'maps.step.aspect_ratio')
-        add_entry(grp_step, 'Padding-Faktor', 'maps.step.padding_factor', var_type='float')
-        add_entry(grp_step, 'Min. Breite (km)', 'maps.step.min_width_km', var_type='float')
-        add_entry(grp_step, 'Max. Entfernung weitester Schritte (km)', 'maps.step.max_distance_farthest_steps_km', var_type='float')
-        add_entry(grp_step, 'Cluster-Abstand (km)', 'maps.step.cluster_distance_km', var_type='float')
-        add_entry(grp_step, 'Render-Skalierung', 'maps.step.render_scale', var_type='float')
+        add_entry(grp_step, self.lang.t('gui.form.step_vertical_resolution_px'), 'maps.step.vertical_resolution_px', var_type='int')
+        add_entry(grp_step, self.lang.t('gui.form.step_aspect_ratio'), 'maps.step.aspect_ratio')
+        add_entry(grp_step, self.lang.t('gui.form.step_padding_factor'), 'maps.step.padding_factor', var_type='float')
+        add_entry(grp_step, self.lang.t('gui.form.step_min_width_km'), 'maps.step.min_width_km', var_type='float')
+        add_entry(grp_step, self.lang.t('gui.form.step_max_distance_farthest_steps_km'), 'maps.step.max_distance_farthest_steps_km', var_type='float')
+        add_entry(grp_step, self.lang.t('gui.form.step_cluster_distance_km'), 'maps.step.cluster_distance_km', var_type='float')
+        add_entry(grp_step, self.lang.t('gui.form.step_render_scale'), 'maps.step.render_scale', var_type='float')
         # Hook group frame for mouse scroll enter/leave to keep mousewheel active
         try:
             self._hook_widget_for_mouse_scroll(grp_general)
@@ -1105,11 +1122,11 @@ class App(tk.Tk):
         frm_actions = ttk.Frame(self.scrollable_form.master)
         frm_actions.pack(side=tk.RIGHT, fill=tk.Y, padx=(6,8), pady=(6,8))
         # Buttons stacked vertically for persistent access (not affected by scrolling)
-        ttk.Button(frm_actions, text='Aus Datei laden', command=self._load_config_form).pack(anchor='n', pady=4)
-        self.btn_save_form = ttk.Button(frm_actions, text='In Datei speichern', command=self._save_config_form)
+        ttk.Button(frm_actions, text=self.lang.t('gui.load_from_file'), command=self._load_config_form).pack(anchor='n', pady=4)
+        self.btn_save_form = ttk.Button(frm_actions, text=self.lang.t('gui.save_to_file'), command=self._save_config_form)
         self.btn_save_form.pack(anchor='n', pady=4)
-        ttk.Button(frm_actions, text='TOML-Vorschau', command=self._apply_form_to_raw).pack(anchor='n', pady=4)
-        ttk.Button(frm_actions, text='Anwenden', command=self._apply_config).pack(anchor='n', pady=4)
+        ttk.Button(frm_actions, text=self.lang.t('gui.toml_preview'), command=self._apply_form_to_raw).pack(anchor='n', pady=4)
+        ttk.Button(frm_actions, text=self.lang.t('gui.apply'), command=self._apply_config).pack(anchor='n', pady=4)
         # Validation status label pinned in the actions column
         self.lbl_validation_status = ttk.Label(frm_actions, text='', foreground='gray')
         self.lbl_validation_status.pack(side=tk.BOTTOM, pady=(6,0))
@@ -1125,7 +1142,7 @@ class App(tk.Tk):
         self._original_config_text = None
         self._original_config_lines = None
         if not cfg_file.exists():
-            messagebox.showinfo('Info', 'Keine config.toml gefunden; Standardwerte werden im Formular verwendet.')
+            messagebox.showinfo(self.lang.t('gui.info'), self.lang.t('gui.no_config_found'))
             cfg = {}
         else:
             try:
@@ -1147,7 +1164,7 @@ class App(tk.Tk):
                     parsed = m._parse_simple_toml(txt)
                 cfg = parsed or {}
             except Exception as e:
-                messagebox.showerror('Fehler', f'Konfiguration konnte nicht gelesen werden: {e}')
+                messagebox.showerror(self.lang.t('gui.error'), self.lang.t('gui.error_load_config').format(error=e))
                 return
 
         def _get(cfg, path, default=None):
@@ -1185,16 +1202,22 @@ class App(tk.Tk):
         try:
             ok, errs = self._validate_config_form()
             if ok:
-                self.lbl_validation_status.configure(text='Alle Felder gültig', foreground='green')
+                try:
+                    self.lbl_validation_status.configure(text=self.lang.t('gui.validation_all_valid'), foreground='green')
+                except Exception:
+                    self.lbl_validation_status.configure(text='Alle Felder gültig', foreground='green')
             else:
                 self.lbl_validation_status.configure(text=f'{len(errs)} Problem(e) — siehe Meldungen', foreground='red')
             # update per-field label states
             for k, _ in self.config_vars.items():
                 self._on_var_change(k)
             try:
-                self.status_text.set('Konfiguration in Formular geladen')
+                self.status_text.set(self.lang.t('gui.configuration_loaded_into_form'))
             except Exception:
-                pass
+                try:
+                    self.status_text.set('Konfiguration in Formular geladen')
+                except Exception:
+                    pass
         except Exception:
             pass
 
@@ -1388,7 +1411,7 @@ class App(tk.Tk):
                 self._original_config_text = content
                 # refresh raw editor + form (keep form values as-is)
                 self._load_config_text()
-                messagebox.showinfo('Gespeichert', 'Konfiguration in config.toml gespeichert (Kommentare erhalten)')
+                messagebox.showinfo(self.lang.t('gui.saved'), self.lang.t('gui.saved_comments_preserved'))
                 return
             except Exception as e:
                 # fall through to full dump on failure
@@ -1414,7 +1437,10 @@ class App(tk.Tk):
             # update global status label
             all_ok, all_errs = self._validate_config_form()
             if all_ok:
-                self.lbl_validation_status.configure(text='Alle Felder gültig', foreground='green')
+                try:
+                    self.lbl_validation_status.configure(text=self.lang.t('gui.validation_all_valid'), foreground='green')
+                except Exception:
+                    self.lbl_validation_status.configure(text='Alle Felder gültig', foreground='green')
                 try:
                     self.btn_save_form.state(['!disabled'])
                 except Exception:
@@ -1528,9 +1554,9 @@ class App(tk.Tk):
         try:
             cfg_file.write_text(out, encoding='utf-8')
             self._load_config_text()
-            messagebox.showinfo('Gespeichert', 'Konfiguration in config.toml gespeichert (Vollständiges Überschreiben)')
+            messagebox.showinfo(self.lang.t('gui.saved'), self.lang.t('gui.saved_full_rewrite'))
         except Exception as e:
-            messagebox.showerror('Fehler', f'Konfiguration konnte nicht gespeichert werden: {e}')
+            messagebox.showerror(self.lang.t('gui.error'), self.lang.t('gui.could_not_save_config').format(error=e))
 
     def _apply_form_to_raw(self):
         """Apply current form values to a TOML preview dialog (raw editor removed)."""
@@ -1580,7 +1606,7 @@ class App(tk.Tk):
             out = '\n'.join(lines)
         # Show preview dialog with TOML content (raw editor removed)
         win = tk.Toplevel(self)
-        win.title('Preview TOML')
+        win.title(self.lang.t('gui.toml_preview'))
         win.geometry('800x480')
         txtw = tk.Text(win, height=20, width=80, wrap='none')
         txtw.pack(fill=tk.BOTH, expand=True, padx=8, pady=(8,0))
@@ -1593,26 +1619,26 @@ class App(tk.Tk):
             try:
                 self.clipboard_clear()
                 self.clipboard_append(out)
-                messagebox.showinfo('Kopiert', 'TOML in Zwischenablage kopiert')
+                messagebox.showinfo(self.lang.t('gui.copied_title') if self.lang and self.lang.t('gui.copied_title') else self.lang.t('gui.copied'), self.lang.t('gui.copied'))
             except Exception:
                 pass
-        ttk.Button(btn_frame, text='In Zwischenablage kopieren', command=_copy).pack(side=tk.LEFT, padx=6)
+        ttk.Button(btn_frame, text=self.lang.t('gui.copy_to_clipboard'), command=_copy).pack(side=tk.LEFT, padx=6)
         def _save_preview():
             path = filedialog.asksaveasfilename(defaultextension='.toml', filetypes=[('TOML files', '*.toml'), ('All files','*.*')])
             if path:
                 open(path, 'w', encoding='utf-8').write(out)
-                messagebox.showinfo('Gespeichert', f'Gezspeichert unter {path}')
+                messagebox.showinfo(self.lang.t('gui.saved'), self.lang.t('gui.saved_to_path').format(path=path))
                 win.destroy()
-            ttk.Button(btn_frame, text='In Datei speichern', command=_save_preview).pack(side=tk.LEFT, padx=6)
+            ttk.Button(btn_frame, text=self.lang.t('gui.save_to_file'), command=_save_preview).pack(side=tk.LEFT, padx=6)
         # quick validation button inside preview
         def _validate_and_show():
             ok, errs = self._validate_config_form()
             if ok:
-                messagebox.showinfo('Validierung', 'Alle Felder sind gültig')
+                messagebox.showinfo(self.lang.t('gui.validation_ok_title') if self.lang and self.lang.t('gui.validation_ok_title') else self.lang.t('gui.validation_all_valid'), self.lang.t('gui.validation_all_valid'))
             else:
-                messagebox.showwarning('Validierungsprobleme', '\n'.join(errs))
-        ttk.Button(btn_frame, text='Validieren', command=_validate_and_show).pack(side=tk.LEFT, padx=6)
-        ttk.Button(btn_frame, text='Schließen', command=win.destroy).pack(side=tk.RIGHT, padx=6)
+                messagebox.showwarning(self.lang.t('gui.validation_issues'), '\n'.join(errs))
+        ttk.Button(btn_frame, text=self.lang.t('gui.validate'), command=_validate_and_show).pack(side=tk.LEFT, padx=6)
+        ttk.Button(btn_frame, text=self.lang.t('gui.close'), command=win.destroy).pack(side=tk.RIGHT, padx=6)
 
     def _apply_config(self):
         """Validate and apply current form values to the running GUI/session.
@@ -1624,7 +1650,7 @@ class App(tk.Tk):
         ok, errs = self._validate_config_form()
         if not ok:
             try:
-                messagebox.showwarning('Validierungsprobleme', '\n'.join(errs))
+                messagebox.showwarning(self.lang.t('gui.validation_issues'), '\n'.join(errs))
             except Exception:
                 pass
             return
@@ -1659,25 +1685,86 @@ class App(tk.Tk):
         except Exception:
             self._applied_config = None
 
-        # Try to apply language change immediately (best-effort)
+        # Persist settings to disk using existing save routine (will preserve comments when possible)
         try:
-            lang_code = cfg.get('language', '') if isinstance(cfg, dict) else ''
-            if lang_code:
+            # _save_config_form performs validation again; since we've validated, it should save silently
+            self._save_config_form()
+        except Exception:
+            # fallback: write a simple TOML dump
+            try:
+                import toml as _toml
+                with open(m.SCRIPT_DIR / 'config.toml', 'w', encoding='utf-8') as f:
+                    f.write(_toml.dumps(cfg))
+            except Exception:
                 try:
-                    m._DEFAULT_LANGUAGE_MANAGER = m.load_language_manager(lang_code, m.SCRIPT_DIR)
+                    # naive fallback
+                    lines = []
+                    for k, v in cfg.items():
+                        if isinstance(v, dict):
+                            lines.append(f"[{k}]")
+                            for sk, sv in v.items():
+                                lines.append(f"{sk} = {repr(sv)}")
+                        else:
+                            lines.append(f"{k} = {repr(v)}")
+                    (m.SCRIPT_DIR / 'config.toml').write_text('\n'.join(lines) + '\n', encoding='utf-8')
                 except Exception:
                     pass
+
+        # Reload config into form and in-memory text
+        try:
+            self._load_config_text()
+        except Exception:
+            pass
+        try:
+            self._load_config_form()
+        except Exception:
+            pass
+
+        # Update language-driven UI (best-effort): refresh stats tooltip
+        try:
+            lang_code = cfg.get('language', '') if isinstance(cfg, dict) else ''
+            if not lang_code:
+                lang_code = 'en'
+            try:
+                lang_mgr = m.load_language_manager(lang_code, m.SCRIPT_DIR)
+                tt_text = lang_mgr.t('gui.stats_button_tooltip', default="Zeige Statistiken für ausgewählte oder gefilterte Reisen")
+            except Exception:
+                tt_text = "Zeige Statistiken für ausgewählte oder gefilterte Reisen"
+            try:
+                # replace existing tooltip
+                if getattr(self, '_stats_tooltip', None):
+                    try:
+                        self._stats_tooltip.hide()
+                    except Exception:
+                        pass
+                self._stats_tooltip = _Tooltip(self.stats_btn, tt_text)
+                self.stats_btn.bind('<Enter>', lambda e: self._stats_tooltip.show(e.x_root + 10, e.y_root + 10))
+                self.stats_btn.bind('<Leave>', lambda e: self._stats_tooltip.hide())
+            except Exception:
+                pass
         except Exception:
             pass
 
         try:
-            self.status_text.set('Einstellungen angewendet')
+            self.status_text.set('Einstellungen gespeichert')
         except Exception:
             pass
         try:
-            messagebox.showinfo('Angewendet', 'Einstellungen wurden angewendet (vorübergehend).')
-        except Exception:
-            pass
+            do_restart = messagebox.askyesno('Neustart erforderlich', 'Einstellungen wurden gespeichert. Jetzt die GUI neu starten, um Änderungen anzuwenden?')
+            if do_restart:
+                python = sys.executable
+                run_path = str(SCRIPT_DIR / 'run_gui.py')
+                os.execv(python, [python, run_path])
+            else:
+                try:
+                    self.status_text.set('Neustart ausstehend; Änderungen aktiv nach Neustart')
+                except Exception:
+                    pass
+        except Exception as e:
+            try:
+                messagebox.showerror(self.lang.t('gui.restart_failed_title'), self.lang.t('gui.restart_failed').format(error=e))
+            except Exception:
+                pass
 
     # Package log utilities
     def _clear_pkg_log(self):
@@ -1694,9 +1781,9 @@ class App(tk.Tk):
             content = self.pkg_log_text.get('1.0', tk.END)
             with open(path, 'w', encoding='utf-8') as f:
                 f.write(content)
-            messagebox.showinfo('Gespeichert', f'Log gespeichert unter {path}')
+            messagebox.showinfo(self.lang.t('gui.saved'), self.lang.t('gui.saved_log').format(path=path))
         except Exception as e:
-            messagebox.showerror('Fehler', f'Log konnte nicht gespeichert werden: {e}')
+            messagebox.showerror(self.lang.t('gui.error'), self.lang.t('gui.could_not_save_log').format(error=e))
 
     # Package manager
     def _refresh_packages(self):
@@ -1739,7 +1826,7 @@ class App(tk.Tk):
     def _install_selected_packages(self):
         sel = self.pkg_tree.selection()
         if not sel:
-            messagebox.showinfo('No selection', 'Please select one or more packages to install.')
+            messagebox.showinfo(self.lang.t('gui.no_package_selected_title'), self.lang.t('gui.no_package_selected_body'))
             return
         pkgs = [self.pkg_tree.item(i)['values'][0] for i in sel]
         # notify UI to lock package controls and show spinner
@@ -1763,7 +1850,7 @@ class App(tk.Tk):
             if 'not installed' in status or 'unknown' in status:
                 pkgs.append(name)
         if not pkgs:
-            messagebox.showinfo('Nothing to install', 'No uninstalled packages found.')
+            messagebox.showinfo(self.lang.t('gui.nothing_to_install_title'), self.lang.t('gui.nothing_to_install_body'))
             return
         self.log_queue.put(('pkg_install_start', None))
         threading.Thread(target=self._install_packages_worker, args=(pkgs,), daemon=True).start()
@@ -1908,12 +1995,12 @@ class App(tk.Tk):
             self.trips_tree.delete(ch)
         bsp = Path(self.bsp_path.get())
         if not bsp.exists():
-            messagebox.showerror("Ordner nicht gefunden", f"BSPData-Ordner nicht gefunden: {bsp}")
+            messagebox.showerror(self.lang.t('gui.error'), self.lang.t('cli.error_bsp_not_found').format(path=bsp))
             return
         try:
             trips = m.find_trips(bsp)
         except Exception as e:
-            messagebox.showerror("Fehler", f"Konnte Reisen nicht auflisten: {e}")
+            messagebox.showerror(self.lang.t('gui.error'), self.lang.t('gui.error_list_trips').format(error=e))
             return
         self._trips = trips
         cm = m.CacheManager(SCRIPT_DIR / 'cache' / 'rendered_trips_cache.json')
@@ -1934,7 +2021,7 @@ class App(tk.Tk):
                 try:
                     year = int(year_text)
                 except ValueError:
-                    messagebox.showerror("Invalid year", "Please enter a valid year (e.g., 2025) or leave empty.")
+                    messagebox.showerror(self.lang.t('gui.invalid_year_title'), self.lang.t('gui.invalid_year_msg'))
                     return
 
         # If user selected Date mode, parse start/end and ignore year
@@ -1958,7 +2045,7 @@ class App(tk.Tk):
                         ed = datetime.strptime(self.filter_end_date.get().strip(), "%d.%m.%Y")
                         end_date = ed
             except Exception:
-                messagebox.showerror("Invalid date", "Dates must be dd.mm.yyyy or selected from the calendar.")
+                messagebox.showerror(self.lang.t('gui.invalid_date_title'), self.lang.t('gui.invalid_date_msg'))
                 return
 
         # Unknown mode: be permissive and don't filter by date/year
@@ -2045,14 +2132,14 @@ class App(tk.Tk):
     def _on_render(self):
         sel = self.trips_tree.selection()
         if not sel:
-            messagebox.showinfo("No selection", "Please select one or more trips to render.")
+            messagebox.showinfo(self.lang.t('gui.no_trips_selected_title'), self.lang.t('gui.no_trips_selected_body'))
             return
         # Map selection iids (indices) to the filtered trips list (if available)
         source = getattr(self, '_filtered_trips', None) or getattr(self, '_trips', [])
         try:
             trips = [source[int(iid)] for iid in sel]
         except Exception:
-            messagebox.showerror("Selection error", "Could not map selection to trips.")
+            messagebox.showerror(self.lang.t('gui.selection_error_title'), self.lang.t('gui.selection_error_body'))
             return
 
         # Parse config overrides from input (simple comma-separated k=v pairs)
@@ -2171,13 +2258,13 @@ class App(tk.Tk):
                 # no selection: use trips matching current time filter
                 trips = self._get_filtered_trips()
         except ValueError:
-            messagebox.showerror("Invalid date", "Dates must be dd.mm.yyyy or selected from the calendar.")
+            messagebox.showerror(self.lang.t('gui.invalid_date_title'), self.lang.t('gui.invalid_date_msg'))
             return
         except Exception:
-            messagebox.showerror("Selection error", "Could not map selection to trips.")
+            messagebox.showerror(self.lang.t('gui.selection_error_title'), self.lang.t('gui.selection_error_body'))
             return
         if not trips:
-            messagebox.showinfo("No trips", "No trips selected or available for statistics.")
+            messagebox.showinfo(self.lang.t('gui.no_trips_for_stats_title'), self.lang.t('gui.no_trips_for_stats_body'))
             return
         # disable button while computing
         try:
@@ -2376,7 +2463,7 @@ class App(tk.Tk):
                 elif typ == "info":
                     self.status_text.set(payload)
                 elif typ == "error":
-                    messagebox.showerror("Error", payload)
+                    messagebox.showerror(self.lang.t('gui.error'), payload)
                 elif typ == "progress":
                     # Trip-level progress (number of trips completed)
                     try:
@@ -2402,12 +2489,18 @@ class App(tk.Tk):
                             self.progress['style'] = self.default_style
                         except Exception:
                             pass
-                        self.status_text.set(f"{name}: Step {cur}/{tot}")
+                        try:
+                            self.status_text.set(self.lang.t('gui.step_status').format(name=name, cur=cur, tot=tot))
+                        except Exception:
+                            self.status_text.set(f"{name}: Step {cur}/{tot}")
                     except Exception:
                         pass
                 elif typ == "done":
                     # All rendering finished: show success and fill progress green
-                    self.status_text.set("Done")
+                    try:
+                        self.status_text.set(self.lang.t('gui.status_done'))
+                    except Exception:
+                        self.status_text.set("Done")
                     try:
                         # if we know total trips, set progress to its maximum
                         total = getattr(self, '_render_total_trips', None)
@@ -2431,9 +2524,9 @@ class App(tk.Tk):
                         pass
                 elif typ == "install_done":
                     if payload:
-                        messagebox.showinfo("Playwright", "Playwright-Installation erfolgreich. Bitte starte die Anwendung neu.")
+                        messagebox.showinfo(self.lang.t('gui.playwright'), self.lang.t('gui.playwright_install_success'))
                     else:
-                        messagebox.showerror("Playwright", "Playwright-Installation fehlgeschlagen. Terminalausgabe prüfen.")
+                        messagebox.showerror(self.lang.t('gui.playwright'), self.lang.t('gui.playwright_install_failed'))
                     # re-enable install button if present
                     try:
                         self.playwright_btn.config(state=tk.NORMAL)
@@ -2453,11 +2546,11 @@ class App(tk.Tk):
                         try:
                             StatsDialog(self, agg, map_bytes, charts, lang_code)
                         except Exception as e:
-                            messagebox.showinfo('Statistics', f"Stats ready:\n{agg}")
+                            messagebox.showinfo(self.lang.t('gui.statistics'), self.lang.t('gui.stats_ready_msg').format(agg=agg))
                     except Exception as e:
-                        messagebox.showerror('Statistics', f"Error showing stats: {e}")
+                        messagebox.showerror(self.lang.t('gui.statistics'), self.lang.t('gui.stats_error').format(error=e))
                 elif typ == 'stats_error':
-                    messagebox.showerror('Statistics', f"Statistics generation failed: {payload}")
+                    messagebox.showerror(self.lang.t('gui.statistics'), self.lang.t('gui.stats_error_payload').format(payload=payload))
                 elif typ == 'pkg_install_start':
                     # disable package controls and configure overall progress bar
                     try:
@@ -2506,10 +2599,10 @@ class App(tk.Tk):
                         failed = summary.get('failed', [])
                         if failed:
                             msg = f"Installed: {len(succ)}\nFailed: {len(failed)}\n\nSee status messages for details."
-                            messagebox.showwarning('Installation finished with errors', msg)
+                            messagebox.showwarning(self.lang.t('gui.install_finished_with_errors_title'), msg)
                         else:
                             msg = f"Successfully installed {len(succ)} package(s)."
-                            messagebox.showinfo('Installation complete', msg)
+                            messagebox.showinfo(self.lang.t('gui.install_finished_title'), msg)
                         # refresh package list one more time
                         try:
                             self._refresh_packages()
@@ -2771,21 +2864,21 @@ class StatsDialog(tk.Toplevel):
                 try:
                     with open(path, 'w', encoding='utf-8') as f:
                         json.dump(agg, f, indent=2, ensure_ascii=False)
-                    messagebox.showinfo('Export', f'JSON gespeichert unter {path}')
+                    messagebox.showinfo(self.lang.t('gui.export'), self.lang.t('gui.export_json_saved').format(path=path))
                 except Exception as e:
-                        messagebox.showerror('Export', f'Speichern der JSON fehlgeschlagen: {e}')
+                        messagebox.showerror(self.lang.t('gui.export'), self.lang.t('gui.export_json_failed').format(error=e))
         def _save_map():
             if not map_bytes:
-                messagebox.showinfo('Keine Karte', 'Keine Übersichts-Karte verfügbar')
+                messagebox.showinfo(self.lang.t('gui.no_map'), self.lang.t('gui.no_map'))
                 return
             path = filedialog.asksaveasfilename(defaultextension='.png', filetypes=[('PNG','*.png')])
             if path:
                 try:
                     with open(path, 'wb') as f:
                         f.write(map_bytes)
-                    messagebox.showinfo('Export', f'Karte gespeichert unter {path}')
+                    messagebox.showinfo(self.lang.t('gui.export'), self.lang.t('gui.map_saved').format(path=path))
                 except Exception as e:
-                    messagebox.showerror('Export', f'Speichern der Karte fehlgeschlagen: {e}')
+                    messagebox.showerror(self.lang.t('gui.export'), self.lang.t('gui.map_save_failed').format(error=e))
         ttk.Button(btn_frm, text=self.lang.t('gui.stats_export_json'), command=_export_json).pack(fill=tk.X, pady=(0,6))
         ttk.Button(btn_frm, text=self.lang.t('gui.stats_save_map'), command=_save_map).pack(fill=tk.X, pady=(0,6))
         ttk.Button(btn_frm, text=self.lang.t('gui.stats_close'), command=self.destroy).pack(fill=tk.X)
