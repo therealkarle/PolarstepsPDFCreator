@@ -499,13 +499,41 @@ class App(tk.Tk):
         lbl = ttk.Label(frm_mid, text=self.lang.t('gui.available_trips_label'))
         lbl.pack(anchor=tk.W)
 
-        # Treeview with a narrow "Rendered" column (symbol header) and trip name column
-        self.trips_tree = ttk.Treeview(frm_mid, columns=('rendered', 'trip'), show='headings', selectmode=tk.EXTENDED, height=18)
+        # Treeview with multiple columns: rendered flag, trip name, date range, travel days, folder name
+        self.trips_tree = ttk.Treeview(frm_mid, columns=('rendered', 'trip', 'dates', 'days', 'folder'),
+                                      show='headings', selectmode=tk.EXTENDED, height=18)
+        # prepare sort-state dict and current sort column
+        self._sort_reverse = {}
+        self._current_sort_col = None
+        # remember base heading texts for arrows
+        self._heading_texts = {
+            'rendered': '✔',
+            'trip': self.lang.t('gui.trip_name', default=self.lang.t('gui.trip')),
+            'dates': self.lang.t('gui.column_dates', default='Dates'),
+            'days': self.lang.t('gui.column_days', default='Days'),
+            'folder': self.lang.t('gui.column_folder', default='Folder'),
+        }
+        # setup a highlight style for sorted column headings
+        try:
+            self.highlight_style = 'Sort.Selected.Treeview.Heading'
+            self.style.configure(self.highlight_style, background='#ddeeff')
+        except Exception:
+            self.highlight_style = ''
         # Use a check symbol as header; make column narrow and non-stretching
-        self.trips_tree.heading('rendered', text='✔')
+        self.trips_tree.heading('rendered', text=self._heading_texts['rendered'], command=lambda c='rendered': self._on_heading_click(c))
         self.trips_tree.column('rendered', width=28, minwidth=24, anchor='center', stretch=False)
-        self.trips_tree.heading('trip', text=self.lang.t('gui.trip'))
+        # trip name column
+        self.trips_tree.heading('trip', text=self._heading_texts['trip'], command=lambda c='trip': self._on_heading_click(c))
         self.trips_tree.column('trip', anchor='w')
+        # date range column (start - end)
+        self.trips_tree.heading('dates', text=self._heading_texts['dates'], command=lambda c='dates': self._on_heading_click(c))
+        self.trips_tree.column('dates', anchor='w', width=140)
+        # days column
+        self.trips_tree.heading('days', text=self._heading_texts['days'], command=lambda c='days': self._on_heading_click(c))
+        self.trips_tree.column('days', width=60, anchor='center', stretch=False)
+        # folder name column
+        self.trips_tree.heading('folder', text=self._heading_texts['folder'], command=lambda c='folder': self._on_heading_click(c))
+        self.trips_tree.column('folder', anchor='w', width=120)
         self.trips_tree.pack(fill=tk.BOTH, expand=True, side=tk.LEFT)
 
         scr = ttk.Scrollbar(frm_mid, orient=tk.VERTICAL, command=self.trips_tree.yview)
@@ -2040,6 +2068,11 @@ class App(tk.Tk):
         # Clear tree and load
         for ch in self.trips_tree.get_children():
             self.trips_tree.delete(ch)
+        # reset sort state so new data uses default ordering
+        try:
+            self._sort_reverse.clear()
+        except Exception:
+            pass
         raw = self.bsp_path.get().strip()
         # split on semicolon or space and remove empties
         parts = [p for p in re.split(r'[;\s]+', raw) if p]
@@ -2121,20 +2154,62 @@ class App(tk.Tk):
 
         # store filtered list for accurate selection to trips mapping
         self._filtered_trips = filtered
+        # prepare metadata used for sorting
+        self._trip_meta = {}
 
         for idx, t in enumerate(filtered):
             display = t.name
-            # attempt nicer name from trip.json if available
+            date_str = ''
+            days_str = ''
+            start_dt = None
+            end_dt = None
+            days_int = 0
+            # attempt nicer name and date info from trip.json if available
             try:
                 parser = m.TripParser(t)
                 parser.load()
                 name = parser.get_trip_name()
-                display = f"{name} — {t.name}"
+                # show only prettified name if available, otherwise fall back to folder
+                if name:
+                    display = name
+                # compute dates
+                s_dt, e_dt = parser.get_trip_dates()
+                start_dt = s_dt
+                end_dt = e_dt
+                if s_dt or e_dt:
+                    if s_dt and e_dt:
+                        date_str = f"{s_dt.strftime('%d.%m.%Y')} – {e_dt.strftime('%d.%m.%Y')}"
+                        try:
+                            delta = (e_dt.date() - s_dt.date()).days
+                            # inclusive count
+                            days_int = delta + 1
+                            days_str = str(days_int)
+                        except Exception:
+                            days_str = ''
+                    elif s_dt:
+                        date_str = s_dt.strftime('%d.%m.%Y')
+                    elif e_dt:
+                        date_str = e_dt.strftime('%d.%m.%Y')
             except Exception:
                 pass
             rendered_mark = '✅' if cm.is_rendered(t) else ''
+            # record meta for sorting
+            self._trip_meta[str(idx)] = {
+                'rendered': bool(rendered_mark),
+                'trip': display,
+                'start_date': start_dt,
+                'end_date': end_dt,
+                'days': days_int,
+                'folder': t.name,
+            }
             # Use index as iid to map selection back to filtered list
-            self.trips_tree.insert('', 'end', iid=str(idx), values=(rendered_mark, display))
+            self.trips_tree.insert('', 'end', iid=str(idx),
+                                   values=(rendered_mark, display, date_str, days_str, t.name))
+        # after populating, apply default sorting (start date descending)
+        try:
+            self._apply_default_sort()
+        except Exception:
+            pass
 
     def _select_all(self):
         # select all visible items in the tree
@@ -2191,6 +2266,81 @@ class App(tk.Tk):
                     self._rendered_tooltip.hide()
             except Exception:
                 pass
+
+    # --- Sorting helpers for trips_tree headings ---
+    def _on_heading_click(self, column):
+        """Handler when a column heading is clicked.
+
+        Toggles ascending/descending order for that column and
+        calls the generic sort routine.  Also updates the arrow
+        indicator and highlights the active column.
+        """
+        reverse = self._sort_reverse.get(column, False)
+        self._sort_by(column, not reverse)
+        # remember current column and update headings
+        self._current_sort_col = column
+        self._update_heading_styles(column, not reverse)
+
+    def _sort_by(self, column, reverse=False):
+        """Sort visible tree items by a given column."""
+        items = list(self.trips_tree.get_children())
+        def key(iid):
+            meta = getattr(self, '_trip_meta', {}).get(iid, {})
+            if column == 'rendered':
+                return meta.get('rendered', False)
+            elif column == 'trip':
+                return (meta.get('trip') or "").lower()
+            elif column == 'dates':
+                # sort by start_date (None < any date)
+                dt = meta.get('start_date')
+                return dt or datetime.min
+            elif column == 'days':
+                return meta.get('days', 0)
+            elif column == 'folder':
+                return (meta.get('folder') or "").lower()
+            else:
+                return ""
+        items.sort(key=key, reverse=reverse)
+        for iid in items:
+            try:
+                self.trips_tree.move(iid, '', 'end')
+            except Exception:
+                pass
+        # update heading arrow & highlight also
+        self._sort_reverse[column] = reverse
+        self._update_heading_styles(column, reverse)
+
+    def _apply_default_sort(self):
+        """Apply default sort after loading trips (start date desc)."""
+        try:
+            self._sort_by('dates', True)
+            self._current_sort_col = 'dates'
+            self._update_heading_styles('dates', True)
+        except Exception:
+            pass
+
+    def _update_heading_styles(self, active_col, reverse):
+        """Update heading text and style for sort indicators.
+
+        * An arrow (▲/▼) is appended to the active column.
+        * The active heading gets a highlight style (if available).
+        """
+        arrow = ' ▲' if not reverse else ' ▼'
+        for col, base in self._heading_texts.items():
+            text = base
+            style = ''
+            if col == active_col:
+                text = base + arrow
+                style = self.highlight_style or ''
+            try:
+                self.trips_tree.heading(col, text=text, style=style)
+            except Exception:
+                # some themes may not support style change
+                try:
+                    self.trips_tree.heading(col, text=text)
+                except Exception:
+                    pass
+
 
     def _on_render(self):
         sel = self.trips_tree.selection()

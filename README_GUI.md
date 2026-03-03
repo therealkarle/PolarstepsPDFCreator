@@ -20,5 +20,8 @@ Quick start for the simple Tkinter GUI included in `gui/tk_gui.py`:
    ```
 
 4. In the app: choose one or more `Polarsteps Data` folders (append additional paths separated by semicolons), optionally set the output folder, select trips, and click `Render Selected`.
+   * The table headers are clickable to sort by that column (ascending/descending).
+   * An arrow indicator (▲/▼) shows the current sort direction and the active header is lightly highlighted.
+   * By default the list is sorted by start date in descending order.
 
 Packaging: To create a single EXE for Windows, consider `pyinstaller` and include Playwright browsers following the Playwright packaging docs.
