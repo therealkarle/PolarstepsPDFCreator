@@ -39,10 +39,10 @@ Start the program:
 python polarsteps_pdf_generator.py
 ```
 
-Or with a custom BSPData folder:
+Or with a custom Polarsteps Data folder (and optionally specify where PDFs should be written):
 
 ```bash
-python polarsteps_pdf_generator.py /path/to/BSPData
+python polarsteps_pdf_generator.py /path/to/PolarstepsData --output-folder /path/to/output
 ```
 
 ### Available Commands (at the prompt)
@@ -147,6 +147,18 @@ Edit `config.toml` to customize the PDF generation (preferred). TOML supports co
 Example `config.toml`:
 
 ```toml
+# Input/output locations
+# `polarsteps_data_folder` may be a single path or a TOML array of paths when
+# you want to aggregate trips from multiple exports. CLI accepts multiple
+# space-separated folders as well.
+polarsteps_data_folder = "C:/path/to/your/PolarstepsData"       # optional default data folder
+# Example using multiple locations:
+# polarsteps_data_folder = [
+#     "C:/BSPData/2024",
+#     "D:/OtherTrips",
+# ]
+output_folder = "C:/path/where/pdfs/are/saved" # defaults to TripPdfs/ next to script
+
 # Font Settings
 step_title_font_size = 18
 step_text_font_size = 12

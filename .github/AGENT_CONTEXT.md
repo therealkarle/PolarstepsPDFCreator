@@ -38,7 +38,7 @@ Purpose: Give AI coding agents a compact, actionable briefing about repository s
 - Selection parsing: `parse_selection()` and `_resolve_index_token()` implement CLI selection logic — add tests here when modifying behavior.
 
 ## Testing & manual checks
-- Use `python polarsteps_pdf_generator.py /path/to/BSPData` for interactive validation.
+- Use `python polarsteps_pdf_generator.py /path/to/PolarstepsData` for interactive validation.
 - Use `python polarsteps_pdf_generator.py --clear-cache` to clear state before tests.
 - For CI-friendly tests, write small functions and test scripts that avoid fetching external assets.
 

@@ -1,4 +1,8 @@
 # --- App Behavior ---
+# Input/output locations (optional, can also be supplied on CLI)
+polarsteps_data_folder = "BSPData"
+output_folder = "TripPdfs"  # defaults to TripPdfs/ next to script
+
 # Language selection (see LanguagePack/)
 # Supported: "en", "de" (copy a pack to add more)
 language = "de"

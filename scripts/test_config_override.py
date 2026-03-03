@@ -23,7 +23,7 @@ if ms in ('street','streets'):
     ms = 'road'
 print('\nNormalized map style (after merge):', ms)
 
-cmd2 = 'r -config(map_style="satellite", max_photos_per_step=3) 2'
+cmd2 = 'r -config(polarsteps_data_folder="/foo/bar", map_style="satellite", max_photos_per_step=3, output_folder="/tmp/pdfs") 2'
 res2 = parse_render_command(cmd2, trips, cm)
 print('\ncmd2:', cmd2)
 print('valid:', res2['valid'])

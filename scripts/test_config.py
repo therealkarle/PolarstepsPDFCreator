@@ -75,6 +75,9 @@ else:
 print(f"\nTop-level keys: {list(config.keys())}")
 print(f"'language' key present: {'language' in config}")
 print(f"config.get('language', 'en'): {repr(config.get('language', 'en'))}")
+print(f"polarsteps_data_folder: {config.get('polarsteps_data_folder')}")
+print(f"bsp_folder (legacy): {config.get('bsp_folder')}")
+print(f"output_folder: {config.get('output_folder')}")
 
 # Also show the last 10 lines of raw content
 print("\n--- Last 15 lines of config.toml ---")

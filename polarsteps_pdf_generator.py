@@ -3553,7 +3553,7 @@ def get_trip_start_date(trip_path):
 
 
 def find_trips(bsp_data_folder: Path) -> list:
-    """Find all trip folders in BSPData and sort by start date (oldest first)."""
+    """Find all trip folders in the Polarsteps Data (BSPData) directory and sort by start date (oldest first)."""
     trips = []
     
     for date_folder in sorted(bsp_data_folder.iterdir()):
@@ -4645,7 +4645,16 @@ def render_trip(trip_path: Path, script_dir: Path, config: dict, cache_manager: 
         
         # Generate PDF
         trip_name_safe = "".join(c if c.isalnum() or c in " -_" else "_" for c in parser.get_trip_name())
-        pdfs_dir = script_dir / "TripPdfs"
+        # allow configuration of where PDFs are written
+        pdfs_dir = None
+        try:
+            configured = config.get('output_folder')
+            if configured:
+                pdfs_dir = Path(configured)
+        except Exception:
+            pdfs_dir = None
+        if not pdfs_dir:
+            pdfs_dir = script_dir / "TripPdfs"
         try:
             pdfs_dir.mkdir(parents=True, exist_ok=True)
         except Exception:
@@ -4767,7 +4776,10 @@ def main():
         epilog=lang.t("cli.argparse_epilog"),
     )
     
-    parser.add_argument('bsp_folder', nargs='?', help=lang.t("cli.argparse_bsp_help"))
+    # positional argument for Polarsteps Data (BSPData) folder; optional, can also be set in config
+    # allow zero or more Polarsteps Data folder paths; if omitted, fallback to config/default
+    parser.add_argument('bsp_folder', nargs='*', help=lang.t("cli.argparse_bsp_help"))
+    parser.add_argument('--output-folder', help=lang.t("cli.argparse_output_help"))
     parser.add_argument('--clear-cache', action='store_true', help=lang.t("cli.argparse_clear_cache"))
     # Statistics flags
     parser.add_argument('--stats', action='store_true', help='Show statistics for trips (prints summary)')
@@ -4787,19 +4799,71 @@ def main():
 
     args = parser.parse_args()
     
-    # Determine BSPData folder
+# Determine Polarsteps Data folder(s) (CLI argument overrides config)
+    bsp_data_folders = []
     if args.bsp_folder:
-        bsp_data_folder = Path(args.bsp_folder)
+        # args.bsp_folder is a list of path strings
+        for p in args.bsp_folder:
+            if p:
+                bsp_data_folders.append(Path(p))
     else:
-        bsp_data_folder = script_dir / "BSPData"
-        
-        if not bsp_data_folder.exists():
-            bsp_data_folder = Path.cwd() / "BSPData"
-    
-    if not bsp_data_folder.exists():
-        print(lang.t("cli.error_bsp_not_found", path=bsp_data_folder))
-        print(lang.t("cli.usage"))
+        # read config; support list or single string and legacy key
+        cfg_val = config.get('polarsteps_data_folder', None)
+        if not cfg_val:
+            cfg_val = config.get('bsp_folder', None)
+        if isinstance(cfg_val, (list, tuple)):
+            for p in cfg_val:
+                if p:
+                    bsp_data_folders.append(Path(p))
+        elif cfg_val:
+            bsp_data_folders.append(Path(cfg_val))
+        else:
+            bsp_data_folders.append(script_dir / 'BSPData')
+            if not bsp_data_folders[0].exists():
+                bsp_data_folders[0] = Path.cwd() / 'BSPData'
+
+    # validate folders and collect trips
+    valid_folders = []
+    for bf in bsp_data_folders:
+        if bf.exists():
+            valid_folders.append(bf)
+        else:
+            print(lang.t("cli.error_bsp_not_found", path=bf))
+    if not valid_folders:
+        return
+    # combine trips from all specified folders
+    all_trips = []
+    for bf in valid_folders:
+        try:
+            all_trips.extend(find_trips(bf))
+        except Exception as e:
+            print(lang.t("cli.error_list_trips", error=e))
+            return
+    # remove duplicates
+    seen = set()
+    trips = []
+    for t in all_trips:
+        s = str(t)
+        if s not in seen:
+            seen.add(s)
+            trips.append(t)
+
+    if not trips:
+        print(lang.t("cli.no_trips_in_bsp"))
         sys.exit(1)
+    
+    # Determine output folder for generated PDFs (config or CLI)
+    if args.output_folder:
+        output_folder = Path(args.output_folder)
+    else:
+        output_folder = Path(config.get('output_folder', '')) if config.get('output_folder') else script_dir / 'TripPdfs'
+    # ensure directory exists when used later
+    try:
+        output_folder.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    # store back into config so render_trip can pick it up
+    config['output_folder'] = str(output_folder)
     
     # Move legacy cache locations into cache/
     _migrate_legacy_cache_paths()
@@ -4815,10 +4879,12 @@ def main():
         print(lang.t("cli.cache_cleared_check"))
         return
     
-    print(lang.t("cli.scanning_trips", path=bsp_data_folder))
-    
-    # Find all trips
-    trips = find_trips(bsp_data_folder)
+    # report which folders were scanned
+    try:
+        paths_str = ", ".join(str(p) for p in valid_folders)
+        print(lang.t("cli.scanning_trips", path=paths_str))
+    except Exception:
+        pass
 
     # Handle statistics from CLI
     if args.stats:

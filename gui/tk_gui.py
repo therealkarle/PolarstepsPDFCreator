@@ -1,7 +1,7 @@
 """Simple Tkinter GUI for PolarstepsPDFCreator
 
 Features:
-- Choose BSPData folder
+- Choose Polarsteps Data folder
 - List available trips (multi-select)
 - Render selected trips using existing render_trip function in background
 - Simple progress and stop control
@@ -304,6 +304,7 @@ class ToggleSwitch(tk.Canvas):
 
 
 SCRIPT_DIR = Path(__file__).resolve().parents[1]
+# default path used when no folder has been chosen (folder name remains BSPData for compatibility)
 DEFAULT_BSP = SCRIPT_DIR / "BSPData"
 
 
@@ -399,7 +400,13 @@ class App(tk.Tk):
         self.title(self.lang.t('gui.app_title'))
         self.geometry("800x600")
 
-        self.bsp_path = tk.StringVar(value=str(DEFAULT_BSP))
+        # initial paths can come from config file
+        # support new key polarsteps_data_folder, fall back to bsp_folder for compatibility
+        bsp_initial = cfg.get('polarsteps_data_folder') or cfg.get('bsp_folder') or str(DEFAULT_BSP)
+        output_initial = cfg.get('output_folder') or str(SCRIPT_DIR / 'TripPdfs')
+        self.bsp_path = tk.StringVar(value=str(bsp_initial))
+        self.output_path = tk.StringVar(value=str(output_initial))
+        self.output_path = tk.StringVar(value=str(SCRIPT_DIR / 'TripPdfs'))
         self.status_text = tk.StringVar(value=self.lang.t('gui.status_ready'))
         
         # Filter variables
@@ -414,6 +421,17 @@ class App(tk.Tk):
         self.filter_config_overrides = tk.StringVar(value="")  # e.g., key=value, key2=42
 
         self._create_widgets()
+        # ensure the GUI uses any path overrides from config
+        try:
+            # update bsp and output path if config changed
+            cfg_bsp = cfg.get('bsp_folder')
+            if cfg_bsp:
+                self.bsp_path.set(str(cfg_bsp))
+            cfg_out = cfg.get('output_folder')
+            if cfg_out:
+                self.output_path.set(str(cfg_out))
+        except Exception:
+            pass
 
         # Resize and center window to fit content (but limit to screen size)
         try:
@@ -462,8 +480,13 @@ class App(tk.Tk):
         frm_top.pack(fill=tk.X, padx=10, pady=(10, 6))
 
         ttk.Label(frm_top, text=self.lang.t('gui.bsp_folder')).pack(side=tk.LEFT)
-        ttk.Entry(frm_top, textvariable=self.bsp_path, width=60).pack(side=tk.LEFT, padx=(6, 6))
+        ttk.Entry(frm_top, textvariable=self.bsp_path, width=45).pack(side=tk.LEFT, padx=(6, 6))
         ttk.Button(frm_top, text=self.lang.t('gui.browse'), command=self._on_browse).pack(side=tk.LEFT)
+        # note: multiple folders may be entered separated by semicolons or spaces
+        # output folder chooser next to input (new)
+        ttk.Label(frm_top, text=self.lang.t('gui.output_folder')).pack(side=tk.LEFT, padx=(20,0))
+        ttk.Entry(frm_top, textvariable=self.output_path, width=45).pack(side=tk.LEFT, padx=(6, 6))
+        ttk.Button(frm_top, text=self.lang.t('gui.browse'), command=self._on_browse_output).pack(side=tk.LEFT)
         # If Playwright is missing, show quick-install button
         if m.sync_playwright is None:
             self.playwright_btn = ttk.Button(frm_top, text=self.lang.t('gui.install_playwright'), command=self._on_install_playwright)
@@ -785,10 +808,21 @@ class App(tk.Tk):
             pass
 
     def _on_browse(self):
-        path = filedialog.askdirectory(initialdir=self.bsp_path.get() or str(DEFAULT_BSP))
+        path = filedialog.askdirectory(initialdir=self.bsp_path.get().split(';')[0] or str(DEFAULT_BSP))
         if path:
-            self.bsp_path.set(path)
+            existing = self.bsp_path.get().strip()
+            if existing:
+                # append with semicolon separator
+                self.bsp_path.set(existing + ";" + path)
+            else:
+                self.bsp_path.set(path)
             self.load_trips()
+
+    def _on_browse_output(self):
+        """Handler to browse for an output directory."""
+        path = filedialog.askdirectory(initialdir=self.output_path.get() or str(SCRIPT_DIR / 'TripPdfs'))
+        if path:
+            self.output_path.set(path)
 
     # Config editor
     def _load_config_text(self):
@@ -1049,6 +1083,9 @@ class App(tk.Tk):
         grp_general.pack(fill=tk.X, padx=6, pady=(6,4))
         add_entry(grp_general, self.lang.t('gui.form.language'), 'language')
         add_entry(grp_general, self.lang.t('gui.form.pdf_language'), 'pdf_language')
+        # new path settings for Polarsteps Data and output
+        add_entry(grp_general, self.lang.t('gui.form.bsp_folder'), 'polarsteps_data_folder', var_type='path')
+        add_entry(grp_general, self.lang.t('gui.form.output_folder'), 'output_folder', var_type='path')
         add_entry(grp_general, self.lang.t('gui.form.show_rendered_trips'), 'show_rendered_trips', var_type='bool')
         add_entry(grp_general, self.lang.t('gui.form.open_pdf_after_render'), 'open_pdf_after_render', var_type='bool')
 
@@ -1684,6 +1721,15 @@ class App(tk.Tk):
             self._applied_config = cfg
         except Exception:
             self._applied_config = None
+        # if the user changed paths via the form, sync them to the main UI
+        try:
+            # sync config value(s) to UI - prefer new key but accept old for backward compatibility
+            if 'polarsteps_data_folder' in cfg or 'bsp_folder' in cfg:
+                self.bsp_path.set(str(cfg.get('polarsteps_data_folder') or cfg.get('bsp_folder') or ''))
+            if 'output_folder' in cfg:
+                self.output_path.set(str(cfg.get('output_folder') or ''))
+        except Exception:
+            pass
 
         # Persist settings to disk using existing save routine (will preserve comments when possible)
         try:
@@ -1993,16 +2039,32 @@ class App(tk.Tk):
         # Clear tree and load
         for ch in self.trips_tree.get_children():
             self.trips_tree.delete(ch)
-        bsp = Path(self.bsp_path.get())
-        if not bsp.exists():
-            messagebox.showerror(self.lang.t('gui.error'), self.lang.t('cli.error_bsp_not_found').format(path=bsp))
+        raw = self.bsp_path.get().strip()
+        # split on semicolon or space and remove empties
+        parts = [p for p in re.split(r'[;\s]+', raw) if p]
+        if not parts:
+            messagebox.showerror(self.lang.t('gui.error'), self.lang.t('cli.error_bsp_not_found').format(path=''))
             return
-        try:
-            trips = m.find_trips(bsp)
-        except Exception as e:
-            messagebox.showerror(self.lang.t('gui.error'), self.lang.t('gui.error_list_trips').format(error=e))
-            return
-        self._trips = trips
+        trips = []
+        for p in parts:
+            bp = Path(p)
+            if not bp.exists():
+                messagebox.showerror(self.lang.t('gui.error'), self.lang.t('cli.error_bsp_not_found').format(path=bp))
+                return
+            try:
+                trips.extend(m.find_trips(bp))
+            except Exception as e:
+                messagebox.showerror(self.lang.t('gui.error'), self.lang.t('gui.error_list_trips').format(error=e))
+                return
+        # deduplicate by path
+        seen = set()
+        unique = []
+        for t in trips:
+            s = str(t)
+            if s not in seen:
+                seen.add(s)
+                unique.append(t)
+        self._trips = unique
         cm = m.CacheManager(SCRIPT_DIR / 'cache' / 'rendered_trips_cache.json')
 
         # Apply filters
