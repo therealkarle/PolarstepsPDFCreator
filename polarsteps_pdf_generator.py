@@ -4499,7 +4499,9 @@ def prompt_loop(trips: list, cache_manager: CacheManager, script_dir: Path, conf
                             label = f"{ps}_{pe}"
                     return f"stats_{label}.{suffix}"
 
+                # ask user whether to export JSON/map to default TripPdfs folder
                 try:
+                    print()  # blank line before prompt
                     quick = input('Quick export JSON+Map to default `TripPdfs` folder? [y/N]: ').strip()
                     if quick and quick.lower() in ('y', 'yes'):
                         outdir = Path('TripPdfs')
@@ -4518,28 +4520,6 @@ def prompt_loop(trips: list, cache_manager: CacheManager, script_dir: Path, conf
                                 print('No overview map generated to export.')
                         except Exception as e:
                             print(f"Map export fehlgeschlagen: {e}")
-                    else:
-                        # interactive export options
-                        try:
-                            path = input('Export JSON to file (enter path or leave empty to skip): ').strip()
-                            if path:
-                                ok = sg.export_stats_json(agg, Path(path))
-                                print(f"JSON export {'erfolgreich' if ok else 'fehlgeschlagen'}: {path}")
-                        except Exception:
-                            pass
-
-                        try:
-                            path = input('Export overview map to PNG (enter path or leave empty to skip): ').strip()
-                            if path:
-                                mp = sg.generate_overview_map(trips_to_stat)
-                                try:
-                                    with open(path, 'wb') as mf:
-                                        mf.write(mp)
-                                    print(f"Map export geschrieben: {path}")
-                                except Exception as e:
-                                    print(f"Map export fehlgeschlagen: {e}")
-                        except Exception:
-                            pass
                 except Exception:
                     pass
 
