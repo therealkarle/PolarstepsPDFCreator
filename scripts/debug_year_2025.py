@@ -111,6 +111,7 @@ def main():
     print("Computing aggregate stats for 2025 (verbose + debug_countries)...\n")
     agg = sg.compute_aggregate_stats(trips_2025, year=YEAR, verbose=True, debug_countries=True)
     print(json.dumps(agg, indent=2, ensure_ascii=False))
+    print(f"Computed period days: {agg.get('period_total_days')} (should be 365 for {YEAR})")
 
 
 if __name__ == '__main__':

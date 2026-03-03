@@ -2407,7 +2407,7 @@ class App(tk.Tk):
         self.stop_flag.set()
         self.status_text.set("Stopping...")
 
-    def _get_filtered_trips(self):
+    def _get_filtered_trips(self, include_rendered: bool = True):
         """Return list of trips filtered by the current date/year and render settings.
 
         This is used by statistics so the dialog reflects the current time selection
@@ -2455,8 +2455,15 @@ class App(tk.Tk):
         # otherwise leave year,start_date,end_date None for no filter
 
         filtered = m.filter_trips_by_date(trips, year=year, start_date=start_date, end_date=end_date)
-        if not show_all:
+        # For statistics we usually want the complete period view independent of
+        # render cache; include_rendered=False keeps legacy behaviour when needed.
+        if not include_rendered and not show_all:
             filtered = [t for t in filtered if not cm.is_rendered(t)]
+        # remember the parameters so _stats_worker can pass them to the
+        # statistics generator; explicit selection bypasses these later.
+        self._stats_filter_year = year
+        self._stats_filter_start = start_date
+        self._stats_filter_end = end_date
         return filtered
 
     def _on_show_statistics(self):
@@ -2469,7 +2476,7 @@ class App(tk.Tk):
                 trips = [source[int(iid)] for iid in sel]
             else:
                 # no selection: use trips matching current time filter
-                trips = self._get_filtered_trips()
+                trips = self._get_filtered_trips(include_rendered=True)
         except ValueError:
             messagebox.showerror(self.lang.t('gui.invalid_date_title'), self.lang.t('gui.invalid_date_msg'))
             return
@@ -2513,7 +2520,17 @@ class App(tk.Tk):
                 mg = m.MapGenerator()
 
             sg = m.StatisticsGenerator(map_generator=mg, config=cfg)
-            agg = sg.compute_aggregate_stats(trips)
+            # pass along any active filters so the returned period covers the
+            # full requested interval instead of just the travel dates
+            year = getattr(self, '_stats_filter_year', None)
+            start_date = getattr(self, '_stats_filter_start', None)
+            end_date = getattr(self, '_stats_filter_end', None)
+            # if trips were explicitly selected, ignore the prior filter
+            if self.trips_tree.selection():
+                year = None
+                start_date = None
+                end_date = None
+            agg = sg.compute_aggregate_stats(trips, year=year, start_date=start_date, end_date=end_date)
 
             display_agg = dict(agg or {})
             display_agg['countries'] = sg.localize_country_counts(agg.get('countries', {}), language_code=language_code)
@@ -3000,9 +3017,9 @@ class StatsDialog(tk.Toplevel):
                     from datetime import date as _date
                     psd = _date.fromisoformat(ps)
                     ped = _date.fromisoformat(pe)
-                    period_days = (ped - psd).days + 1
+                    period_days = agg.get('period_total_days') or ((ped - psd).days + 1)
                     travel_days = agg.get('total_travel_days', 0)
-                    non_travel = max(0, period_days - travel_days)
+                    non_travel = agg.get('period_non_travel_days') if 'period_non_travel_days' in agg else max(0, period_days - travel_days)
                     pct = (travel_days / period_days * 100) if period_days else 0
                     summary_lines.append(self.lang.t(
                         "gui.stats_period_ratio",

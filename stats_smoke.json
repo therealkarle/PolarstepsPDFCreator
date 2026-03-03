@@ -1,0 +1,29 @@
+{
+  "trip_count": 10,
+  "total_km": 3314.39,
+  "total_photos": 34,
+  "total_videos": 0,
+  "total_steps": 68,
+  "total_travel_days": 34,
+  "total_country_days": 34,
+  "unmatched_days": 0,
+  "period_start": "2007-04-05",
+  "period_end": "2010-07-16",
+  "period_total_days": 1199,
+  "period_non_travel_days": null,
+  "visited_countries_count": 6,
+  "visited_countries_percent": 3.08,
+  "countries": {
+    "Germany": 9,
+    "Italy": 11,
+    "Principality of Monaco": 1,
+    "Austria": 2,
+    "France": 3,
+    "Switzerland": 8
+  },
+  "continents": {
+    "Europe": 34
+  },
+  "visited_continents_count": 1,
+  "visited_continents_percent": 14.29
+}

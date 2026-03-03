@@ -2495,9 +2495,47 @@ class StatisticsGenerator:
         return stats
 
     def compute_aggregate_stats(self, trip_paths: list, year: int = None, start_date: datetime = None, end_date: datetime = None, progress_callback=None, verbose: bool = False, debug_countries: bool = False) -> dict:
-        """Aggregate stats across a list of trip paths (Path objects). Filters by year or date range when provided.
-        Optional progress_callback(processed:int, total:int, trip:Path) called as each trip is processed.
-        If verbose is True, includes per-trip breakdown in returned dict under key 'per_trip'.
+        """Aggregate stats across a list of trip paths (Path objects).
+
+        Future trips (where the recorded start date is after today's date) are
+        ignored entirely; only past and current trips contribute to statistics.
+        Additionally, when computing travel days the function will not count any
+        dates later than today even if a trip spans into the future.  This means
+        aggregated day counts and reported period bounds are always capped at
+        the current date.
+
+        Filtering and period handling:
+          * If `year` is given, trips whose start date falls in that year are
+            considered.  When no explicit start/end range is supplied the returned
+            period will default to the full calendar year.
+          * If `start_date` and `end_date` are provided the statistics are limited
+            to that interval, and the resulting `period_start`/`period_end` in the
+            returned aggregate reflect the entire range (not just the travel
+            days within it).
+          * Otherwise the period is derived from the min/max of the travel dates
+            actually encountered (all-time mode).
+
+        Travel day semantics:
+          * "Travel days" are computed from each trip's declared start/end dates
+            (inclusive) clipped to the requested interval.  This matches the
+            intuitive notion of days on a trip and avoids missing days when step
+            timestamps are sparse or absent.
+          * Step timestamps are still used for finer-grained country detection
+            and assignment, but they no longer control the day count.  If a step
+            timestamp lies outside the trip span it is ignored for day counting.
+
+        Optional progress_callback(processed:int, total:int, trip:Path) called
+        as each trip is processed.
+
+        Returns a dictionary containing summary values. The returned 'trip_count'
+        value corresponds to the number of trips actually processed (after
+        filtering and excluding future trips) rather than the length of the
+        supplied list. In addition to the
+          * 'period_start'/'period_end' – ISO dates for the evaluated interval
+          * 'period_total_days' – number of days in the period (inclusive)
+          * 'period_non_travel_days' – period length minus travel days (or None)
+        If verbose is True, includes per-trip breakdown in returned dict under
+        key 'per_trip'.
         If debug_countries is True, shows detailed country detection info."""
         all_stats = []
         total_km = 0.0
@@ -2507,6 +2545,18 @@ class StatisticsGenerator:
         travel_dates = set()
         country_days = {}  # country -> set(dates)
         unmatched_days = set()  # track days not assigned to any country
+        included_trips = 0  # count of trips actually considered (after filtering)
+
+        # If year is requested but no explicit start/end range supplied, automatically
+        # treat the filter as the full calendar year.  This drives both inclusion and
+        # subsequent per-trip date trimming.
+        if year and not start_date and not end_date:
+            try:
+                start_date = datetime(int(year), 1, 1)
+                end_date = datetime(int(year), 12, 31)
+            except Exception:
+                # ignore invalid year, leave dates unset
+                pass
 
         total = len(trip_paths)
 
@@ -2582,47 +2632,77 @@ class StatisticsGenerator:
                 except Exception:
                     pass
 
-            # determine if trip should be included by year or date range
+            # determine if trip should be included by supplied filter range
             s_dt, e_dt = tp.get_trip_dates()
-            if year and s_dt:
+            # skip trips that haven't started yet (future trips should not count)
+            try:
+                today = datetime.now().date()
+                if s_dt and s_dt.date() > today:
+                    # entirely in the future, ignore
+                    continue
+            except Exception:
+                pass
+
+            # if there is an active date range, skip trips that do not overlap it
+            if start_date or end_date:
+                overlaps = True
+                if s_dt or e_dt:
+                    s = s_dt.date() if s_dt else None
+                    e = e_dt.date() if e_dt else None
+                    if start_date and e and e < start_date.date():
+                        overlaps = False
+                    if end_date and s and s > end_date.date():
+                        overlaps = False
+                else:
+                    overlaps = False
+
+                # fallback: include when at least one step date is in range
+                if not overlaps:
+                    step_overlap = False
+                    for st in tp.steps:
+                        data = st.get('data', {}) or {}
+                        for key in ('start_time', 'startDate', 'start_date', 'time', 'date', 'timestamp'):
+                            if key in data and data[key]:
+                                dt = self._parse_date(data[key])
+                                if not dt:
+                                    continue
+                                d = dt.date()
+                                if start_date and d < start_date.date():
+                                    continue
+                                if end_date and d > end_date.date():
+                                    continue
+                                step_overlap = True
+                                break
+                        if step_overlap:
+                            break
+                    if not step_overlap:
+                        continue
+            # if no range provided but year parameter existed (and was invalidated
+            # above) we still default to filtering by start year, keeping previous
+            # behaviour for callers that passed year without dates.
+            elif year and s_dt:
                 if s_dt.year != int(year):
                     continue
-            if start_date or end_date:
-                # if trip has no dates, skip
-                if not s_dt and not e_dt:
-                    continue
-                # check overlap
-                s = s_dt.date() if s_dt else None
-                e = e_dt.date() if e_dt else None
-                if start_date and e and e < start_date.date():
-                    continue
-                if end_date and s and s > end_date.date():
-                    continue
             # collect per-trip stats via compute_trip_stats but filter step dates by range
+            # trip passed all filters – include it
+            included_trips += 1
             ts = self.compute_trip_stats(tp)
             total_km += float(ts.get('total_km') or 0)
             total_photos += int(ts.get('photos') or 0)
             total_videos += int(ts.get('videos') or 0)
             total_steps += int(ts.get('steps') or 0)
-            # collect travel dates via step dates and trip dates
-            # Use the same logic as compute_trip_stats: recompute travel date list
-            tmp_dates = set()
-            for s in tp.steps:
-                data = s.get('data', {}) or {}
-                for key in ('start_time', 'startDate', 'start_date', 'time', 'date', 'timestamp'):
-                    if key in data and data[key]:
-                        dt = self._parse_date(data[key])
-                        if dt:
-                            tmp_dates.add(dt.date())
-                            break
-            if tp.get_trip_dates()[0] and tp.get_trip_dates()[1]:
-                s_dt, e_dt = tp.get_trip_dates()
+            # collect travel dates via step dates and trip dates (span)
+            # collect span dates (every day between trip start and end)
+            span_dates = set()
+            if s_dt and e_dt:
                 cur = s_dt.date()
-                while cur <= e_dt.date():
-                    tmp_dates.add(cur)
+                endd = e_dt.date()
+                while cur <= endd:
+                    span_dates.add(cur)
                     cur = cur + timedelta(days=1)
-                    if len(tmp_dates) > 10000:
-                        break
+            # we count travel days as the full span of the trip; step dates
+            # are only used for country detection, not for day counting.
+            tmp_dates = set(span_dates)
             # filter tmp_dates by provided date range
             if start_date:
                 tmp_dates = set(d for d in tmp_dates if d >= start_date.date())
@@ -2653,12 +2733,6 @@ class StatisticsGenerator:
                         dt = self._parse_date(data[key])
                         if dt:
                             step_dates.add(dt.date())
-                if not step_dates and tp.get_trip_dates()[0] and tp.get_trip_dates()[1]:
-                    s_dt, e_dt = tp.get_trip_dates()
-                    cur = s_dt.date()
-                    while cur <= e_dt.date():
-                        step_dates.add(cur)
-                        cur = cur + timedelta(days=1)
                 if start_date:
                     step_dates = set(d for d in step_dates if d >= start_date.date())
                 if end_date:
@@ -2802,6 +2876,13 @@ class StatisticsGenerator:
             if verbose:
                 all_stats.append(per_trip_summary)
 
+        # clamp travel_dates to today so future-dates within trips are ignored
+        try:
+            today = datetime.now().date()
+            travel_dates = set(d for d in travel_dates if d <= today)
+        except Exception:
+            pass
+
         # Normalize/merge country keys (handles short codes from cache or inconsistent keys)
         normalized_country_days = {}
         for raw_country, dates_set in country_days.items():
@@ -2840,20 +2921,51 @@ class StatisticsGenerator:
                 print(f"  Unmatched dates: {sorted(unmatched_days)}")
             if continents_days:
                 print(f"  Continents assignment: { {k: len(v) for k,v in continents_days.items()} }")
-        
-        # compute overall period for all-time mode
-        period_start = min(travel_dates) if travel_dates else None
-        period_end = max(travel_dates) if travel_dates else None
-        # if all-time, non-travel days = days between first travel day and today minus travel days
+
+        # determine overall period for returned aggregate
+        # if the caller supplied a start/end range, use that range exactly
+        # otherwise if a year was requested (and no explicit range), use the full year
+        # fall back to travel_dates bounds only when nothing explicit provided
+        if start_date and end_date:
+            period_start = start_date.date()
+            period_end = end_date.date()
+        elif year:
+            try:
+                period_start = date(year, 1, 1)
+                period_end = date(year, 12, 31)
+            except Exception:
+                # invalid year, fallback to travel_dates
+                period_start = min(travel_dates) if travel_dates else None
+                period_end = max(travel_dates) if travel_dates else None
+        else:
+            # compute overall period for all-time mode
+            period_start = min(travel_dates) if travel_dates else None
+            period_end = max(travel_dates) if travel_dates else None
+
+        # never report a period that extends past today
+        try:
+            if period_end and period_end > today:
+                period_end = today
+        except Exception:
+            pass
+
+        # compute non-travel days when we have a defined period
         non_travel_days = None
-        if period_start:
-            non_travel_days = (datetime.now().date() - period_start).days + 1 - total_travel_days
+        if period_start and period_end:
+            # if period was explicitly specified (date range or year), we count all days
+            if start_date or end_date or year:
+                total_period = (period_end - period_start).days + 1
+                non_travel_days = total_period - total_travel_days
+            else:
+                # all-time case: leave None (previous behaviour computed until today, but
+                # the value is misleading so we drop it)
+                non_travel_days = None
 
         visited_countries_count = len(country_counts)
         visited_countries_percent = round((visited_countries_count / float(WORLD_COUNTRY_COUNT)) * 100.0, 2) if WORLD_COUNTRY_COUNT else None
 
         aggregate = {
-            'trip_count': len(trip_paths),
+            'trip_count': included_trips,
             'total_km': round(total_km, 2),
             'total_photos': total_photos,
             'total_videos': total_videos,
@@ -2863,6 +2975,8 @@ class StatisticsGenerator:
             'unmatched_days': unmatched_count,
             'period_start': period_start.isoformat() if period_start else None,
             'period_end': period_end.isoformat() if period_end else None,
+            'period_total_days': ((period_end - period_start).days + 1) if period_start and period_end else None,
+            'period_non_travel_days': non_travel_days,
             'visited_countries_count': visited_countries_count,
             'visited_countries_percent': visited_countries_percent,
             'countries': country_counts,
@@ -3591,31 +3705,121 @@ def find_trips(bsp_data_folder: Path) -> list:
 
 
 def filter_trips_by_date(trips: list, year: int = None, start_date: datetime = None, end_date: datetime = None) -> list:
-    """Filter trips by year or date range."""
+    """Return only trips that overlap the specified period.
+
+    * A year filter behaves like ``start_date=YEAR-01-01, end_date=YEAR-12-31``.
+    * A date range will include trips whose date interval intersects the range.
+    * Trips with no recorded start/end dates are ignored.
+    * Trips that have not begun yet (start date in the future) are also skipped.
+
+    Unlike the old implementation, this inspects the trip's actual start/end
+    timestamps (via ``TripParser.get_trip_dates``) rather than only the start
+    date, so a selection inside a single trip period will still return that trip.
+    """
+    # quick exit when no restrictions
     if not year and not start_date and not end_date:
-        return trips
-    
+        # still strip out any trips that have a start date in the future
+        today = datetime.now().date()
+        remaining = []
+        for trip in trips:
+            try:
+                tp = TripParser(trip)
+                tp.load()
+                s_dt, _ = tp.get_trip_dates()
+                if s_dt and s_dt.date() > today:
+                    continue
+            except Exception:
+                pass
+            remaining.append(trip)
+        return remaining
+
+    # if year was requested but no explicit range passed, treat it as a full-year
+    # interval; this mirrors the behaviour added to compute_aggregate_stats.
+    if year and not (start_date or end_date):
+        try:
+            start_date = datetime(int(year), 1, 1)
+            end_date = datetime(int(year), 12, 31, 23, 59, 59)
+        except Exception:
+            start_date = None
+            end_date = None
+
+    def _parse_any_dt(value):
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            return value
+        try:
+            if isinstance(value, (int, float)):
+                return datetime.fromtimestamp(int(value))
+            if isinstance(value, str):
+                try:
+                    return datetime.fromisoformat(value)
+                except Exception:
+                    for fmt in ("%Y-%m-%d", "%d.%m.%Y", "%Y/%m/%d"):
+                        try:
+                            return datetime.strptime(value, fmt)
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+        return None
+
     filtered = []
     for trip in trips:
-        trip_start = get_trip_start_date(trip)
-        if trip_start == 0:
+        try:
+            tp = TripParser(trip)
+            tp.load()
+            s_dt, e_dt = tp.get_trip_dates()
+        except Exception:
             continue
-        
-        trip_date = datetime.fromtimestamp(trip_start)
-        
-        if year:
-            if trip_date.year == year:
-                filtered.append(trip)
-        elif start_date and end_date:
-            if start_date <= trip_date <= end_date:
-                filtered.append(trip)
-        elif start_date:
-            if trip_date >= start_date:
-                filtered.append(trip)
-        elif end_date:
-            if trip_date <= end_date:
-                filtered.append(trip)
-    
+
+        if not s_dt and not e_dt:
+            # no useful dates
+            continue
+
+        # ignore trips that are entirely in the future
+        try:
+            today = datetime.now().date()
+            if s_dt and s_dt.date() > today:
+                continue
+        except Exception:
+            pass
+
+        # check overlap with range if provided
+        if start_date or end_date:
+            s = s_dt if s_dt else None
+            e = e_dt if e_dt else None
+            overlaps = True
+            if start_date and e and e < start_date:
+                overlaps = False
+            if end_date and s and s > end_date:
+                overlaps = False
+
+            # fallback for incomplete/rough trip bounds: include trip if any step
+            # timestamp falls inside the requested range
+            if not overlaps:
+                step_overlap = False
+                for step in tp.steps or []:
+                    data = step.get('data', {}) or {}
+                    for key in ('start_time', 'startDate', 'start_date', 'time', 'date', 'timestamp'):
+                        dt = _parse_any_dt(data.get(key))
+                        if not dt:
+                            continue
+                        if start_date and dt < start_date:
+                            continue
+                        if end_date and dt > end_date:
+                            continue
+                        step_overlap = True
+                        break
+                    if step_overlap:
+                        break
+                if not step_overlap:
+                    continue
+
+            filtered.append(trip)
+        else:
+            # no explicit range (should not happen because we early exit)
+            filtered.append(trip)
     return filtered
 
 

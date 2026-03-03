@@ -96,6 +96,31 @@ Notes:
 | `l` or `last` | Last trip |
 | `l-1` | Second to last trip |
 
+### Statistics 📊
+
+You can ask the program to print a summary of your trips using the `stats` or `s` command at the prompt, or by running
+
+```bash
+python polarsteps_pdf_generator.py --stats
+```
+
+By default statistics are computed across all trips.  Use the same filtering flags as
+for rendering to restrict the period:
+
+| Flag | Description |
+|------|-------------|
+| `-y YEAR` | Limit to trips that start in `YEAR`; the returned period will be the whole calendar year (365/366 days) |
+| `-d START;END` | Limit to the date range; the summary will report the full interval, not merely the days you were travelling |
+| `--from YYYY-MM-DD` / `--to YYYY-MM-DD` | Alternative long‑form range options |
+
+A “travel/non‑travel” line is shown with the number of days in the selected interval and the
+subset of those days which fall inside the declared span of each trip.  In other words, we count
+physical days on the road between a trip’s start and end dates (clipped to the interval);
+missing step timestamps no longer cause whole days to vanish.  Previously only steps with
+timestamps were counted, which could skew the result downward; the generator now uses trip
+spans, giving the intuitive totals you expect (e.g. 96 days in 2025 for my data).  The interval
+still honours your explicit range so a year‑filter always yields the full 365‑day denominator.
+
 ### Examples
 
 Examples:
