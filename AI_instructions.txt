@@ -1,0 +1,21 @@
+# KI Anweisungen
+
+Dieses Dokument dient als Anleitung für die KI im Projekt.
+
+- Alle Textelemente, die der Benutzer sieht, müssen in den Language Packs vorhanden sein.
+  - Das betrifft insbesondere GUI-Texte, Fehlermeldungen, Menüs, Schaltflächen und andere sichtbare Beschriftungen.
+  - Die Language Packs befinden sich im Verzeichnis `LanguagePack/` (z.B. `de.json`, `en.json`).
+
+- Änderungen an sichtbaren Texten müssen immer auch in den entsprechenden Sprachdateien ergänzt werden.
+
+- Bei neuen Funktionen oder Benutzeroberflächen beachten:
+  1. Füge Schlüssel in allen relevanten Language Pack-Dateien hinzu.
+  2. Verwende diese Schlüssel in Code und Templates anstelle von hardcodierten strings.
+
+- Halte dich an bestehende Konventionen für die Lokalisierung, wie sie im Projekt bereits genutzt werden.
+
+- Zusätzliche Hinweise:
+  - Texte für Protokoll- oder Debug-Ausgaben müssen nicht zwingend in Language Packs stehen.
+  - Standardwerte und Interna dürfen auf Englisch bleiben, sofern sie nicht direkt dem Nutzer angezeigt werden.
+
+Diese Datei dient als Referenz für Entwickler und die KI, um die Mehrsprachigkeit konsistent umzusetzen.
