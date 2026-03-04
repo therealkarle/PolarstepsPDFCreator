@@ -5,6 +5,10 @@ BSPData/
 TripPdfs/
 tmp_pdf_text.txt
 stats_smoke_map.png
+step_diff.png
+stats_smoke.json
+debug_full.txt
+debug_output.txt
 
 # Temporary and runtime folders
 temp/
