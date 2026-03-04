@@ -1,17 +1,79 @@
-# Ignore BSP data folders
+# PolarstepsPDFCreator: files & folders not needed by end users or other developers
+
+# Data exports and generated outputs
 BSPData/
-
-# Ignore generated trip PDFs
 TripPdfs/
+tmp_pdf_text.txt
 
-#Igqnore virtual environment folder
-venv/
-
-# Ignore cache files
-__pycache__/
-cache/
+# Temporary and runtime folders
 temp/
-debug/
+temp/html/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+.Python
+
+# Python compiled files
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+
+# Build / packaging
+build/
+dist/
+.eggs/
+*.egg-info/
+pip-wheel-metadata/
+
+# Caches and application runtime artifacts
+cache/
+.cache/
 .emoji_cache/
 .map_marker_cache/
+.pytest_cache/
+.mypy_cache/
+
+# Debug / local data and logs
+debug/
+debug_*.txt
+debug_full.txt
+debug_output.txt
+*.log
+
+# Databases
+*.sqlite3
+*.sqlite
+*.db
+
+# Editor / OS files
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+.DS_Store
+Thumbs.db
+*.swp
+*~
+*.bak
+
+# Test / coverage outputs
+.coverage
+coverage.xml
+nosetests.xml
+htmlcov/
+
+# Environment / secrets
+.env
+.env.*
+secrets/
+*.pem
+*.key
+
+# Misc
+*.tmp
 
