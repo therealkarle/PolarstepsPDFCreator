@@ -1,5 +1,8 @@
 # Polarsteps PDF Generator
 
+**Graphical interface (Tkinter) is the primary user experience; a full-featured
+command‑line mode is also available.**
+
 Generate beautiful PDF travel journals from your downloaded Polarsteps data.
 
 ## Features
@@ -10,8 +13,13 @@ Generate beautiful PDF travel journals from your downloaded Polarsteps data.
 - 📎 **Additional Media Appendix**: Undisplayed photos and all video links at the end
 - 🌡️ **Weather Info**: Temperature and conditions for each step
 - 📝 **Descriptions**: Full travel journal text with formatting
-- � **GUI Date Picker (optional)**: Improved year/date input in the GUI (requires the optional `tkcalendar` package)- ⚙️ **Settings Tab**: Edit the `config.toml` directly in the GUI and view/install required packages from the built-in package manager
-  - New: **Install Uninstalled** button to install only packages that are not currently installed (uses detected status from `requirements.txt` / optional packages).- �💾 **Cache System**: Tracks rendered trips and provides batch rendering
+- 🖥️ **Tkinter GUI**: Primary interface; renders and configures trips in a sortable table.
+  - 📅 **Optional Date Picker** (requires `tkcalendar`)
+- ⚙️ **Settings Tab**: Edit the `config.toml` directly in the GUI and view/install
+  required packages from the built-in package manager.
+  - New: **Install Uninstalled** button to add only missing packages based on
+    `requirements.txt` and optional dependencies.
+- 💾 **Cache System**: Tracks rendered trips and provides batch rendering
 - 🔄 **Batch Processing**: Render multiple trips with date filters
 
 ## Installation
@@ -23,22 +31,64 @@ Generate beautiful PDF travel journals from your downloaded Polarsteps data.
 pip install -r requirements.txt
 ```
 
-Optional: GUI calendar picker
+> 💡 **Tip:** if you plan to use the GUI (recommended) the full dependency set
+> is installed by the above command. Playwright is pulled automatically when you
+> render for the first time, but you can also install it earlier for a smoother
+> start-up:
+>
+> ```bash
+> pip install playwright
+> playwright install
+> ```
+>
+> Alternatively you can perform package management directly in the GUI. Open the
+> **Settings** tab and switch to the **Packages** pane; click **Install
+> Uninstalled** to add any missing requirements or optional components without
+> leaving the app.
 
-If you want a calendar-based date picker in the GUI, install the optional `tkcalendar` package:
+The GUI optionally supports a calendar-based date picker. To enable it, add the
+`tkcalendar` package:
 
 ```bash
 pip install tkcalendar
 ```
 
-**Playwright note:** the package and browser binaries are optional but required for
-HTML→PDF rendering. When you first run a render and the browsers are missing the
-script will automatically invoke `playwright install` (full browser set), so you
-usually don't need to run it manually.
+### Quick start – GUI (Tkinter)
 
-```bash
-pip install tkcalendar
-```
+Most users will find the graphical interface the easiest way to work with the
+tool. To launch it:
+
+1. Run `python -m gui.tk_gui` from the project root, or double-click
+   `scripts\run_gui.bat` on Windows.
+2. In the app window:
+   * Choose one or more **Polarsteps Data** folders (separate multiple paths with
+     semicolons).
+   * Optionally change the **Output folder** for generated PDFs.
+   * Select trips from the list; headers are clickable to sort and an arrow
+     indicator (▲/▼) shows the current sort direction. The default sort order is
+     by start date (newest first).
+   * Click **Render Selected** to start processing. A progress log appears in the
+     text area below the controls.
+
+The Settings tab in the GUI lets you edit `config.toml` directly, manage
+packages via a built‑in installer, and view the current environment. Use the
+**Packages** section to see which dependencies are currently installed and to
+install any missing ones – the **Install Uninstalled** button will add only the
+packages that are absent from your environment (based on `requirements.txt`
+and optional extras like `tkcalendar`). If Playwright or other optional
+libraries are not present, the GUI will prompt you to install them before the
+first render.
+
+> ⚠️ Packaging note: if you intend to distribute a standalone Windows executable,
+> tools like `pyinstaller` work well. Remember to bundle Playwright browsers
+> following the [Playwright packaging docs](https://playwright.dev/docs/ci).
+
+### Optional CLI tools
+
+If you prefer the command line or are automating batch jobs, the script can be
+run directly (see next section). The CLI and GUI share the same underlying
+logic, so any feature available in one will be present in the other.
+
 
 ## Usage
 
@@ -282,3 +332,10 @@ PDFs are saved in the `TripPdfs/` folder next to the script with the trip name a
 ## License
 
 MIT License
+
+---
+
+> ⚠️ **Note:** A separate `README_GUI.md` file previously existed with GUI tips.
+> All relevant information has now been merged into this document. The old file
+> remains for backward compatibility but can be ignored.
+
