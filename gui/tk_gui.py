@@ -646,11 +646,21 @@ class App(tk.Tk):
         self.ent_config.pack(side=tk.LEFT, padx=(6, 0))
         ttk.Button(frm_controls, text=self.lang.t('gui.apply'), command=self.load_trips).pack(side=tk.LEFT, padx=(6, 0))
 
-        ttk.Button(frm_controls, text=self.lang.t('gui.refresh'), command=self.load_trips).pack(side=tk.LEFT, padx=(6, 0))
-        ttk.Button(frm_controls, text=self.lang.t('gui.select_all'), command=self._select_all).pack(side=tk.LEFT, padx=(6, 0))
-        ttk.Button(frm_controls, text=self.lang.t('gui.deselect_all'), command=self._deselect_all).pack(side=tk.LEFT, padx=(6, 0))
-        # Select only trips that have not been rendered yet
-        ttk.Button(frm_controls, text=self.lang.t('gui.select_unrendered'), command=self._select_unrendered).pack(side=tk.LEFT, padx=(6, 0))
+        # Selection buttons in a grid for multiline visibility in smaller windows
+        frm_select_buttons = ttk.Frame(frm_controls)
+        frm_select_buttons.pack(fill=tk.X, side=tk.LEFT, padx=(12, 0), pady=(4, 0))
+        self.btn_refresh = ttk.Button(frm_select_buttons, text=self.lang.t('gui.refresh'), command=self.load_trips)
+        self.btn_refresh.grid(row=0, column=0, padx=(0, 6), pady=(0, 2), sticky='w')
+        self.btn_select_all = ttk.Button(frm_select_buttons, text=self.lang.t('gui.select_all'), command=self._select_all)
+        self.btn_select_all.grid(row=0, column=1, padx=(0, 6), pady=(0, 2), sticky='w')
+        self.btn_deselect_all = ttk.Button(frm_select_buttons, text=self.lang.t('gui.deselect_all'), command=self._deselect_all)
+        self.btn_deselect_all.grid(row=1, column=0, padx=(0, 6), pady=(0, 2), sticky='w')
+        self.btn_select_unrendered = ttk.Button(frm_select_buttons, text=self.lang.t('gui.select_unrendered'), command=self._select_unrendered)
+        self.btn_select_unrendered.grid(row=1, column=1, padx=(0, 6), pady=(0, 2), sticky='w')
+
+        # Arrange in two rows so buttons remain visible even with narrow window width.
+        frm_select_buttons.columnconfigure(0, weight=1)
+        frm_select_buttons.columnconfigure(1, weight=1)
 
         # NOTE: Render / Stop buttons moved below the progress bar to a dedicated row
 
