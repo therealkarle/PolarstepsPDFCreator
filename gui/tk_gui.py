@@ -66,6 +66,34 @@ except Exception:
 try:
     from tkcalendar import DateEntry
     HAVE_TKCALENDAR = True
+
+    class UpwardDateEntry(DateEntry):
+        """DateEntry that prefers opening the popup above the entry."""
+        def drop_down(self):
+            """Display or withdraw the drop-down calendar with upward placement."""
+            if self._calendar.winfo_ismapped():
+                self._top_cal.withdraw()
+            else:
+                self._validate_date()
+                date = self.parse_date(self.get())
+                x = self.winfo_rootx()
+                y_below = self.winfo_rooty() + self.winfo_height()
+
+                # So that it stays in the window, prefer above position.
+                self._top_cal.update_idletasks()
+                cal_height = self._top_cal.winfo_height() or self._top_cal.winfo_reqheight() or self._calendar.winfo_reqheight()
+                y_above = self.winfo_rooty() - cal_height
+                y = y_above if y_above >= 0 else y_below
+
+                if self.winfo_toplevel().attributes('-topmost'):
+                    self._top_cal.attributes('-topmost', True)
+                else:
+                    self._top_cal.attributes('-topmost', False)
+                self._top_cal.geometry('+%i+%i' % (x, y))
+                self._top_cal.deiconify()
+                self._calendar.focus_set()
+                self._calendar.selection_set(date)
+
 except Exception:
     DateEntry = None
     HAVE_TKCALENDAR = False
@@ -587,10 +615,10 @@ class App(tk.Tk):
 
         if HAVE_TKCALENDAR:
             ttk.Label(frm_date, text=self.lang.t('gui.from')).grid(row=1, column=3, sticky='w', padx=(8, 0))
-            self.start_cal = DateEntry(frm_date, width=12, date_pattern='dd.mm.yyyy')
+            self.start_cal = UpwardDateEntry(frm_date, width=12, date_pattern='dd.mm.yyyy')
             self.start_cal.grid(row=1, column=4, padx=(6, 4))
             ttk.Label(frm_date, text=self.lang.t('gui.to')).grid(row=1, column=5, sticky='w', padx=(8, 0))
-            self.end_cal = DateEntry(frm_date, width=12, date_pattern='dd.mm.yyyy')
+            self.end_cal = UpwardDateEntry(frm_date, width=12, date_pattern='dd.mm.yyyy')
             self.end_cal.grid(row=1, column=6, padx=(6, 0))
         else:
             ttk.Label(frm_date, text=self.lang.t('gui.from')).grid(row=1, column=3, sticky='w', padx=(8, 0))
