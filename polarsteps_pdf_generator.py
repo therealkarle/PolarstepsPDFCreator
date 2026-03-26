@@ -3204,6 +3204,9 @@ class HtmlPDFBuilder:
 
         # Layout options
         self.max_photos_per_step = int(self.config.get("max_photos_per_step", 6))
+        self.min_photos_per_step = int(self.config.get("min_photos_per_step", self.max_photos_per_step))
+        self.max_photos_per_page = int(self.config.get("max_photos_per_page", 0))  # 0 = no explicit limit
+        self.photo_wall_fill_limit = int(self.config.get("photo_wall_fill_limit", max(self.min_photos_per_step * 2, self.min_photos_per_step)))
         self.appendix_show_undisplayed_media = bool(self.config.get("appendix_show_undisplayed_media", True))
         self.photo_max_width = int(self.config.get("html_photo_max_width", 1200))
         self._memory_cache_items = int(self.config.get("html_memory_cache_items", 256))
@@ -3232,6 +3235,27 @@ class HtmlPDFBuilder:
         cache.move_to_end(key)
         while len(cache) > self._memory_cache_items:
             cache.popitem(last=False)
+
+    def _split_step_photos(self, photo_paths: List[Path]) -> Tuple[List[Path], List[Path]]:
+        """Return (photos_to_show, extra_photos) for a step."""
+        if not photo_paths:
+            return [], []
+
+        # Determine how many photos to show on step page
+        if len(photo_paths) <= self.min_photos_per_step:
+            return list(photo_paths), []
+
+        if self.max_photos_per_page > 0:
+            target = min(len(photo_paths), self.max_photos_per_page)
+        else:
+            target = min(len(photo_paths), self.photo_wall_fill_limit)
+
+        target = max(self.min_photos_per_step, target)
+        target = min(target, len(photo_paths))
+
+        photos_to_show = list(photo_paths[:target])
+        extra_photos = list(photo_paths[target:])
+        return photos_to_show, extra_photos
 
     def _image_bytes_to_data_url(self, data: bytes, mime: str = "image/png") -> str:
         b64 = base64.b64encode(data).decode("ascii")
@@ -3512,6 +3536,7 @@ class HtmlPDFBuilder:
             ".subtitle { text-align: center; font-size: 14pt; margin-bottom: 10mm; }",
             ".map { width: 100%; height: auto; display: block; margin: 0 auto; }",
             ".page-break { page-break-after: always; }",
+            ".step { page-break-inside: avoid; }",
             ".step-title { color: #1A5F7A; font-size: 18pt; margin: 6mm 0 2mm; }",
             ".step-meta { color: #666; font-size: 10pt; margin: 0 0 4mm; }",
             ".step-desc { font-size: 11pt; line-height: 1.35; margin: 0 0 4mm; }",
@@ -3608,9 +3633,8 @@ class HtmlPDFBuilder:
             desc_html = self._build_description_html(description)
 
             # Photo grid
-            photos_to_show = photos[: self.max_photos_per_step]
-            extra_photos = photos[self.max_photos_per_step :]
-            photo_html = self._build_photo_grid_html([Path(p) for p in photos_to_show])
+            photos_to_show, extra_photos = self._split_step_photos([Path(p) for p in photos])
+            photo_html = self._build_photo_grid_html(photos_to_show)
 
             if self.appendix_show_undisplayed_media and (extra_photos or videos):
                 appendix_items.append({
