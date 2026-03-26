@@ -3837,23 +3837,47 @@ def get_trip_start_date(trip_path):
 def find_trips(bsp_data_folder: Path) -> list:
     """Find all trip folders in the Polarsteps Data (BSPData) directory and sort by start date (oldest first)."""
     trips = []
-    
-    for date_folder in sorted(bsp_data_folder.iterdir()):
-        if not date_folder.is_dir():
-            continue
-        
-        trip_folder = date_folder / "trip"
-        if not trip_folder.exists():
-            continue
-        
-        for trip in sorted(trip_folder.iterdir()):
-            if trip.is_dir() and (trip / "trip.json").exists():
-                trips.append(trip)
-    
+
+    # legacy structure: BSPData/<date>/trip/<trip-folder>
+    # and flexible recursive support: BSPData/**/<trip-folder>(with trip.json)
+    if not bsp_data_folder.exists() or not bsp_data_folder.is_dir():
+        return []
+
+    for folder in sorted(bsp_data_folder.rglob('trip.json')):
+        trip_folder = folder.parent
+        if trip_folder.is_dir():
+            trips.append(trip_folder)
+
+    # If no trips found under recursive scan (including date-folder layout), fallback to old non-recursive path behavior
+    if not trips:
+        for date_folder in sorted(bsp_data_folder.iterdir()):
+            if not date_folder.is_dir():
+                continue
+
+            trip_folder = date_folder / "trip"
+            if not trip_folder.exists():
+                continue
+
+            for trip in sorted(trip_folder.iterdir()):
+                if trip.is_dir() and (trip / "trip.json").exists():
+                    trips.append(trip)
+
+    # deduplicate in case same trip found multiple times via recursive rglob
+    unique_trips = []
+    seen = set()
+    for t in trips:
+        try:
+            path_str = str(t.resolve())
+        except Exception:
+            path_str = str(t)
+        if path_str not in seen:
+            seen.add(path_str)
+            unique_trips.append(t)
+
     # Sort trips by start_date from trip.json (oldest first)
-    trips.sort(key=get_trip_start_date)
-    
-    return trips
+    unique_trips.sort(key=get_trip_start_date)
+
+    return unique_trips
 
 
 def filter_trips_by_date(trips: list, year: int = None, start_date: datetime = None, end_date: datetime = None) -> list:
