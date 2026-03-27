@@ -33,8 +33,8 @@ emoji_scale = 1.2
 # --- Layout Settings ---
 # Page margin in millimeters
 safety_margin_mm = 12
-# Maximum number of photos to display per step page
-max_photos_per_step = 6
+# Number of photos after which a new page starts for step photos
+photos_before_page_break = 6  # legacy alias: max_photos_per_step
 # Include an appendix with undisplayed step photos and all video links
 appendix_show_undisplayed_media = true
 # Photo wall layout: number of columns in the masonry grid

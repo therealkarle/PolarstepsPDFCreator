@@ -3203,8 +3203,9 @@ class HtmlPDFBuilder:
         self.cli_lang = cli_language_manager or get_default_language_manager()
 
         # Layout options
-        self.max_photos_per_step = int(self.config.get("max_photos_per_step", 6))
-        self.min_photos_per_step = int(self.config.get("min_photos_per_step", self.max_photos_per_step))
+        # renamed from max_photos_per_step
+        self.photos_before_page_break = int(self.config.get("photos_before_page_break", self.config.get("max_photos_per_step", 6)))
+        self.min_photos_per_step = int(self.config.get("min_photos_per_step", self.photos_before_page_break))
         self.max_photos_per_page = int(self.config.get("max_photos_per_page", 0))  # 0 = no explicit limit
         self.photo_wall_fill_limit = int(self.config.get("photo_wall_fill_limit", max(self.min_photos_per_step * 2, self.min_photos_per_step)))
         self.appendix_show_undisplayed_media = bool(self.config.get("appendix_show_undisplayed_media", True))
@@ -3239,21 +3240,33 @@ class HtmlPDFBuilder:
             cache.popitem(last=False)
 
     def _split_step_photos(self, photo_paths: List[Path]) -> Tuple[List[Path], List[Path]]:
-        """Return (photos_to_show, extra_photos) for a step."""
+        """Return (photos_to_show, extra_photos) for a step.
+
+        Behavior:
+        - Show at least min_photos_per_step.
+        - Then extend with additional photos until photo_wall_fill_limit is reached,
+          or max_photos_per_page if configured, whichever is lower.
+        - Extra photos are appended to the appendix.
+        """
         if not photo_paths:
             return [], []
 
-        # Determine how many photos to show on step page
-        if len(photo_paths) <= self.min_photos_per_step:
+        count = len(photo_paths)
+        if count <= self.min_photos_per_step:
             return list(photo_paths), []
 
-        if self.max_photos_per_page > 0:
-            target = min(len(photo_paths), self.max_photos_per_page)
-        else:
-            target = len(photo_paths)
+        # photos_before_page_break defines how many images are shown before the next page starts
+        # (rest will be treated as extra and appears in Appendix or subsequent step extension)
+        threshold = int(self.config.get("photos_before_page_break", self.photos_before_page_break))
+        if threshold <= 0:
+            threshold = count
 
-        target = max(self.min_photos_per_step, target)
-        target = min(target, len(photo_paths))
+        if count <= threshold:
+            return list(photo_paths), []
+
+        photos_to_show = list(photo_paths[:threshold])
+        extra_photos = list(photo_paths[threshold:])
+        return photos_to_show, extra_photos
 
         photos_to_show = list(photo_paths[:target])
         extra_photos = list(photo_paths[target:])
@@ -3539,13 +3552,16 @@ class HtmlPDFBuilder:
             ".subtitle { text-align: center; font-size: 14pt; margin-bottom: 10mm; }",
             ".map { width: 100%; height: auto; display: block; margin: 0 auto; }",
             ".page-break { page-break-after: always; }",
-            ".step { page-break-inside: avoid; }",
+            ".step { page-break-inside: auto; }",
+            ".step-intro { page-break-inside: avoid; page-break-after: avoid; }",
+            ".photo-grid { page-break-inside: avoid; page-break-before: avoid; }",
+            ".step-desc-rest { page-break-inside: auto; margin-top: 2mm; }",
             ".step-title { color: #1A5F7A; font-size: 18pt; margin: 6mm 0 2mm; }",
             ".step-meta { color: #666; font-size: 10pt; margin: 0 0 4mm; }",
             ".step-desc { font-size: 11pt; line-height: 1.35; margin: 0 0 4mm; }",
             ".step-list { margin: 0 0 4mm 6mm; }",
-            ".photo-grid { column-count: %d; column-gap: %dpx; width: 100%%; margin: 0 0 4mm; page-break-inside: avoid; }" % (self.photo_masonry_columns, self.photo_masonry_gap),
-            ".photo-grid img { width: 100%%; height: auto; display: block; margin-bottom: %dpx; break-inside: avoid; page-break-inside: avoid; }" % (self.photo_masonry_gap),
+            ".photo-grid { column-count: %d; column-gap: %dpx; width: 100%%; margin: 0 0 4mm; page-break-inside: auto; }" % (self.photo_masonry_columns, self.photo_masonry_gap),
+            ".photo-grid img { width: 100%%; height: auto; display: block; margin-bottom: %dpx; break-inside: avoid; page-break-inside: auto; }" % (self.photo_masonry_gap),
             ".appendix-title { color: #1A5F7A; font-size: 20pt; margin: 4mm 0 2mm; }",
             ".appendix-subtitle { color: #666; font-size: 10pt; margin: 0 0 4mm; }",
             ".appendix-step-title { color: #1A5F7A; font-size: 14pt; margin: 6mm 0 2mm; }",
@@ -3633,7 +3649,12 @@ class HtmlPDFBuilder:
                 step_map_html = ""
 
             description = step_data.get("description", "") if isinstance(step_data, dict) else ""
-            desc_html = self._build_description_html(description)
+            desc_lines = description.splitlines()
+            desc_intro_text = "\n".join(desc_lines[:10])
+            desc_rest_text = "\n".join(desc_lines[10:]) if len(desc_lines) > 10 else ""
+
+            desc_intro_html = self._build_description_html(desc_intro_text)
+            desc_rest_html = self._build_description_html(desc_rest_text) if desc_rest_text else ""
 
             # Photo grid
             photos_to_show, extra_photos = self._split_step_photos([Path(p) for p in photos])
@@ -3647,15 +3668,21 @@ class HtmlPDFBuilder:
                     "videos": videos,
                 })
 
-            html_parts.extend([
+            step_section = [
                 "<div class=\"step\">",
+                "<div class=\"step-intro\">",
                 f"<div class=\"step-title\">{self._escape(title_text)}</div>",
                 f"<div class=\"step-meta\">{self._escape(meta_text)}</div>",
                 step_map_html,
-                desc_html,
-                photo_html,
+                desc_intro_html,
                 "</div>",
-            ])
+            ]
+
+            if desc_rest_html:
+                step_section.append(f"<div class=\"step-desc-rest\">{desc_rest_html}</div>")
+
+            step_section.extend([photo_html, "</div>"])
+            html_parts.extend(step_section)
 
         if self.appendix_show_undisplayed_media and appendix_items:
             html_parts.extend([
