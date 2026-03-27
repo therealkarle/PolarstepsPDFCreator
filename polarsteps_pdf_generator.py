@@ -3209,6 +3209,8 @@ class HtmlPDFBuilder:
         self.photo_wall_fill_limit = int(self.config.get("photo_wall_fill_limit", max(self.min_photos_per_step * 2, self.min_photos_per_step)))
         self.appendix_show_undisplayed_media = bool(self.config.get("appendix_show_undisplayed_media", True))
         self.photo_max_width = int(self.config.get("html_photo_max_width", 1200))
+        self.photo_masonry_columns = int(self.config.get("html_photo_masonry_columns", self.config.get("photo_wall_columns", 3)))
+        self.photo_masonry_gap = int(self.config.get("html_photo_masonry_gap", self.config.get("photo_wall_gap", 8)))
         self._memory_cache_items = int(self.config.get("html_memory_cache_items", 256))
         self._image_data_cache = OrderedDict()
         self._map_data_cache = OrderedDict()
@@ -3248,7 +3250,7 @@ class HtmlPDFBuilder:
         if self.max_photos_per_page > 0:
             target = min(len(photo_paths), self.max_photos_per_page)
         else:
-            target = min(len(photo_paths), self.photo_wall_fill_limit)
+            target = len(photo_paths)
 
         target = max(self.min_photos_per_step, target)
         target = min(target, len(photo_paths))
@@ -3521,8 +3523,9 @@ class HtmlPDFBuilder:
             except Exception:
                 overview_img = ""
 
-        photo_wall_gap = int(self.config.get("photo_wall_gap", 0))
-        photo_wall_columns = int(self.config.get("photo_wall_columns", 3))
+        # Use masonry-style column settings for photo layout
+        photo_wall_gap = self.photo_masonry_gap
+        photo_wall_columns = self.photo_masonry_columns
 
         html_parts = [
             "<!doctype html>",
@@ -3541,8 +3544,8 @@ class HtmlPDFBuilder:
             ".step-meta { color: #666; font-size: 10pt; margin: 0 0 4mm; }",
             ".step-desc { font-size: 11pt; line-height: 1.35; margin: 0 0 4mm; }",
             ".step-list { margin: 0 0 4mm 6mm; }",
-            f".photo-grid {{ column-count: {photo_wall_columns}; column-gap: {photo_wall_gap}px; margin: 2mm 0 4mm; }}",
-            f".photo-grid img {{ width: 100%; height: auto; display: block; break-inside: avoid; margin: 0 0 {photo_wall_gap}px 0; }}",
+            ".photo-grid { column-count: %d; column-gap: %dpx; width: 100%%; margin: 0 0 4mm; page-break-inside: avoid; }" % (self.photo_masonry_columns, self.photo_masonry_gap),
+            ".photo-grid img { width: 100%%; height: auto; display: block; margin-bottom: %dpx; break-inside: avoid; page-break-inside: avoid; }" % (self.photo_masonry_gap),
             ".appendix-title { color: #1A5F7A; font-size: 20pt; margin: 4mm 0 2mm; }",
             ".appendix-subtitle { color: #666; font-size: 10pt; margin: 0 0 4mm; }",
             ".appendix-step-title { color: #1A5F7A; font-size: 14pt; margin: 6mm 0 2mm; }",
@@ -3652,7 +3655,6 @@ class HtmlPDFBuilder:
                 desc_html,
                 photo_html,
                 "</div>",
-                "<div class=\"page-break\"></div>",
             ])
 
         if self.appendix_show_undisplayed_media and appendix_items:
