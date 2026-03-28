@@ -3244,10 +3244,11 @@ class HtmlPDFBuilder:
         """Return (photos_to_show, extra_photos) for a step.
 
         Behavior:
-        - Show at least min_photos_per_step.
-        - Then extend with additional photos until photo_wall_fill_limit is reached,
-          or max_photos_per_page if configured, whichever is lower.
-        - Extra photos are appended to the appendix.
+                - Base amount per step is photos_before_page_break.
+                - If fill_page_with_photos=true, add a limited number of photos intended
+                    to fill the current page, then move the rest to extra_photos.
+                - If fill_page_with_photos=false, show exactly the base amount.
+                - If total photos are below base amount, show all photos.
         """
         if not photo_paths:
             return [], []
@@ -3267,11 +3268,14 @@ class HtmlPDFBuilder:
         if self.fill_page_with_photos:
             fill_limit = int(self.config.get("photo_wall_fill_limit", self.photo_wall_fill_limit))
             if fill_limit <= 0:
-                target = count
-            else:
-                target = min(count, max(threshold, fill_limit))
-            target = max(target, threshold)
-            target = min(target, count)
+                fill_limit = threshold
+
+            # "photo_wall_fill_limit" dient als absolutes Maximum
+            hard_cap = threshold
+            if fill_limit > 0:
+                hard_cap = min(hard_cap, fill_limit)
+
+            target = min(count, hard_cap)
             photos_to_show = list(photo_paths[:target])
             extra_photos = list(photo_paths[target:])
             return photos_to_show, extra_photos
@@ -3279,10 +3283,6 @@ class HtmlPDFBuilder:
         # strict threshold behavior: only threshold images, rest extra
         photos_to_show = list(photo_paths[:threshold])
         extra_photos = list(photo_paths[threshold:])
-        return photos_to_show, extra_photos
-
-        photos_to_show = list(photo_paths[:target])
-        extra_photos = list(photo_paths[target:])
         return photos_to_show, extra_photos
 
     def _image_bytes_to_data_url(self, data: bytes, mime: str = "image/png") -> str:
@@ -3565,10 +3565,10 @@ class HtmlPDFBuilder:
             ".subtitle { text-align: center; font-size: 14pt; margin-bottom: 10mm; }",
             ".map { width: 100%; height: auto; display: block; margin: 0 auto; }",
             ".page-break { page-break-after: always; }",
-            ".step { page-break-inside: auto; }",
+            ".step { page-break-inside: avoid; }",
             ".step-intro { page-break-inside: avoid; page-break-after: avoid; }",
             ".photo-grid { page-break-inside: avoid; page-break-before: avoid; }",
-            ".step-desc-rest { page-break-inside: auto; margin-top: 2mm; }",
+            ".step-desc-rest { page-break-inside: avoid; margin-top: 2mm; }",
             ".step-title { color: #1A5F7A; font-size: 18pt; margin: 6mm 0 2mm; }",
             ".step-meta { color: #666; font-size: 10pt; margin: 0 0 4mm; }",
             ".step-desc { font-size: 11pt; line-height: 1.35; margin: 0 0 4mm; }",

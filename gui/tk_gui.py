@@ -1181,6 +1181,7 @@ class App(tk.Tk):
         grp_layout.pack(fill=tk.X, padx=6, pady=(6,4))
         add_entry(grp_layout, self.lang.t('gui.form.safety_margin_mm'), 'safety_margin_mm', var_type='int')
         add_entry(grp_layout, self.lang.t('gui.form.photos_before_page_break'), 'photos_before_page_break', var_type='int', help_text=self.lang.t('gui.help.photos_before_page_break'))
+        add_entry(grp_layout, self.lang.t('gui.form.fill_page_with_photos'), 'fill_page_with_photos', var_type='bool', help_text=self.lang.t('gui.help.fill_page_with_photos'))
         add_entry(grp_layout, self.lang.t('gui.appendix_include_undisplayed_media'), 'appendix_show_undisplayed_media', var_type='bool')
         add_entry(grp_layout, self.lang.t('gui.form.photo_wall_columns'), 'photo_wall_columns', var_type='int')
         add_entry(grp_layout, self.lang.t('gui.form.photo_wall_gap'), 'photo_wall_gap', var_type='int')

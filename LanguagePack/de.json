@@ -194,6 +194,8 @@
   "gui.form.max_photos_per_step": "Max. Fotos pro Schritt",
   "gui.form.photos_before_page_break": "Fotos bis Seitenumbruch",
   "gui.help.photos_before_page_break": "Wie viele Fotos angezeigt werden, bevor eine neue Seite beginnt",
+  "gui.form.fill_page_with_photos": "Seite mit Fotos auffüllen",
+  "gui.help.fill_page_with_photos": "Wenn aktiv, wird nach der Basisanzahl nur die aktuelle Seite mit weiteren Fotos aufgefüllt",
   "gui.form.photo_wall_columns": "Foto-Wand Spalten",
   "gui.form.photo_wall_gap": "Foto-Wand Abstand",
   "gui.form.map_style": "Kartentyp",
