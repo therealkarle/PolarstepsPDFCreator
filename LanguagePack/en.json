@@ -189,6 +189,8 @@
   "gui.form.emoji_scale": "Emoji scale",
   "gui.form.safety_margin_mm": "Safety margin (mm)",
   "gui.form.max_photos_per_step": "Max photos per step",
+  "gui.form.photos_before_page_break": "Photos before page break",
+  "gui.help.photos_before_page_break": "How many photos are shown before starting a new photo page",
   "gui.form.photo_wall_columns": "Photo wall columns",
   "gui.form.photo_wall_gap": "Photo wall gap",
   "gui.form.map_style": "Map style",

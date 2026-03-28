@@ -3205,6 +3205,7 @@ class HtmlPDFBuilder:
         # Layout options
         # renamed from max_photos_per_step
         self.photos_before_page_break = int(self.config.get("photos_before_page_break", self.config.get("max_photos_per_step", 6)))
+        self.fill_page_with_photos = bool(self.config.get("fill_page_with_photos", True))
         self.min_photos_per_step = int(self.config.get("min_photos_per_step", self.photos_before_page_break))
         self.max_photos_per_page = int(self.config.get("max_photos_per_page", 0))  # 0 = no explicit limit
         self.photo_wall_fill_limit = int(self.config.get("photo_wall_fill_limit", max(self.min_photos_per_step * 2, self.min_photos_per_step)))
@@ -3252,18 +3253,30 @@ class HtmlPDFBuilder:
             return [], []
 
         count = len(photo_paths)
-        if count <= self.min_photos_per_step:
-            return list(photo_paths), []
+        if count == 0:
+            return [], []
 
-        # photos_before_page_break defines how many images are shown before the next page starts
-        # (rest will be treated as extra and appears in Appendix or subsequent step extension)
+        # threshold: minimal displayed images before considering page break
         threshold = int(self.config.get("photos_before_page_break", self.photos_before_page_break))
         if threshold <= 0:
-            threshold = count
+            threshold = 1
 
         if count <= threshold:
             return list(photo_paths), []
 
+        if self.fill_page_with_photos:
+            fill_limit = int(self.config.get("photo_wall_fill_limit", self.photo_wall_fill_limit))
+            if fill_limit <= 0:
+                target = count
+            else:
+                target = min(count, max(threshold, fill_limit))
+            target = max(target, threshold)
+            target = min(target, count)
+            photos_to_show = list(photo_paths[:target])
+            extra_photos = list(photo_paths[target:])
+            return photos_to_show, extra_photos
+
+        # strict threshold behavior: only threshold images, rest extra
         photos_to_show = list(photo_paths[:threshold])
         extra_photos = list(photo_paths[threshold:])
         return photos_to_show, extra_photos

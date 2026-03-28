@@ -19,23 +19,23 @@ except Exception as e:
 # New minimally-configured behavior tests for photo filling logic
 
 def run_photo_split_tests():
-    b1 = HtmlPDFBuilder(Path('out.pdf'), p, mapg, config={'photos_before_page_break': 6, 'min_photos_per_step': 4})
+    b1 = HtmlPDFBuilder(Path('out.pdf'), p, mapg, config={'photos_before_page_break': 6, 'fill_page_with_photos': True, 'photo_wall_fill_limit': 8})
     photos = [Path(f'photo_{i}.jpg') for i in range(10)]
     show, extra = b1._split_step_photos(photos)
-    assert len(show) == 6, f'Expected 6 displayed (page break threshold), got {len(show)}'
-    assert len(extra) == 4, f'Expected 4 extra, got {len(extra)}'
+    assert len(show) == 8, f'Expected 8 displayed (fill limit), got {len(show)}'
+    assert len(extra) == 2, f'Expected 2 extra, got {len(extra)}'
 
-    b2 = HtmlPDFBuilder(Path('out.pdf'), p, mapg, config={'photos_before_page_break': 0, 'min_photos_per_step': 4})
+    b2 = HtmlPDFBuilder(Path('out.pdf'), p, mapg, config={'photos_before_page_break': 6, 'fill_page_with_photos': False})
     photos2 = [Path(f'photo_{i}.jpg') for i in range(10)]
     show2, extra2 = b2._split_step_photos(photos2)
     assert len(show2) == 10, f'Expected 10 displayed (no threshold), got {len(show2)}'
     assert len(extra2) == 0, f'Expected 0 extra, got {len(extra2)}'
 
-    b2 = HtmlPDFBuilder(Path('out.pdf'), p, mapg, config={'max_photos_per_step': 6, 'min_photos_per_step': 4, 'photo_wall_fill_limit': 9})
-    photos2 = [Path(f'photo_{i}.jpg') for i in range(3)]
-    show2, extra2 = b2._split_step_photos(photos2)
-    assert len(show2) == 3, f'Expected 3 displayed, got {len(show2)}'
-    assert len(extra2) == 0, f'Expected 0 extra, got {len(extra2)}'
+    b3 = HtmlPDFBuilder(Path('out.pdf'), p, mapg, config={'photos_before_page_break': 6, 'min_photos_per_step': 4})
+    photos3 = [Path(f'photo_{i}.jpg') for i in range(3)]
+    show3, extra3 = b3._split_step_photos(photos3)
+    assert len(show3) == 3, f'Expected 3 displayed, got {len(show3)}'
+    assert len(extra3) == 0, f'Expected 0 extra, got {len(extra3)}'
 
     print('photo split tests passed')
 
