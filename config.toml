@@ -33,11 +33,11 @@ emoji_scale = 1.2
 # --- Layout Settings ---
 # Page margin in millimeters
 safety_margin_mm = 12
-# Minimale Fotos pro Step / Anzahl Fotos bis zu der eine neue Seite angefangen wird
+# Minimum photos per step / number of photos after which a new page is started
 photos_before_page_break = 6  # legacy alias: max_photos_per_step
-# Seite mit Fotos auffüllen (nur aktuelle Seite):
-# true  -> nach photos_before_page_break wird begrenzt weiter aufgefüllt, Rest geht in Zusatzmedien
-# false -> es werden strikt nur photos_before_page_break im Step gezeigt
+# Fill the current page with photos (only for the active page):
+# true  -> continue filling until the limit set by photos_before_page_break, leftover goes to additional media
+# false -> strictly show only photos_before_page_break in the step
 fill_page_with_photos = true
 # Include an appendix with undisplayed step photos and all video links
 appendix_show_undisplayed_media = true
