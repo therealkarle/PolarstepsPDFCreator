@@ -1165,6 +1165,14 @@ class App(tk.Tk):
         # new path settings for Polarsteps Data and output
         add_entry(grp_general, self.lang.t('gui.form.bsp_folder'), 'polarsteps_data_folder', var_type='path')
         add_entry(grp_general, self.lang.t('gui.form.output_folder'), 'output_folder', var_type='path')
+        add_entry(grp_general, self.lang.t('gui.form.output_folder_pdf'), 'output_folder_pdf', var_type='path')
+        add_entry(grp_general, self.lang.t('gui.form.output_folder_html'), 'output_folder_html', var_type='path')
+        var, cb = add_entry(grp_general, self.lang.t('gui.form.renderer_mode'), 'renderer_mode', var_type='combobox')
+        try:
+            cb['values'] = ['pdf', 'html', 'both']
+            var.set('both')
+        except Exception:
+            pass
         add_entry(grp_general, self.lang.t('gui.form.show_rendered_trips'), 'show_rendered_trips', var_type='bool')
         add_entry(grp_general, self.lang.t('gui.form.open_pdf_after_render'), 'open_pdf_after_render', var_type='bool')
         add_entry(grp_general, self.lang.t('gui.form.auto_update'), 'auto_update', var_type='bool')
