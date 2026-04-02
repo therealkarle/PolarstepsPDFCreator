@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Optional, List, Tuple
 from datetime import datetime, timedelta, date
 import re
+import webbrowser
 try:
     import pycountry  # type: ignore[reportMissingImports]
 except Exception:
@@ -3272,6 +3273,15 @@ class InteractiveHtmlBuilder:
         elif start_date:
             date_str = start_date.strftime(date_fmt)
 
+        trip_days = 0
+        try:
+            if start_date and end_date:
+                trip_days = max(1, (end_date - start_date).days + 1)
+            elif start_date:
+                trip_days = 1
+        except Exception:
+            trip_days = 0
+
         subtitle = self.lang.t(
             "pdf.subtitle",
             date=date_str,
@@ -3288,6 +3298,19 @@ class InteractiveHtmlBuilder:
             description = step_data.get("description", "") if isinstance(step_data, dict) else ""
             location = step_data.get("location", {}) if isinstance(step_data, dict) else {}
             lat, lon = self._location_to_coordinates(location)
+
+            # normalize step date for timeline display
+            start_time = step_data.get("start_time")
+            step_date_str = ""
+            if start_time:
+                try:
+                    if isinstance(start_time, (int, float)):
+                        step_date_str = datetime.fromtimestamp(start_time).strftime(date_fmt)
+                    else:
+                        numeric_ts = float(start_time)
+                        step_date_str = datetime.fromtimestamp(numeric_ts).strftime(date_fmt)
+                except Exception:
+                    step_date_str = str(start_time)
 
             photo_list = []
             for p in step.get("photos", []):
@@ -3315,7 +3338,7 @@ class InteractiveHtmlBuilder:
                 "step_number": i,
                 "title": display_name,
                 "meta": {
-                    "date": step_data.get("start_time"),
+                    "date": step_date_str or (step_data.get("start_time") if step_data.get("start_time") is not None else ""),
                     "location": location.get("name") or "",
                 },
                 "description": self._escape(description).replace("\n", "<br/>"),
@@ -3337,33 +3360,49 @@ class InteractiveHtmlBuilder:
             '<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>',
             '<style>',
             'body { font-family: "Segoe UI", sans-serif; background:#f6f7f8; margin:0; padding:0; }',
-            '.page-header { padding: 16px; background: #1A5F7A; color: #fff; }',
-            '.page-subtitle { padding: 8px 16px 16px; color: #333; }',
-            '.layout { display: flex; flex-wrap: wrap; }',
-            '.sidebar { width: 320px; max-width: 100%; min-width: 280px; background: #fff; border-right: 1px solid #ccc; height: calc(100vh - 120px); overflow-y: auto; }',
-            '.map-container { flex: 1; height: calc(100vh - 120px); position: relative; }',
+            '.top-bar { background: #1A5F7A; color: #fff; padding: 12px 16px; display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 8px; }',
+            '.top-bar h1 { margin:0; font-size: 1.25rem; }',
+            '.top-bar .stats { font-size: 0.9rem; color: #e8f7ff; }',
+            '.timeline { display: flex; gap: 8px; overflow-x: auto; padding: 8px 16px; background: #fff; border-bottom: 1px solid #ddd; }',
+            '.timeline-item { flex: 0 0 auto; padding: 6px 10px; border-radius: 12px; background: #f0f5f9; font-size: 0.82rem; cursor: pointer; white-space: nowrap; }',
+            '.timeline-item.active { background: #1A5F7A; color: #fff; font-weight: bold; }',
+            '.layout { display: flex; flex-wrap: nowrap; }',
+            '.sidebar { width: 70%; max-width: 100%; min-width: 560px; background: #fff; border-right: 1px solid #ccc; height: calc(100vh - 136px); overflow-y: auto; }',
+            '.map-container { flex: 0 0 28%; height: calc(100vh - 136px); position: relative; min-width: 320px; }',
             '#map { width: 100%; height: 100%; }',
-            '.step-item { padding: 10px 10px; border-bottom: 1px solid #eee; cursor: pointer; }',
-            '.step-item.active { background: #e8f5ff; }',
-            '.step-title { font-weight: bold; }',
-            '.step-meta { font-size: 0.85rem; color: #666; margin-bottom: 4px; }',
-            '.step-desc { font-size: 0.9rem; margin: 6px 0; }',
-            '.photos { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }',
-            '.photos img { width: 100%; height: auto; border: 1px solid #ccc; }',
-            '.video-link { display: block; font-size: 0.85rem; color: #0066cc; text-decoration: none; margin: 2px 0; }',
-            '.controls { padding: 10px; background: #fff; border-top: 1px solid #ddd; }',
-            '.controls button { margin-right: 6px; }',
+            '.map-fullscreen #map { position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; z-index: 9999; }',
+            '.step-item { padding: 14px 12px; border-bottom: 1px solid #eee; cursor: pointer; }',
+            '.step-item.active { background: #e8f5ff; border-left: 4px solid #1A5F7A; }',
+            '.step-title { font-weight: 700; font-size: 1.1rem; margin-bottom: 4px; }',
+            '.step-meta { font-size: 0.82rem; color: #666; margin-bottom: 6px; }',
+            '.step-desc { font-size: 0.98rem; line-height: 1.5; margin: 8px 0; color: #333; }',
+            '.photo-wrapper { position: relative; margin-top: 8px; }',
+            '.photo-viewer { width: 100%; height: 320px; background: #000; position: relative; border: 1px solid #ccc; border-radius: 4px; overflow: hidden; }',
+            '.photo-viewer img { width: 100%; height: 100%; object-fit: contain; background: #000; }',
+            '.photo-nav { position: absolute; top: 50%; left: 0; right: 0; pointer-events: auto; display: flex; justify-content: space-between; transform: translateY(-50%); padding: 0 6px; }',
+            '.photo-nav-btn { pointer-events: auto; border: none; background: rgba(26,95,122,0.8); color: white; width: 34px; height: 34px; border-radius: 50%; cursor: pointer; font-size: 1.1rem; font-weight: bold; }',
+            '.photo-idx { position: absolute; bottom: 8px; right: 12px; color: #fff; background: rgba(0,0,0,0.5); padding: 2px 8px; border-radius: 12px; font-size: 0.85rem; }',
+            '.video-box { margin-top: 6px; }',
+            '.video-box video { width: 100%; border-radius: 4px; border: 1px solid #ccc; }',
+            '.controls { padding: 10px; background: #fff; border-top: 1px solid #ddd; display: flex; justify-content: flex-end; gap: 8px; }',
+            '.controls button { padding: 6px 10px; border: 1px solid #1A5F7A; background: #1A5F7A; color: #fff; border-radius: 4px; cursor: pointer; }',
+            '.controls button:hover { background: #146077; }',
             '</style>',
             '</head>',
             '<body>',
-            '<div class="page-header"><h1>' + self._escape(trip_name) + '</h1></div>',
-            '<div class="page-subtitle">' + self._escape(subtitle) + '</div>',
+            '<div class="top-bar">',
+            '<h1>' + self._escape(trip_name) + '</h1>',
+            '<div class="stats">' + self._escape(date_str) + ' • ' + str(trip_days) + ' days • ' + str(step_count) + ' steps • ' + str(total_km) + ' km</div>',
+            '</div>',
+            '<div class="timeline" id="timeline"></div>',
             '<div class="layout">',
             '<div class="sidebar" id="step-list"></div>',
             '<div class="map-container"><div id="map"></div></div>',
             '</div>',
             '<div class="controls">',
-            '<button id="prev-step">Previous</button><button id="next-step">Next</button>',
+            '<button id="map-fullscreen-btn">Enter Fullscreen</button>',
+            '<button id="prev-step">Previous</button>',
+            '<button id="next-step">Next</button>',
             '</div>',
             '<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>',
             '<script>',
@@ -3371,46 +3410,90 @@ class InteractiveHtmlBuilder:
             'var map = L.map("map").setView([0,0],2);',
             'L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { attribution: "&copy; OpenStreetMap contributors", maxZoom: 18 }).addTo(map);',
             'var markers = [];',
-            'var currentIndex = 0;',
+            'var currentIndex = -1;',
             'function normalizeNumber(x) { return (typeof x === "number" && !isNaN(x) ? x : null); }',
-            'function showStep(index) {',
+            'function updateActiveStep(index) {',
+            '  document.querySelectorAll(".step-item").forEach(function(n){ n.classList.toggle("active", n.id === "step-" + index); });',
+            '  document.querySelectorAll(".timeline-item").forEach(function(n){ n.classList.toggle("active", n.dataset.stepIndex === String(index)); });',
+            '}',
+            'function showStep(index, scrollStep=true) {',
             '  if (index < 0 || index >= steps.length) return;',
+            '  if (currentIndex === index) return;',
             '  currentIndex = index;',
             '  var step = steps[index];',
             '  var lat = normalizeNumber(step.lat), lon = normalizeNumber(step.lon);',
             '  if (lat !== null && lon !== null) { map.flyTo([lat, lon], 12, {duration: 0.8}); }',
-            '  document.querySelectorAll(".step-item").forEach(function(n) { n.classList.remove("active"); });',
-            '  var el = document.querySelector("#step-" + index);',
-            '  if (el) { el.classList.add("active"); el.scrollIntoView({behavior: "smooth", block: "center"}); }',
+            '  updateActiveStep(index);',
+            '  if (scrollStep) { var el = document.getElementById("step-" + index); if (el) { el.scrollIntoView({behavior: "smooth", block: "center"}); }}',
             '  if (markers[index] && markers[index].openPopup) { markers[index].openPopup(); }',
             '}',
+            'var routeCoords = [];',
+            'for (var i = 0; i < steps.length; i++) {',
+            '  var s = steps[i];',
+            '  if (normalizeNumber(s.lat) !== null && normalizeNumber(s.lon) !== null) { routeCoords.push([s.lat, s.lon]); }',
+            '}',
+            'if (routeCoords.length > 1) { var routeLine = L.polyline(routeCoords, {color: "#1E90FF", weight: 4, opacity: 0.75}).addTo(map); map.fitBounds(routeLine.getBounds().pad(0.08)); } else if (routeCoords.length === 1) { map.setView(routeCoords[0], 10); }',
             'for (var i = 0; i < steps.length; i++) {',
             '  var s = steps[i];',
             '  if (normalizeNumber(s.lat) === null || normalizeNumber(s.lon) === null) continue;',
             '  var marker = L.marker([s.lat, s.lon]).addTo(map).bindPopup("<strong>" + s.title + "</strong>");',
             '  marker.stepIndex = i;',
             '  marker.on("click", function() { showStep(this.stepIndex); });',
-            '  markers.push(marker);',
+            '  markers[i] = marker;',
+            '}',
+            'function renderTimeline() {',
+            '  var el = document.getElementById("timeline"); el.innerHTML = "";',
+            '  for (var i = 0; i < steps.length; i++) {',
+            '    var item = document.createElement("div"); item.className = "timeline-item"; item.dataset.stepIndex = i; item.textContent = (i + 1) + ". " + steps[i].title + (steps[i].meta.date ? " (" + steps[i].meta.date + ")" : "");',
+            '    item.addEventListener("click", function(){ showStep(parseInt(this.dataset.stepIndex,10)); });',
+            '    el.appendChild(item);',
+            '  }',
             '}',
             'function renderStepList() {',
-            '  var container = document.getElementById("step-list");',
-            '  container.innerHTML = "";',
-            '  for (var i = 0; i < steps.length; i++) {',
-            '    var step = steps[i];',
+            '  var container = document.getElementById("step-list"); container.innerHTML = "";',
+            '  for (let i = 0; i < steps.length; i++) {',
+            '    let step = steps[i];',
             '    var wrapper = document.createElement("div"); wrapper.className = "step-item"; wrapper.id = "step-" + i;',
             '    var title = document.createElement("div"); title.className = "step-title"; title.textContent = (i + 1) + ". " + step.title; wrapper.appendChild(title);',
             '    var meta = document.createElement("div"); meta.className = "step-meta"; var mt = []; if (step.meta.location) mt.push(step.meta.location); if (step.meta.date) mt.push(step.meta.date); meta.textContent = mt.join(" • "); wrapper.appendChild(meta);',
             '    var desc = document.createElement("div"); desc.className = "step-desc"; desc.innerHTML = step.description || ""; wrapper.appendChild(desc);',
-            '    if (step.photos && step.photos.length) { var photos = document.createElement("div"); photos.className = "photos"; step.photos.forEach(function(src){var img=document.createElement("img");img.src=src;img.loading="lazy";photos.appendChild(img);}); wrapper.appendChild(photos); }',
-            '    if (step.videos && step.videos.length) { step.videos.forEach(function(video){var a=document.createElement("a");a.className="video-link";a.href=video; a.target="_blank"; a.textContent="📹 " + video; wrapper.appendChild(a);}); }',
-            '    wrapper.addEventListener("click", function() { showStep(parseInt(this.id.replace("step-", ""), 10)); });',
+            '    if (step.photos && step.photos.length) {',
+            '      let photoWrapper = document.createElement("div"); photoWrapper.className = "photo-wrapper";',
+            '      let viewer = document.createElement("div"); viewer.className = "photo-viewer";',
+            '      let imgLarge = document.createElement("img"); imgLarge.src = step.photos[0];',
+            '      let idxLabel = document.createElement("div"); idxLabel.className = "photo-idx"; idxLabel.innerText = "1 / " + step.photos.length;',
+            '      viewer.appendChild(imgLarge); viewer.appendChild(idxLabel);',
+            '      let nav = document.createElement("div"); nav.className = "photo-nav";',
+            '      let prevBtn = document.createElement("button"); prevBtn.type = "button"; prevBtn.className = "photo-nav-btn"; prevBtn.textContent = "◀";',
+            '      let nextBtn = document.createElement("button"); nextBtn.type = "button"; nextBtn.className = "photo-nav-btn"; nextBtn.textContent = "▶";',
+            '      let currentIndex = 0;',
+            '      function setPhoto(index) {',
+            '        if (index < 0) index = step.photos.length - 1;',
+            '        if (index >= step.photos.length) index = 0;',
+            '        currentIndex = index;',
+            '        imgLarge.src = step.photos[index];',
+            '        idxLabel.innerText = (index + 1) + " / " + step.photos.length;',
+            '      }',
+            '      prevBtn.addEventListener("click", function(event){ event.stopPropagation(); event.preventDefault(); setPhoto(currentIndex - 1); });',
+            '      nextBtn.addEventListener("click", function(event){ event.stopPropagation(); event.preventDefault(); setPhoto(currentIndex + 1); });',
+            '      nav.appendChild(prevBtn); nav.appendChild(nextBtn);',
+            '      photoWrapper.appendChild(viewer); photoWrapper.appendChild(nav);',
+            '      wrapper.appendChild(photoWrapper);',
+            '    }',
+            '    if (step.videos && step.videos.length) { var vv = document.createElement("div"); vv.className = "video-box"; step.videos.forEach(function(video){ var videoEl = document.createElement("video"); videoEl.controls = true; videoEl.preload = "metadata"; videoEl.style.marginTop = "5px"; videoEl.src = video; vv.appendChild(videoEl); }); wrapper.appendChild(vv); }',
+            '    wrapper.addEventListener("click", function(){ showStep(parseInt(this.id.replace("step-",""),10), true); });',
             '    container.appendChild(wrapper);',
             '  }',
             '}',
-            'renderStepList();',
+            'renderTimeline(); renderStepList();',
+            'var stepListEl = document.getElementById("step-list");',
+            'var observer = new IntersectionObserver(function(entries){ entries.forEach(function(entry){ if (entry.isIntersecting && entry.intersectionRatio > 0.4) { var target = entry.target; var idx = parseInt(target.id.replace("step-",""),10); if (idx !== currentIndex) { showStep(idx, false); } } }); }, { root: stepListEl, threshold: [0.4] });',
+            'document.querySelectorAll(".step-item").forEach(function(item){ observer.observe(item); });',
             'if (steps.length > 0) showStep(0);',
-            'document.getElementById("prev-step").addEventListener("click", function(){showStep(Math.max(0, currentIndex - 1));});',
-            'document.getElementById("next-step").addEventListener("click", function(){showStep(Math.min(steps.length - 1, currentIndex + 1));});',
+            'document.getElementById("prev-step").addEventListener("click", function(){ showStep(Math.max(0, currentIndex - 1), true); });',
+            'document.getElementById("next-step").addEventListener("click", function(){ showStep(Math.min(steps.length - 1, currentIndex + 1), true); });',
+            'document.getElementById("map-fullscreen-btn").addEventListener("click", function(){ document.body.classList.toggle("map-fullscreen"); var btn = document.getElementById("map-fullscreen-btn"); btn.textContent = document.body.classList.contains("map-fullscreen") ? "Exit Fullscreen" : "Enter Fullscreen"; setTimeout(function(){ map.invalidateSize(); }, 200); });',
+            'window.addEventListener("resize", function(){ map.invalidateSize(); });',
             '</script>',
             '</body>',
             '</html>'
@@ -5370,6 +5453,12 @@ def render_trip(trip_path: Path, script_dir: Path, config: dict, cache_manager: 
                 if html_builder.build():
                     did_output = True
                     print(lang.t("render.done_html", path=html_output_path) if hasattr(lang, 't') else f"HTML generated: {html_output_path}")
+                    # auto-open HTML output when only HTML mode was requested
+                    if renderer_mode == "html":
+                        try:
+                            webbrowser.open_new_tab(html_output_path.as_uri())
+                        except Exception:
+                            pass
                 else:
                     errors.append(f"HTML generation failed for {html_output_path}")
             except Exception as e:
