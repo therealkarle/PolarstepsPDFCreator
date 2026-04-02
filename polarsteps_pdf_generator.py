@@ -1334,7 +1334,9 @@ class MapGenerator:
             m.add_line(line)
 
         # Add step markers (use photo thumbnails when possible)
-        draw_markers_on_top = bool(self.label_overlay_url and center is not None)
+        # Always draw markers on top so thumbnail overlay rendering is used,
+        # including when IconMarker is unavailable or static map marker fallback is not ideal.
+        draw_markers_on_top = True
         markers_to_draw: List[dict] = []
         marker_entries: List[dict] = []
         for i, step in enumerate(trip_parser.steps):
@@ -1417,12 +1419,26 @@ class MapGenerator:
         photos = step.get("photos", [])
         photo_path = None
 
-        # Prefer a local photo if listed
+        # Prefer a local photo if listed (erste Step-Bild)
         if photos:
             candidate = photos[0]
-            photo_path = Path(candidate)
-            if not photo_path.exists():
-                photo_path = None
+            if isinstance(candidate, Path):
+                if candidate.exists():
+                    photo_path = candidate
+            elif isinstance(candidate, str):
+                if candidate.startswith(("http://", "https://")):
+                    photo_path = candidate
+                else:
+                    p = Path(candidate)
+                    if p.exists():
+                        photo_path = p
+            else:
+                try:
+                    p = Path(str(candidate))
+                    if p.exists():
+                        photo_path = p
+                except Exception:
+                    photo_path = None
 
         # Fallback: look for cover photo URL in step data
         if photo_path is None:
@@ -1692,7 +1708,8 @@ class MapGenerator:
         marker_radius = max(4, int(round(marker_px * 0.3)))
         normal_indices = [i for i in range(len(trip_parser.steps)) if i != step_index]
         draw_order = normal_indices + ([step_index] if 0 <= step_index < len(trip_parser.steps) else [])
-        draw_markers_on_top = bool(self.label_overlay_url)
+        # Always stratify to drawer layer (Pillow overlay) to ensure photo thumbnails are visible.
+        draw_markers_on_top = True
         markers_to_draw: List[dict] = []
         
         marker_entries: List[dict] = []
@@ -3325,6 +3342,30 @@ class InteractiveHtmlBuilder:
                 except Exception:
                     continue
 
+            # Fallback to cover/big photo fields if no local step photos are present
+            if not photo_list:
+                for key in ("cover_photo", "cover_photo_path", "cover_photo_thumb_path", "main_media_item_path", "cover_photo_url"):
+                    try:
+                        val = step_data.get(key) if isinstance(step_data, dict) else None
+                        if isinstance(val, dict):
+                            val = val.get("path") or val.get("small_thumbnail_path") or val.get("large_thumbnail_path")
+                        if not isinstance(val, str) or not val:
+                            continue
+                        if val.startswith("http://") or val.startswith("https://"):
+                            # remote URL, can be used directly by Leaflet marker icon
+                            photo_list.append(val)
+                            break
+                        local_path = Path(val)
+                        if not local_path.is_file() and hasattr(self.trip_parser, 'trip_path'):
+                            local_path = self.trip_parser.trip_path / val
+                        if local_path.is_file():
+                            data_url = self._image_file_to_data_url(local_path)
+                            if data_url:
+                                photo_list.append(data_url)
+                                break
+                    except Exception:
+                        continue
+
             video_list = []
             for v in step.get("videos", []):
                 if isinstance(v, str):
@@ -3360,6 +3401,8 @@ class InteractiveHtmlBuilder:
             '<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>',
             '<style>',
             'body { font-family: "Segoe UI", sans-serif; background:#f6f7f8; margin:0; padding:0; }',
+            '.step-photo-marker { border-radius: 50% !important; overflow: hidden !important; border: 2px solid #fff !important; box-shadow: 0 0 4px rgba(0,0,0,0.4) !important; }',
+            '.leaflet-marker-icon.step-photo-marker { width: 44px !important; height: 44px !important; }',
             '.top-bar { background: #1A5F7A; color: #fff; padding: 12px 16px; display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 8px; }',
             '.top-bar h1 { margin:0; font-size: 1.25rem; }',
             '.top-bar .stats { font-size: 0.9rem; color: #e8f7ff; }',
@@ -3436,7 +3479,24 @@ class InteractiveHtmlBuilder:
             'for (var i = 0; i < steps.length; i++) {',
             '  var s = steps[i];',
             '  if (normalizeNumber(s.lat) === null || normalizeNumber(s.lon) === null) continue;',
-            '  var marker = L.marker([s.lat, s.lon]).addTo(map).bindPopup("<strong>" + s.title + "</strong>");',
+            '  var marker = null;',
+            '  if (s.photos && s.photos.length > 0) {',
+            '    try {',
+            '      var icon = L.icon({',
+            '        iconUrl: s.photos[0],',
+            '        iconSize: [44, 44],',
+            '        iconAnchor: [22, 44],',
+            '        popupAnchor: [0, -44],',
+            '        className: "step-photo-marker"',
+            '      });',
+            '      marker = L.marker([s.lat, s.lon], { icon: icon }).addTo(map);',
+            '    } catch (err) {',
+            '      marker = L.marker([s.lat, s.lon]).addTo(map);',
+            '    }',
+            '  } else {',
+            '    marker = L.marker([s.lat, s.lon]).addTo(map);',
+            '  }',
+            '  marker.bindPopup("<strong>" + s.title + "</strong>");',
             '  marker.stepIndex = i;',
             '  marker.on("click", function() { showStep(this.stepIndex); });',
             '  markers[i] = marker;',
