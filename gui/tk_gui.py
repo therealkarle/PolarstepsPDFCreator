@@ -2443,6 +2443,26 @@ class App(tk.Tk):
                             val = sval
                 cfg_overrides[key] = val
 
+        # Prefer current form values for renderer/open behavior to avoid stale config confusion.
+        try:
+            mode_var = self.config_vars.get('renderer_mode')
+            if mode_var is not None:
+                mode = str(mode_var.get() or '').strip().lower()
+                if mode in ('pdf', 'html', 'both'):
+                    cfg_overrides['renderer_mode'] = mode
+        except Exception:
+            pass
+        try:
+            pdf_open_var = self.config_vars.get('open_pdf_after_render')
+            if pdf_open_var is not None:
+                cfg_overrides['open_pdf_after_render'] = bool(pdf_open_var.get())
+        except Exception:
+            pass
+
+        # Hard safety: HTML-only mode must never auto-open PDF.
+        if str(cfg_overrides.get('renderer_mode', '')).strip().lower() == 'html':
+            cfg_overrides['open_pdf_after_render'] = False
+
         # store config overrides to be merged by worker
         self._current_config_overrides = cfg_overrides
 
@@ -2689,19 +2709,48 @@ class App(tk.Tk):
                         progress_callback=lambda cur, tot, _name=trip.name: self.log_queue.put(("step_progress", (cur, tot, _name)))
                     )
                     if res:
-                        # open resulting PDF if exists
+                        # Open only artifacts that were actually rendered.
                         try:
                             parser = m.TripParser(trip)
                             parser.load()
                             trip_name_safe = "".join(c if c.isalnum() or c in " -_" else "_" for c in parser.get_trip_name())
-                            pdf_path = SCRIPT_DIR / 'TripPdfs' / f"{trip_name_safe}.pdf"
                         except Exception:
-                            pdf_path = SCRIPT_DIR / 'TripPdfs' / f"{trip.name}.pdf"
-                        if pdf_path.exists():
+                            trip_name_safe = trip.name
+
+                        renderer_mode = str(config.get('renderer_mode', config.get('renderer', 'both'))).strip().lower()
+                        if renderer_mode not in ('pdf', 'html', 'both'):
+                            renderer_mode = 'both'
+
+                        try:
+                            pdf_open_after = bool(config.get('open_pdf_after_render', True))
+                        except Exception:
+                            pdf_open_after = True
+                        try:
+                            html_open_after = bool(config.get('open_html_after_render', True))
+                        except Exception:
+                            html_open_after = True
+
+                        self.log_queue.put(("info", f"Render mode resolved: {renderer_mode} (open_html={html_open_after}, open_pdf={pdf_open_after})"))
+
+                        pdf_dir, html_dir = m._resolve_output_dirs(config, SCRIPT_DIR)
+                        pdf_path = pdf_dir / f"{trip_name_safe}.pdf"
+                        html_path = html_dir / f"{trip_name_safe}.html"
+
+                        def _open_path(path: Path):
                             try:
-                                os.startfile(str(pdf_path))
+                                if os.name == 'nt':
+                                    os.startfile(str(path))
+                                elif sys.platform == 'darwin':
+                                    subprocess.run(['open', str(path)], check=False)
+                                else:
+                                    subprocess.run(['xdg-open', str(path)], check=False)
                             except Exception:
                                 pass
+
+                        if renderer_mode in ('html', 'both') and html_open_after and html_path.exists():
+                            _open_path(html_path)
+                        if renderer_mode in ('pdf', 'both') and pdf_open_after and pdf_path.exists():
+                            _open_path(pdf_path)
                         self.log_queue.put(("info", f"Rendered: {trip.name}"))
                         # Refresh visible list so rendered marks update
                         self.log_queue.put(("refresh_list", None))

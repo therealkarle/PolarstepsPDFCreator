@@ -3734,6 +3734,19 @@ class HtmlPDFBuilder:
 
         return "\n".join(parts)
 
+    def _should_open_pdf(self) -> bool:
+        renderer_mode = str(self.config.get("renderer_mode", self.config.get("renderer", "both"))).strip().lower()
+        if renderer_mode not in ("pdf", "html", "both"):
+            renderer_mode = "both"
+
+        if renderer_mode == "html":
+            return False
+
+        try:
+            return bool(self.config.get("open_pdf_after_render", True))
+        except Exception:
+            return True
+
     def _build_photo_grid_html(self, photo_paths: List[Path]) -> str:
         if not photo_paths:
             return ""
@@ -4143,26 +4156,7 @@ class HtmlPDFBuilder:
             except Exception:
                 pass
 
-        # Optionally open the rendered PDF file after creation (config key: open_pdf_after_render)
-        try:
-            open_after = bool(self.config.get("open_pdf_after_render", True))
-        except Exception:
-            open_after = True
-
-        if open_after:
-            try:
-                t_open = time.perf_counter()
-                if os.name == "nt":
-                    # Windows
-                    os.startfile(str(self.output_path))
-                elif sys.platform == "darwin":
-                    subprocess.run(["open", str(self.output_path)], check=False)
-                else:
-                    # Linux/Unix
-                    subprocess.run(["xdg-open", str(self.output_path)], check=False)
-                print(self.cli_lang.t("render.open_pdf_done", seconds=time.perf_counter() - t_open))
-            except Exception as e:
-                print(self.lang.t("render.open_pdf_failed", error=e))
+        return True
 
 
 class CacheManager:
@@ -5398,6 +5392,13 @@ def _resolve_output_dirs(config: dict, script_dir: Path):
     return pdf_dir, html_dir
 
 
+def _should_open_html(config: dict) -> bool:
+    try:
+        return bool(config.get('open_html_after_render', True))
+    except Exception:
+        return True
+
+
 def render_trip(trip_path: Path, script_dir: Path, config: dict, cache_manager: CacheManager, check_stop=None, lang: LanguageManager = None, progress_callback=None) -> bool:
     """Render a single trip to PDF. Returns True if successful, False if error or stopped."""
     lang = lang or get_default_language_manager()
@@ -5424,6 +5425,12 @@ def render_trip(trip_path: Path, script_dir: Path, config: dict, cache_manager: 
         renderer_mode = str(config.get("renderer_mode", config.get("renderer", "both"))).strip().lower()
         if renderer_mode not in ("pdf", "html", "both"):
             renderer_mode = "both"
+
+        html_open_after = _should_open_html(config)
+        try:
+            pdf_open_after = bool(config.get("open_pdf_after_render", True))
+        except Exception:
+            pdf_open_after = True
 
         pdf_dir, html_dir = _resolve_output_dirs(config, script_dir)
         pdf_dir.mkdir(parents=True, exist_ok=True)
@@ -5453,8 +5460,8 @@ def render_trip(trip_path: Path, script_dir: Path, config: dict, cache_manager: 
                 if html_builder.build():
                     did_output = True
                     print(lang.t("render.done_html", path=html_output_path) if hasattr(lang, 't') else f"HTML generated: {html_output_path}")
-                    # auto-open HTML output when only HTML mode was requested
-                    if renderer_mode == "html":
+                    # auto-open HTML output for HTML-only and both modes (when configured)
+                    if html_open_after:
                         try:
                             webbrowser.open_new_tab(html_output_path.as_uri())
                         except Exception:
@@ -5472,6 +5479,17 @@ def render_trip(trip_path: Path, script_dir: Path, config: dict, cache_manager: 
                 if pdf_builder.build():
                     did_output = True
                     print(lang.t("render.done_pdf", path=output_path))
+                    if pdf_open_after:
+                        try:
+                            if os.name == "nt":
+                                os.startfile(str(output_path))
+                            elif sys.platform == "darwin":
+                                subprocess.run(["open", str(output_path)], check=False)
+                            else:
+                                subprocess.run(["xdg-open", str(output_path)], check=False)
+                            print(lang.t("render.open_pdf_done", seconds=time.perf_counter() - t0))
+                        except Exception as e:
+                            print(lang.t("render.open_pdf_failed", error=e))
                 else:
                     errors.append(f"PDF generation failed for {output_path}")
             except Exception as e:
