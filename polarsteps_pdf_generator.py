@@ -443,6 +443,33 @@ class TripParser:
         self.trip_data = {}
         self.steps = []
 
+    def _resolve_media_reference(self, ref):
+        """Resolve media reference to a local path or remote URL string."""
+        if not ref:
+            return None
+        # preserve remote URLs directly
+        if isinstance(ref, str):
+            r = ref.strip()
+            if r.startswith("http://") or r.startswith("https://"):
+                return r
+            try:
+                p = Path(r)
+            except Exception:
+                p = None
+            if p is not None:
+                if p.is_file():
+                    return p
+                local = (self.trip_path / r).resolve()
+                if local.is_file():
+                    return local
+        elif isinstance(ref, Path):
+            if ref.is_file():
+                return ref
+            local = (self.trip_path / ref).resolve()
+            if local.is_file():
+                return local
+        return None
+
     def load(self):
         # Load trip.json
         try:
@@ -467,9 +494,17 @@ class TripParser:
                 # try to find photos/videos listed in step entry
                 if isinstance(s, dict):
                     for p in s.get("photos", []):
-                        photos.append(Path(self.trip_path) / p) if p else None
+                        if not p:
+                            continue
+                        media = self._resolve_media_reference(p)
+                        if media is not None:
+                            photos.append(media)
                     for v in s.get("videos", []):
-                        videos.append(Path(self.trip_path) / v) if v else None
+                        if not v:
+                            continue
+                        media = self._resolve_media_reference(v)
+                        if media is not None:
+                            videos.append(media)
                 if isinstance(data, dict):
                     data["description"] = _clean_text(data.get("description", ""))
                     data["display_name"] = _clean_text(data.get("display_name", data.get("name", ""))) or data.get("name")
@@ -543,6 +578,35 @@ class TripParser:
                         for ext in ("*.mp4", "*.mov", "*.mkv"):
                             videos.extend(sorted(videos_dir.glob(ext)))
 
+                # If step metadata itself references photos/videos, include them too.
+                if isinstance(data, dict):
+                    for p in data.get("photos", []) or []:
+                        if not p:
+                            continue
+                        media = self._resolve_media_reference(p)
+                        if media is not None and media not in photos:
+                            photos.append(media)
+                    for variant in ("photo", "media", "media_items", "photo_urls"):
+                        for p in data.get(variant, []) or []:
+                            if not p:
+                                continue
+                            media = self._resolve_media_reference(p)
+                            if media is not None and media not in photos:
+                                photos.append(media)
+                    for v in data.get("videos", []) or []:
+                        if not v:
+                            continue
+                        media = self._resolve_media_reference(v)
+                        if media is not None and media not in videos:
+                            videos.append(media)
+                    for variant in ("video", "video_urls", "media_items"):
+                        for v in data.get(variant, []) or []:
+                            if not v:
+                                continue
+                            media = self._resolve_media_reference(v)
+                            if media is not None and media not in videos:
+                                videos.append(media)
+
                 # Fallback: attempt to use a trip-level photos folder named like step
                 if not photos:
                     for c in trip_children:
@@ -592,6 +656,35 @@ class TripParser:
                         break
                 except Exception:
                     step_data = {}
+
+            # Add any media referenced in step metadata (for robustness)
+            if isinstance(step_data, dict):
+                for p in step_data.get("photos", []) or []:
+                    if not p:
+                        continue
+                    media = self._resolve_media_reference(p)
+                    if media is not None and media not in photos:
+                        photos.append(media)
+                for variant in ("photo", "media", "media_items", "photo_urls"):
+                    for p in step_data.get(variant, []) or []:
+                        if not p:
+                            continue
+                        media = self._resolve_media_reference(p)
+                        if media is not None and media not in photos:
+                            photos.append(media)
+                for v in step_data.get("videos", []) or []:
+                    if not v:
+                        continue
+                    media = self._resolve_media_reference(v)
+                    if media is not None and media not in videos:
+                        videos.append(media)
+                for variant in ("video", "video_urls", "media_items"):
+                    for v in step_data.get(variant, []) or []:
+                        if not v:
+                            continue
+                        media = self._resolve_media_reference(v)
+                        if media is not None and media not in videos:
+                            videos.append(media)
 
             if photos or videos or step_data:
                 # normalize location field if nested
@@ -3332,13 +3425,18 @@ class InteractiveHtmlBuilder:
             photo_list = []
             for p in step.get("photos", []):
                 try:
+                    if isinstance(p, str) and (p.startswith("http://") or p.startswith("https://")):
+                        photo_list.append(p)
+                        continue
                     path = Path(p)
                     if not path.is_file() and hasattr(self.trip_parser, 'trip_path'):
-                        path = self.trip_parser.trip_path / p
+                        path = (self.trip_parser.trip_path / p)
                     if path.is_file():
                         data_url = self._image_file_to_data_url(path)
                         if data_url:
                             photo_list.append(data_url)
+                    elif isinstance(p, str) and p.startswith("file:"):
+                        photo_list.append(p)
                 except Exception:
                     continue
 
@@ -3351,8 +3449,8 @@ class InteractiveHtmlBuilder:
                             val = val.get("path") or val.get("small_thumbnail_path") or val.get("large_thumbnail_path")
                         if not isinstance(val, str) or not val:
                             continue
-                        if val.startswith("http://") or val.startswith("https://"):
-                            # remote URL, can be used directly by Leaflet marker icon
+                        if val.startswith("http://") or val.startswith("https://") or val.startswith("file:"):
+                            # remote URL or file URL
                             photo_list.append(val)
                             break
                         local_path = Path(val)
@@ -3368,12 +3466,21 @@ class InteractiveHtmlBuilder:
 
             video_list = []
             for v in step.get("videos", []):
-                if isinstance(v, str):
-                    try:
-                        file_url = Path(v).resolve().as_uri()
-                    except Exception:
-                        file_url = self._escape(v)
-                    video_list.append(file_url)
+                try:
+                    if isinstance(v, str) and (v.startswith("http://") or v.startswith("https://") or v.startswith("file:")):
+                        video_list.append(v)
+                        continue
+                    if isinstance(v, str):
+                        file_path = Path(v)
+                        if not file_path.is_file() and hasattr(self.trip_parser, 'trip_path'):
+                            file_path = (self.trip_parser.trip_path / v)
+                        if file_path.is_file():
+                            video_list.append(file_path.resolve().as_uri())
+                            continue
+                    if isinstance(v, Path) and v.is_file():
+                        video_list.append(v.resolve().as_uri())
+                except Exception:
+                    continue
 
             steps_data.append({
                 "step_number": i,
@@ -3537,31 +3644,62 @@ class InteractiveHtmlBuilder:
             '    var title = document.createElement("div"); title.className = "step-title"; title.textContent = (i + 1) + ". " + step.title; wrapper.appendChild(title);',
             '    var meta = document.createElement("div"); meta.className = "step-meta"; var mt = []; if (step.meta.location) mt.push(step.meta.location); if (step.meta.date) mt.push(step.meta.date); meta.textContent = mt.join(" • "); wrapper.appendChild(meta);',
             '    var desc = document.createElement("div"); desc.className = "step-desc"; desc.innerHTML = step.description || ""; wrapper.appendChild(desc);',
-            '    if (step.photos && step.photos.length) {',
+            '    let mediaItems = [];',
+            '    if (step.photos && step.photos.length) { step.photos.forEach(function(src){ mediaItems.push({ type: "image", src: src }); }); }',
+            '    if (step.videos && step.videos.length) { step.videos.forEach(function(src){ mediaItems.push({ type: "video", src: src }); }); }',
+            '    if (mediaItems.length) {',
             '      let photoWrapper = document.createElement("div"); photoWrapper.className = "photo-wrapper";',
             '      let viewer = document.createElement("div"); viewer.className = "photo-viewer";',
-            '      let imgLarge = document.createElement("img"); imgLarge.src = step.photos[0];',
-            '      let idxLabel = document.createElement("div"); idxLabel.className = "photo-idx"; idxLabel.innerText = "1 / " + step.photos.length;',
-            '      viewer.appendChild(imgLarge); viewer.appendChild(idxLabel);',
+            '      let idxLabel = document.createElement("div"); idxLabel.className = "photo-idx"; idxLabel.innerText = "1 / " + mediaItems.length;',
+            '      viewer.appendChild(idxLabel);',
             '      let nav = document.createElement("div"); nav.className = "photo-nav";',
             '      let prevBtn = document.createElement("button"); prevBtn.type = "button"; prevBtn.className = "photo-nav-btn"; prevBtn.textContent = "◀";',
             '      let nextBtn = document.createElement("button"); nextBtn.type = "button"; nextBtn.className = "photo-nav-btn"; nextBtn.textContent = "▶";',
-            '      let currentIndex = 0;',
-            '      function setPhoto(index) {',
-            '        if (index < 0) index = step.photos.length - 1;',
-            '        if (index >= step.photos.length) index = 0;',
-            '        currentIndex = index;',
-            '        imgLarge.src = step.photos[index];',
-            '        idxLabel.innerText = (index + 1) + " / " + step.photos.length;',
+            '      let currentIdx = 0;',
+            '      function setMedia(index) {',
+            '        if (mediaItems.length === 0) return;',
+            '        if (index < 0) index = mediaItems.length - 1;',
+            '        if (index >= mediaItems.length) index = 0;',
+            '        currentIdx = index;',
+            '        var item = mediaItems[index];',
+            '        while (viewer.firstChild) viewer.removeChild(viewer.firstChild);',
+            '        if (item.type === "video") {',
+            '          var videoEl = document.createElement("video");',
+            '          videoEl.controls = true;',
+            '          videoEl.preload = "metadata";',
+            '          videoEl.playsInline = true;',
+            '          videoEl.autoplay = true;',
+            '          videoEl.style.width = "100%";',
+            '          videoEl.style.height = "100%";',
+            '          videoEl.style.objectFit = "contain";',
+            '          videoEl.src = item.src;',
+            '          viewer.appendChild(videoEl);',
+            '          var playPromise = videoEl.play();',
+            '          if (playPromise && playPromise.catch) {',
+            '            playPromise.catch(function(){',
+            '              try { videoEl.muted = true; videoEl.play(); } catch (e) {}',
+            '            });',
+            '          }',
+            '        } else {',
+            '          var imgEl = document.createElement("img");',
+            '          imgEl.src = item.src;',
+            '          imgEl.style.width = "100%";',
+            '          imgEl.style.height = "100%";',
+            '          imgEl.style.objectFit = "contain";',
+            '          viewer.appendChild(imgEl);',
+            '        }',
+            '        viewer.appendChild(idxLabel);',
+            '        idxLabel.innerText = (index + 1) + " / " + mediaItems.length;',
             '      }',
-            '      prevBtn.addEventListener("click", function(event){ event.stopPropagation(); event.preventDefault(); setPhoto(currentIndex - 1); });',
-            '      nextBtn.addEventListener("click", function(event){ event.stopPropagation(); event.preventDefault(); setPhoto(currentIndex + 1); });',
+            '      prevBtn.addEventListener("click", function(event){ event.stopPropagation(); event.preventDefault(); setMedia(currentIdx - 1); });',
+            '      nextBtn.addEventListener("click", function(event){ event.stopPropagation(); event.preventDefault(); setMedia(currentIdx + 1); });',
             '      nav.appendChild(prevBtn); nav.appendChild(nextBtn);',
             '      photoWrapper.appendChild(viewer); photoWrapper.appendChild(nav);',
+            '      setMedia(0);',
             '      wrapper.appendChild(photoWrapper);',
             '    }',
-            '    if (step.videos && step.videos.length) { var vv = document.createElement("div"); vv.className = "video-box"; step.videos.forEach(function(video){ var videoEl = document.createElement("video"); videoEl.controls = true; videoEl.preload = "metadata"; videoEl.style.marginTop = "5px"; videoEl.src = video; vv.appendChild(videoEl); }); wrapper.appendChild(vv); }',
-            '    wrapper.addEventListener("click", function(){ showStep(parseInt(this.id.replace("step-",""),10), true); });',
+            '    // Video carousel items are handled together with photos in step media carousel.',
+            '    wrapper.addEventListener("click", function(event){ var target = event.target; if (target.closest && (target.closest(".photo-nav") || target.closest(".photo-viewer") || target.closest("video"))) { return; } showStep(parseInt(this.id.replace("step-",""),10), true); });',
             '    container.appendChild(wrapper);',
             '  }',
             '}',
@@ -3870,18 +4008,27 @@ class HtmlPDFBuilder:
         if not photo_paths:
             return ""
         items = []
+
+        def _photo_url(p):
+            if isinstance(p, str) and (p.startswith("http://") or p.startswith("https://") or p.startswith("file:")):
+                return p
+            try:
+                return self._image_file_to_data_url(Path(p))
+            except Exception:
+                return None
+
         workers = max(1, min(int(self._photo_workers), len(photo_paths)))
         if workers > 1:
             try:
                 with ThreadPoolExecutor(max_workers=workers) as executor:
-                    urls = list(executor.map(self._image_file_to_data_url, photo_paths))
+                    urls = list(executor.map(_photo_url, photo_paths))
                 for url in urls:
                     if url:
                         items.append(f"<img src=\"{url}\"/>")
             except Exception:
                 for p in photo_paths:
                     try:
-                        url = self._image_file_to_data_url(p)
+                        url = _photo_url(p)
                         if url:
                             items.append(f"<img src=\"{url}\"/>")
                     except Exception:
@@ -3889,13 +4036,34 @@ class HtmlPDFBuilder:
         else:
             for p in photo_paths:
                 try:
-                    url = self._image_file_to_data_url(p)
+                    url = _photo_url(p)
                     if url:
                         items.append(f"<img src=\"{url}\"/>")
                 except Exception:
                     continue
         if items:
             return f"<div class=\"photo-grid\">{''.join(items)}</div>"
+        return ""
+
+    def _build_video_grid_html(self, video_paths: List[str]) -> str:
+        if not video_paths:
+            return ""
+        videos = []
+        for v in video_paths:
+            try:
+                if isinstance(v, str) and (v.startswith("http://") or v.startswith("https://") or v.startswith("file:")):
+                    video_url = v
+                else:
+                    video_url = Path(v).resolve().as_uri()
+                videos.append(
+                    "<div class=\"video-box\"><video controls preload=\"metadata\" style=\"width:100%; max-height:360px;\">"
+                    f"<source src=\"{self._escape(video_url)}\" />"
+                    "</video></div>"
+                )
+            except Exception:
+                continue
+        if videos:
+            return "".join(videos)
         return ""
 
     def _build_html(self) -> str:
@@ -4034,6 +4202,8 @@ class HtmlPDFBuilder:
             ".appendix-step-title { color: #1A5F7A; font-size: 14pt; margin: 6mm 0 2mm; }",
             ".video-header { margin-top: 3mm; font-weight: 600; }",
             ".video-link { display: block; color: #0066CC; text-decoration: none; font-size: 10pt; }",
+            ".video-box { margin-top: 6px; }",
+            ".video-box video { width: 100%; max-height: 360px; border-radius: 4px; border: 1px solid #ccc; }",
             "a.link { color: #0066CC; text-decoration: none; }",
             "a.link:hover { text-decoration: underline; }",
             "</style>",
@@ -4124,15 +4294,20 @@ class HtmlPDFBuilder:
             desc_rest_html = self._build_description_html(desc_rest_text) if desc_rest_text else ""
 
             # Photo grid
-            photos_to_show, extra_photos = self._split_step_photos([Path(p) for p in photos])
+            photos_to_show = [Path(p) if not (isinstance(p, str) and (p.startswith('http://') or p.startswith('https://') or p.startswith('file:'))) else p for p in photos]
             photo_html = self._build_photo_grid_html(photos_to_show)
 
-            if self.appendix_show_undisplayed_media and (extra_photos or videos):
+            # Video blocks for this step
+            video_html = self._build_video_grid_html(videos)
+
+            # Add all media to step (no split hiding) and in appendix only if extra exists due explicit config.
+            extra_photos = []
+            if self.appendix_show_undisplayed_media and extra_photos:
                 appendix_items.append({
                     "step_number": step_number,
                     "display_name": display_name or f"{self.lang.t('pdf.step_label')} {step_number}",
                     "extra_photos": extra_photos,
-                    "videos": videos,
+                    "videos": [],
                 })
 
             step_section = [
@@ -4148,7 +4323,7 @@ class HtmlPDFBuilder:
             if desc_rest_html:
                 step_section.append(f"<div class=\"step-desc-rest\">{desc_rest_html}</div>")
 
-            step_section.extend([photo_html, "</div>"])
+            step_section.extend([photo_html, video_html, "</div>"])
             html_parts.extend(step_section)
 
         if self.appendix_show_undisplayed_media and appendix_items:
