@@ -9,6 +9,14 @@ print('calling render_trip html')
 try:
     res = m.render_trip(trip, script_dir, {'renderer_mode':'html'}, cm, lambda: False)
     print('returned', res)
+    if res:
+        html_path = script_dir / 'TripPdfs' / 'Hochlitten Fasnacht .html'
+        if html_path.exists():
+            html_text = html_path.read_text(encoding='utf-8')
+            assert 'map-resize-handle' in html_text, 'RESIZE HANDLE NOT FOUND in HTML'
+            print('Resize handle confirmed in html output.')
+        else:
+            print('WARNING: expected html file not found:', html_path)
 except Exception as e:
     import traceback
     traceback.print_exc()
