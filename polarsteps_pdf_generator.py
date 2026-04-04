@@ -768,6 +768,8 @@ except Exception:
 ESRI_SATELLITE_URL = "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
 # ESRI World Street Map tile template (Road)
 ESRI_ROAD_URL = "https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}"
+# OpenStreetMap standard tile template (Road)
+OSM_TILE_URL = "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
 # ESRI Reference labels (transparent overlay for hybrid-style maps)
 ESRI_LABELS_URL = "https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}"
 # Map colors
@@ -3358,6 +3360,24 @@ class InteractiveHtmlBuilder:
         except Exception:
             return None
 
+    def _is_html_osm_available(self) -> bool:
+        try:
+            test_url = OSM_TILE_URL.format(s="a", z=2, x=1, y=1)
+            headers = {
+                "User-Agent": "Mozilla/5.0 (compatible; PolarstepsPDFCreator/1.0)",
+                "Referer": "https://www.openstreetmap.org/"
+            }
+            r = requests.get(test_url, headers=headers, timeout=6)
+            if r is None or r.status_code != 200:
+                return False
+            content = r.content or b""
+            if b"Access blocked" in content or b"Referer is required" in content:
+                return False
+            ctype = r.headers.get("content-type", "")
+            return ctype.startswith("image") and len(content) > 100
+        except Exception:
+            return False
+
     def _escape(self, text: str) -> str:
         return html.escape(text or "")
 
@@ -3521,7 +3541,6 @@ class InteractiveHtmlBuilder:
             '.map-resize-handle { width: 6px; cursor: col-resize; background: rgba(0,0,0,0.15); }',
             '.map-container { flex: 0 0 auto; width: 28%; min-width: 320px; height: calc(100vh - 136px); position: relative; }',
             '#map { width: 100%; height: 100%; }',
-            '.map-fullscreen #map { position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; z-index: 9999; }',
             '.step-item { padding: 14px 12px; border-bottom: 1px solid #eee; cursor: pointer; }',
             '.step-item.active { background: #e8f5ff; border-left: 4px solid #1A5F7A; }',
             '.step-title { font-weight: 700; font-size: 1.1rem; margin-bottom: 4px; }',
@@ -3568,15 +3587,24 @@ class InteractiveHtmlBuilder:
             '<button id="view-both-btn" class="active">Both</button>',
             '<button id="view-map-btn">Map</button>',
             '</div>',
-            '<button id="map-fullscreen-btn">Enter Fullscreen</button>',
             '<button id="prev-step">Previous</button>',
             '<button id="next-step">Next</button>',
             '</div>',
             '<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>',
             '<script>',
             'var steps = ' + steps_json + ';',
-            'var map = L.map("map").setView([0,0],2);',
-            'L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { attribution: "&copy; OpenStreetMap contributors", maxZoom: 18 }).addTo(map);',
+            'var htmlMapStyle = ' + json.dumps(str(self.config.get("html_map_style", "road")).lower().strip()) + ';',
+            'var htmlOsmAvailable = ' + json.dumps(self._is_html_osm_available()) + ';',
+            'var osmLayer = L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { attribution: "&copy; OpenStreetMap contributors", maxZoom: 18, subdomains: ["a", "b", "c"], errorTileUrl: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQImWNgYGD4DwABBAEAQco6VwAAAABJRU5ErkJggg==" });',
+            'var esriRoadLayer = L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}", { attribution: "Tiles &copy; Esri &mdash; Source: Esri, HERE, Garmin, USGS, NGA, EPA", maxZoom: 18 });',
+            'var satelliteLayer = L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", { attribution: "Tiles &copy; Esri &mdash; Source: Esri, HERE, Garmin, USGS, NGA, EPA", maxZoom: 18 });',
+            'var hybridLayer = L.layerGroup([satelliteLayer, L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}", { attribution: "Tiles &copy; Esri &mdash; Source: Esri, HERE, Garmin, USGS, NGA, EPA", opacity: 0.7, maxZoom: 18 })]);',
+            'var baseLayers = { "Satellite": satelliteLayer, "Hybrid": hybridLayer };',
+            'if (htmlOsmAvailable) { baseLayers["OpenStreetMap"] = osmLayer; } else { baseLayers["Road (fallback)"] = esriRoadLayer; }',
+            'var selectedLayer = esriRoadLayer;',
+            'if (htmlMapStyle === "satellite") { selectedLayer = satelliteLayer; } else if (htmlMapStyle === "hybrid") { selectedLayer = hybridLayer; } else if (htmlMapStyle === "road" && htmlOsmAvailable) { selectedLayer = osmLayer; }',
+            'var map = L.map("map", { layers: [selectedLayer] }).setView([0,0],2);',
+            'L.control.layers(baseLayers, null, { collapsed: false }).addTo(map);',
             'var markers = [];',
             'var currentIndex = -1;',
             'function normalizeNumber(x) { return (typeof x === "number" && !isNaN(x) ? x : null); }',
@@ -3741,7 +3769,6 @@ class InteractiveHtmlBuilder:
             'document.getElementById("view-both-btn").addEventListener("click", function(){ console.log("view-both clicked"); setViewMode(0); });',
             'document.getElementById("view-map-btn").addEventListener("click", function(){ console.log("view-map clicked"); setViewMode(1); });',
             'setViewMode(0);',
-            'document.getElementById("map-fullscreen-btn").addEventListener("click", function(){ document.body.classList.toggle("map-fullscreen"); var btn = document.getElementById("map-fullscreen-btn"); btn.textContent = document.body.classList.contains("map-fullscreen") ? "Exit Fullscreen" : "Enter Fullscreen"; setTimeout(function(){ map.invalidateSize(); }, 200); });',
             'window.addEventListener("resize", function(){ map.invalidateSize(); });',
             'var resizeHandle = document.getElementById("map-resize-handle");',
             'var sidebar = document.querySelector(".sidebar");',

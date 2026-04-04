@@ -52,6 +52,8 @@ photo_wall_gap = 2
 # --- General Map Settings ---
 # Map style: "hybrid" (satellite + labels), "satellite" (imagery only) or "road" (streets)
 map_style = "hybrid"
+# HTML map style: "road" uses OpenStreetMap, "satellite" uses ESRI imagery, "hybrid" uses ESRI imagery plus labels
+html_map_style = "road"
 # Opacity for hybrid label overlay (0.0-1.0)
 hybrid_labels_opacity = 1.0
 
