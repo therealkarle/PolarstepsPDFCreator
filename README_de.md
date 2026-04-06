@@ -117,6 +117,7 @@ Hinweise:
 | `-a`, `--all` | Alle Trips einschließen (auch bereits gerenderte) |
 | `-ur`, `--unrendered` | Nur ungerenderte Trips |
 | `-y YEAR` | Nach Jahr filtern (z. B. `-y 2025`) |
+| `--combined-html [DATEI]` | Erzeuge eine kombinierte HTML-Übersicht für ausgewählte Reisen oder Filter. Standard: `TripPdfs/combined_trips.html`. |
 | `-d START;END` | Datumsbereich im Format `dd.mm.yyyy` |
 | `-config(KEY=VALUE,...)` | Temporäre Config‑Überschreibungen (z. B. `-config(map_style="road", max_photos_per_step=4)`) |
 

@@ -823,6 +823,8 @@ class App(tk.Tk):
         self.frm_bottom = frm_bottom
         self.stats_btn = ttk.Button(frm_bottom, text=self.lang.t('gui.statistics'), command=self._on_show_statistics)
         self.stats_btn.pack(side=tk.RIGHT, padx=(6, 0))
+        self.combined_html_btn = ttk.Button(frm_bottom, text="Combined HTML", command=self._on_combined_html)
+        self.combined_html_btn.pack(side=tk.RIGHT, padx=(6, 0))
         # add tooltip explaining button action
         try:
             # determine language for tooltip (read config if possible)
@@ -2618,6 +2620,106 @@ class App(tk.Tk):
         self.stop_flag.set()
         self.status_text.set("Stopping...")
 
+    def _open_path(self, path: Path):
+        try:
+            if os.name == 'nt':
+                os.startfile(str(path))
+            elif sys.platform == 'darwin':
+                subprocess.run(['open', str(path)], check=False)
+            else:
+                subprocess.run(['xdg-open', str(path)], check=False)
+        except Exception:
+            pass
+
+    def _on_combined_html(self):
+        try:
+            sel = self.trips_tree.selection()
+            if sel:
+                source = getattr(self, '_filtered_trips', None) or getattr(self, '_trips', [])
+                trips = [source[int(iid)] for iid in sel]
+            else:
+                trips = self._get_filtered_trips(include_rendered=True)
+        except ValueError:
+            messagebox.showerror(self.lang.t('gui.invalid_date_title'), self.lang.t('gui.invalid_date_msg'))
+            return
+        except Exception:
+            messagebox.showerror(self.lang.t('gui.selection_error_title'), self.lang.t('gui.selection_error_body'))
+            return
+
+        if not trips:
+            messagebox.showinfo(self.lang.t('gui.no_trips_for_stats_title'), self.lang.t('gui.no_trips_for_stats_body'))
+            return
+
+        self.combined_html_btn.config(state=tk.DISABLED)
+        self.status_text.set(f"Building combined HTML for {len(trips)} trip(s)...")
+        threading.Thread(target=self._combined_html_worker, args=(trips,), daemon=True).start()
+
+    def _combined_html_worker(self, trips):
+        try:
+            config = {}
+            try:
+                config_file = SCRIPT_DIR / 'config.toml'
+                if config_file.exists():
+                    content = config_file.read_text(encoding='utf-8')
+                    if hasattr(m, '_tomllib') and m._tomllib:
+                        config = m._tomllib.loads(content)
+                    else:
+                        config = m._parse_simple_toml(content)
+            except Exception:
+                config = {}
+
+            try:
+                gui_overrides = getattr(self, '_current_config_overrides', {}) or {}
+                if isinstance(gui_overrides, dict):
+                    config.update(gui_overrides)
+            except Exception:
+                pass
+
+            try:
+                gui_lang = m.load_language_manager(config.get('language', 'en'), SCRIPT_DIR)
+                m._DEFAULT_LANGUAGE_MANAGER = gui_lang
+                config['_language_code'] = gui_lang.language_code
+                pdf_lang_code = config.get('pdf_language', '').strip()
+                if not pdf_lang_code:
+                    pdf_lang_code = config.get('language', gui_lang.language_code)
+                pdf_lang = m.load_language_manager(pdf_lang_code, SCRIPT_DIR)
+                config['_pdf_language_manager'] = pdf_lang
+                config['_pdf_language_code'] = pdf_lang.language_code
+            except Exception:
+                pass
+
+            output_folder_html = Path(config.get('output_folder_html') or config.get('output_folder') or SCRIPT_DIR / 'TripPdfs')
+            try:
+                output_folder_html.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                pass
+
+            html_name = 'combined_trips'
+            if not self.trips_tree.selection():
+                year = getattr(self, '_stats_filter_year', None)
+                sd = getattr(self, '_stats_filter_start', None)
+                ed = getattr(self, '_stats_filter_end', None)
+                if year:
+                    html_name += f"_{year}"
+                elif sd and ed:
+                    try:
+                        html_name += f"_{sd.date()}_{ed.date()}"
+                    except Exception:
+                        html_name += '_range'
+            html_path = output_folder_html / f"{html_name}.html"
+
+            builder = m.CombinedHtmlBuilder(html_path, trips, config=config, language_manager=gui_lang, cli_language_manager=gui_lang)
+            ok = builder.build()
+            if ok:
+                open_html = bool(config.get('open_html_after_render', True))
+                if open_html and html_path.exists():
+                    self._open_path(html_path)
+                self.log_queue.put(('combined_html_done', {'path': str(html_path)}))
+            else:
+                self.log_queue.put(('combined_html_error', f'Failed to build combined HTML: {html_path}'))
+        except Exception as exc:
+            self.log_queue.put(('combined_html_error', str(exc)))
+
     def _get_filtered_trips(self, include_rendered: bool = True):
         """Return list of trips filtered by the current date/year and render settings.
 
@@ -3052,6 +3154,31 @@ class App(tk.Tk):
                         messagebox.showerror(self.lang.t('gui.statistics'), self.lang.t('gui.stats_error').format(error=e))
                 elif typ == 'stats_error':
                     messagebox.showerror(self.lang.t('gui.statistics'), self.lang.t('gui.stats_error_payload').format(payload=payload))
+                elif typ == 'combined_html_done':
+                    try:
+                        self.status_text.set(self.lang.t('gui.status_done'))
+                    except Exception:
+                        self.status_text.set('Combined HTML generation complete')
+                    try:
+                        self.combined_html_btn.config(state=tk.NORMAL)
+                    except Exception:
+                        pass
+                    path = payload.get('path') if isinstance(payload, dict) else None
+                    if path:
+                        try:
+                            messagebox.showinfo('Combined HTML', f'Combined HTML written: {path}')
+                        except Exception:
+                            pass
+                elif typ == 'combined_html_error':
+                    try:
+                        self.status_text.set(self.lang.t('gui.status_ready'))
+                    except Exception:
+                        self.status_text.set('Ready')
+                    try:
+                        self.combined_html_btn.config(state=tk.NORMAL)
+                    except Exception:
+                        pass
+                    messagebox.showerror('Combined HTML', payload)
                 elif typ == 'pkg_install_start':
                     # disable package controls and configure overall progress bar
                     try:
