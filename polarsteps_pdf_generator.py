@@ -184,6 +184,79 @@ def _parse_simple_toml(content: str) -> dict:
     return data
 
 
+def _shared_detail_media_css() -> List[str]:
+    return [
+        '.photo-wrapper { position: relative; margin-top: 8px; }',
+        '.photo-viewer { width: 100%; height: 320px; background: #000; position: relative; border: 1px solid #ccc; border-radius: 4px; overflow: hidden; }',
+        '.photo-viewer img { width: 100%; height: 100%; object-fit: contain; background: #000; }',
+        '.photo-nav { position: absolute; top: 50%; left: 0; right: 0; pointer-events: auto; display: flex; justify-content: space-between; transform: translateY(-50%); padding: 0 6px; }',
+        '.photo-nav-btn { pointer-events: auto; border: none; background: rgba(26,95,122,0.8); color: white; width: 34px; height: 34px; border-radius: 50%; cursor: pointer; font-size: 1.1rem; font-weight: bold; }',
+        '.photo-idx { position: absolute; bottom: 8px; right: 12px; color: #fff; background: rgba(0,0,0,0.5); padding: 2px 8px; border-radius: 12px; font-size: 0.85rem; }',
+        '.video-box { margin-top: 6px; }',
+        '.video-box video { width: 100%; border-radius: 4px; border: 1px solid #ccc; }',
+    ]
+
+
+def _shared_step_media_carousel_js() -> List[str]:
+    return [
+        'function createStepMediaCarousel(step) {',
+        '  var mediaItems = [];',
+        '  if (step.photos && step.photos.length) { step.photos.forEach(function(src){ mediaItems.push({ type: "image", src: src }); }); }',
+        '  if (step.videos && step.videos.length) { step.videos.forEach(function(src){ mediaItems.push({ type: "video", src: src }); }); }',
+        '  if (mediaItems.length === 0) { return null; }',
+        '  var wrapper = document.createElement("div"); wrapper.className = "photo-wrapper";',
+        '  var viewer = document.createElement("div"); viewer.className = "photo-viewer";',
+        '  var idxLabel = document.createElement("div"); idxLabel.className = "photo-idx";',
+        '  var nav = document.createElement("div"); nav.className = "photo-nav";',
+        '  var prevBtn = document.createElement("button"); prevBtn.type = "button"; prevBtn.className = "photo-nav-btn"; prevBtn.textContent = "◀";',
+        '  var nextBtn = document.createElement("button"); nextBtn.type = "button"; nextBtn.className = "photo-nav-btn"; nextBtn.textContent = "▶";',
+        '  var currentIdx = 0;',
+        '  function setMedia(index) {',
+        '    if (mediaItems.length === 0) return;',
+        '    if (index < 0) index = mediaItems.length - 1;',
+        '    if (index >= mediaItems.length) index = 0;',
+        '    currentIdx = index;',
+        '    var item = mediaItems[index];',
+        '    while (viewer.firstChild) viewer.removeChild(viewer.firstChild);',
+        '    if (item.type === "video") {',
+        '      var videoEl = document.createElement("video");',
+        '      videoEl.controls = true;',
+        '      videoEl.preload = "metadata";',
+        '      videoEl.playsInline = true;',
+        '      videoEl.autoplay = true;',
+        '      videoEl.style.width = "100%";',
+        '      videoEl.style.height = "100%";',
+        '      videoEl.style.objectFit = "contain";',
+        '      videoEl.src = item.src;',
+        '      viewer.appendChild(videoEl);',
+        '      var playPromise = videoEl.play();',
+        '      if (playPromise && playPromise.catch) {',
+        '        playPromise.catch(function(){',
+        '          try { videoEl.muted = true; videoEl.play(); } catch (e) {}',
+        '        });',
+        '      }',
+        '    } else {',
+        '      var imgEl = document.createElement("img");',
+        '      imgEl.src = item.src;',
+        '      imgEl.style.width = "100%";',
+        '      imgEl.style.height = "100%";',
+        '      imgEl.style.objectFit = "contain";',
+        '      viewer.appendChild(imgEl);',
+        '    }',
+        '    viewer.appendChild(idxLabel);',
+        '    idxLabel.innerText = (index + 1) + " / " + mediaItems.length;',
+        '  }',
+        '  prevBtn.addEventListener("click", function(event){ event.stopPropagation(); event.preventDefault(); setMedia(currentIdx - 1); });',
+        '  nextBtn.addEventListener("click", function(event){ event.stopPropagation(); event.preventDefault(); setMedia(currentIdx + 1); });',
+        '  nav.appendChild(prevBtn); nav.appendChild(nextBtn);',
+        '  wrapper.appendChild(viewer);',
+        '  wrapper.appendChild(nav);',
+        '  setMedia(0);',
+        '  return wrapper;',
+        '}',
+    ]
+
+
 def load_language_manager(language_code: str, script_dir: Path) -> LanguageManager:
     normalized = _normalize_language_code(language_code)
     selected_path = (script_dir / "LanguagePack") / f"{normalized}.json"
@@ -3563,14 +3636,7 @@ class InteractiveHtmlBuilder:
             '.step-title { font-weight: 700; font-size: 1.1rem; margin-bottom: 4px; }',
             '.step-meta { font-size: 0.82rem; color: #666; margin-bottom: 6px; }',
             '.step-desc { font-size: 0.98rem; line-height: 1.5; margin: 8px 0; color: #333; }',
-            '.photo-wrapper { position: relative; margin-top: 8px; }',
-            '.photo-viewer { width: 100%; height: 320px; background: #000; position: relative; border: 1px solid #ccc; border-radius: 4px; overflow: hidden; }',
-            '.photo-viewer img { width: 100%; height: 100%; object-fit: contain; background: #000; }',
-            '.photo-nav { position: absolute; top: 50%; left: 0; right: 0; pointer-events: auto; display: flex; justify-content: space-between; transform: translateY(-50%); padding: 0 6px; }',
-            '.photo-nav-btn { pointer-events: auto; border: none; background: rgba(26,95,122,0.8); color: white; width: 34px; height: 34px; border-radius: 50%; cursor: pointer; font-size: 1.1rem; font-weight: bold; }',
-            '.photo-idx { position: absolute; bottom: 8px; right: 12px; color: #fff; background: rgba(0,0,0,0.5); padding: 2px 8px; border-radius: 12px; font-size: 0.85rem; }',
-            '.video-box { margin-top: 6px; }',
-            '.video-box video { width: 100%; border-radius: 4px; border: 1px solid #ccc; }',
+        ] + _shared_detail_media_css() + [
             '.controls { padding: 10px; background: #fff; border-top: 1px solid #ddd; display: flex; justify-content: flex-end; gap: 8px; align-items: center; }',
             '.controls button { padding: 6px 10px; border: 1px solid #1A5F7A; background: #1A5F7A; color: #fff; border-radius: 4px; cursor: pointer; }',
             '.controls button:hover { background: #146077; }',
@@ -3693,65 +3759,14 @@ class InteractiveHtmlBuilder:
             '    var title = document.createElement("div"); title.className = "step-title"; title.textContent = (i + 1) + ". " + step.title; wrapper.appendChild(title);',
             '    var meta = document.createElement("div"); meta.className = "step-meta"; var mt = []; if (step.meta.location) mt.push(step.meta.location); if (step.meta.date) mt.push(step.meta.date); meta.textContent = mt.join(" • "); wrapper.appendChild(meta);',
             '    var desc = document.createElement("div"); desc.className = "step-desc"; desc.innerHTML = step.description || ""; wrapper.appendChild(desc);',
-            '    let mediaItems = [];',
-            '    if (step.photos && step.photos.length) { step.photos.forEach(function(src){ mediaItems.push({ type: "image", src: src }); }); }',
-            '    if (step.videos && step.videos.length) { step.videos.forEach(function(src){ mediaItems.push({ type: "video", src: src }); }); }',
-            '    if (mediaItems.length) {',
-            '      let photoWrapper = document.createElement("div"); photoWrapper.className = "photo-wrapper";',
-            '      let viewer = document.createElement("div"); viewer.className = "photo-viewer";',
-            '      let idxLabel = document.createElement("div"); idxLabel.className = "photo-idx"; idxLabel.innerText = "1 / " + mediaItems.length;',
-            '      viewer.appendChild(idxLabel);',
-            '      let nav = document.createElement("div"); nav.className = "photo-nav";',
-            '      let prevBtn = document.createElement("button"); prevBtn.type = "button"; prevBtn.className = "photo-nav-btn"; prevBtn.textContent = "◀";',
-            '      let nextBtn = document.createElement("button"); nextBtn.type = "button"; nextBtn.className = "photo-nav-btn"; nextBtn.textContent = "▶";',
-            '      let currentIdx = 0;',
-            '      function setMedia(index) {',
-            '        if (mediaItems.length === 0) return;',
-            '        if (index < 0) index = mediaItems.length - 1;',
-            '        if (index >= mediaItems.length) index = 0;',
-            '        currentIdx = index;',
-            '        var item = mediaItems[index];',
-            '        while (viewer.firstChild) viewer.removeChild(viewer.firstChild);',
-            '        if (item.type === "video") {',
-            '          var videoEl = document.createElement("video");',
-            '          videoEl.controls = true;',
-            '          videoEl.preload = "metadata";',
-            '          videoEl.playsInline = true;',
-            '          videoEl.autoplay = true;',
-            '          videoEl.style.width = "100%";',
-            '          videoEl.style.height = "100%";',
-            '          videoEl.style.objectFit = "contain";',
-            '          videoEl.src = item.src;',
-            '          viewer.appendChild(videoEl);',
-            '          var playPromise = videoEl.play();',
-            '          if (playPromise && playPromise.catch) {',
-            '            playPromise.catch(function(){',
-            '              try { videoEl.muted = true; videoEl.play(); } catch (e) {}',
-            '            });',
-            '          }',
-            '        } else {',
-            '          var imgEl = document.createElement("img");',
-            '          imgEl.src = item.src;',
-            '          imgEl.style.width = "100%";',
-            '          imgEl.style.height = "100%";',
-            '          imgEl.style.objectFit = "contain";',
-            '          viewer.appendChild(imgEl);',
-            '        }',
-            '        viewer.appendChild(idxLabel);',
-            '        idxLabel.innerText = (index + 1) + " / " + mediaItems.length;',
-            '      }',
-            '      prevBtn.addEventListener("click", function(event){ event.stopPropagation(); event.preventDefault(); setMedia(currentIdx - 1); });',
-            '      nextBtn.addEventListener("click", function(event){ event.stopPropagation(); event.preventDefault(); setMedia(currentIdx + 1); });',
-            '      nav.appendChild(prevBtn); nav.appendChild(nextBtn);',
-            '      photoWrapper.appendChild(viewer); photoWrapper.appendChild(nav);',
-            '      setMedia(0);',
-            '      wrapper.appendChild(photoWrapper);',
-            '    }',
+            '    var carousel = createStepMediaCarousel(step);',
+            '    if (carousel) { wrapper.appendChild(carousel); }',
             '    // Video carousel items are handled together with photos in step media carousel.',
             '    wrapper.addEventListener("click", function(event){ var target = event.target; if (target.closest && (target.closest(".photo-nav") || target.closest(".photo-viewer") || target.closest("video"))) { return; } showStep(parseInt(this.id.replace("step-",""),10), true); });',
             '    container.appendChild(wrapper);',
             '  }',
             '}',
+        ] + _shared_step_media_carousel_js() + [
             'renderTimeline(); renderStepList();',
             'var timelineEl = document.getElementById("timeline");',
             'if (timelineEl) {',
@@ -3966,19 +3981,23 @@ class CombinedHtmlBuilder:
                 lat, lon = self._location_to_coordinates(location)
                 start_time = data.get("start_time") or data.get("startDate") or data.get("start_date") or data.get("time") or data.get("date") or data.get("timestamp")
                 step_date_dt = self._normalize_step_date(start_time)
+                photo_urls = []
                 photo_url = None
                 for p in step.get("photos", []):
                     try:
+                        source_url = None
                         if isinstance(p, str) and (p.startswith("http://") or p.startswith("https://") or p.startswith("file:")):
-                            photo_url = p
-                            break
-                        path = Path(p)
-                        if not path.is_file() and hasattr(parser, 'trip_path'):
-                            path = parser.trip_path / p
-                        if path.is_file():
-                            photo_url = self._image_file_to_data_url(path)
-                            if photo_url:
-                                break
+                            source_url = p
+                        else:
+                            path = Path(p)
+                            if not path.is_file() and hasattr(parser, 'trip_path'):
+                                path = parser.trip_path / p
+                            if path.is_file():
+                                source_url = path.resolve().as_uri()
+                        if source_url:
+                            if photo_url is None:
+                                photo_url = source_url
+                            photo_urls.append(source_url)
                     except Exception:
                         continue
 
@@ -3998,9 +4017,11 @@ class CombinedHtmlBuilder:
                     "description": self._escape(data.get("description", "") if isinstance(data, dict) else ""),
                     "date": self._format_date(step_date_dt),
                     "location_name": location.get("name") if isinstance(location, dict) else "",
+                    "location_detail": location.get("detail") if isinstance(location, dict) else "",
                     "lat": lat,
                     "lon": lon,
                     "photo": photo_url,
+                    "photos": photo_urls,
                     "videos": step_videos,
                 })
 
@@ -4142,6 +4163,13 @@ class CombinedHtmlBuilder:
             '.step-row:last-child { border-bottom: none; }',
             '.step-row .step-title { font-weight: 700; }',
             '.step-row .step-meta { font-size: 0.85rem; color: #555; margin-top: 4px; }',
+            '.step-row .step-location-detail { font-size: 0.82rem; color: #666; margin-top: 4px; }',
+            '.step-row .step-desc { font-size: 0.95rem; line-height: 1.5; margin: 10px 0 0 0; color: #333; }',
+            '.step-row .step-media { margin-top: 10px; }',
+            '.step-row .step-media img { width: 100%; max-height: 260px; object-fit: cover; border-radius: 12px; }',
+        ] + _shared_detail_media_css() + [
+            '.step-row .video-list { display:flex; flex-wrap:wrap; gap:8px; margin-top: 10px; }',
+            '.step-row .video-link { display:inline-block; padding: 8px 10px; background:#1A5F7A; color:#fff; border-radius: 12px; text-decoration:none; font-size: 0.85rem; }',
             '.controls { display:flex; flex-wrap:wrap; align-items:center; gap:10px; margin:0; }',
             '.controls button { border:none; padding: 10px 14px; border-radius: 10px; cursor:pointer; background:#1A5F7A; color:#fff; font-weight:700; }',
             '.controls button.secondary { background:#2a9d8f; }',
@@ -4201,6 +4229,27 @@ class CombinedHtmlBuilder:
             'var tripColors = ' + colors_json + ';',
             'var selectedTripId = null;',
             'var htmlMapStyle = ' + json.dumps(str(self.config.get("html_map_style", "road")).lower().strip()) + ';',
+            'var leafletAvailable = (typeof L !== "undefined");',
+            'if (!leafletAvailable) {',
+            '  var mapEl = document.getElementById("combined-map");',
+            '  if (mapEl) {',
+            '    mapEl.innerHTML = \'<div style="height:100%;display:flex;align-items:center;justify-content:center;padding:18px;color:#345;">Map unavailable (Leaflet failed to load). Detail view is still available.</div>\';',
+            '  }',
+            '  var noopBounds = { pad: function(){ return this; } };',
+            '  var noopLayer = { addTo: function(){ return this; }, setStyle: function(){}, getBounds: function(){ return noopBounds; } };',
+            '  var noopMarker = { bindPopup: function(){ return this; }, on: function(){ return this; }, addTo: function(){ return this; } };',
+            '  var noopMap = { setView: function(){ return this; }, fitBounds: function(){ return this; }, invalidateSize: function(){ return this; }, addLayer: function(){ return this; }, removeLayer: function(){ return this; } };',
+            '  L = {',
+            '    tileLayer: function(){ return noopLayer; },',
+            '    layerGroup: function(){ return noopLayer; },',
+            '    map: function(){ return noopMap; },',
+            '    polyline: function(){ return noopLayer; },',
+            '    divIcon: function(opts){ return opts || {}; },',
+            '    marker: function(){ return noopMarker; },',
+            '    circleMarker: function(){ return noopMarker; },',
+            '    latLngBounds: function(){ return noopBounds; }',
+            '  };',
+            '}',
             'var esriRoadLayer = L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}", { attribution: "Tiles &copy; Esri &mdash; Source: Esri, HERE, Garmin, USGS, NGA, EPA", maxZoom: 18 });',
             'var satelliteLayer = L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", { attribution: "Tiles &copy; Esri &mdash; Source: Esri, HERE, Garmin, USGS, NGA, EPA", maxZoom: 18 });',
             'var hybridLayer = L.layerGroup([satelliteLayer, L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}", { attribution: "Tiles &copy; Esri &mdash; Source: Esri, HERE, Garmin, USGS, NGA, EPA", opacity: 0.7, maxZoom: 18 })]);',
@@ -4269,6 +4318,7 @@ class CombinedHtmlBuilder:
             '  map.invalidateSize();',
             '  document.querySelectorAll(".style-option").forEach(function(btn){ btn.classList.toggle("active", btn.dataset.style === currentMapStyle); });',
             '}',
+        ] + _shared_step_media_carousel_js() + [
             'function toggleSettingsPanel(open) {',
             '  var panel = document.getElementById("map-settings-panel");',
             '  if (!panel) { return; }',
@@ -4297,15 +4347,28 @@ class CombinedHtmlBuilder:
             '  trip.steps.forEach(function(step, index) {',
             '    var row = document.createElement("div"); row.className = "step-row";',
             '    row.innerHTML = \'<div class="step-title">\' + (index + 1) + ". " + step.title + \'</div>\' +',
-            '      \'<div class="step-meta">\' + (step.date || "") + (step.location_name ? " • " + step.location_name : "") + \'</div>\';',
-            '    if (step.photo) {',
-            '      var img = document.createElement("img");',
-            '      img.src = step.photo;',
-            '      img.style.width = "100%";',
-            '      img.style.maxHeight = "260px";',
-            '      img.style.objectFit = "cover";',
-            '      img.style.marginTop = "10px";',
-            '      row.appendChild(img);',
+            '      \'<div class="step-meta">\' + (step.date || "") + (step.location_name ? " • " + step.location_name : "") + \'</div>\' +',
+            '      (step.location_detail ? \'<div class="step-location-detail">\' + step.location_detail + \'</div>\' : \'\');',
+            '    if (step.description) {',
+            '      row.innerHTML += \'<div class="step-desc">\' + step.description + \'</div>\';',
+            '    }',
+            '    var carousel = createStepMediaCarousel(step);',
+            '    if (carousel) {',
+            '      row.appendChild(carousel);',
+            '    }',
+            '    if (!carousel && step.videos && step.videos.length) {',
+            '      var videoList = document.createElement("div");',
+            '      videoList.className = "step-media video-list";',
+            '      step.videos.forEach(function(src, videoIndex) {',
+            '        var link = document.createElement("a");',
+            '        link.className = "video-link";',
+            '        link.href = src;',
+            '        link.target = "_blank";',
+            '        link.rel = "noopener noreferrer";',
+            '        link.textContent = "Video " + (videoIndex + 1);',
+            '        videoList.appendChild(link);',
+            '      });',
+            '      row.appendChild(videoList);',
             '    }',
             '    row.addEventListener("click", function(){',
             '      if (step.lat !== null && step.lon !== null) { map.setView([step.lat, step.lon], 10); }',
@@ -4348,7 +4411,16 @@ class CombinedHtmlBuilder:
             'document.getElementById("map-settings-panel").addEventListener("click", function(evt){ evt.stopPropagation(); });',
             'document.addEventListener("click", function(){ toggleSettingsPanel(false); });',
             'document.querySelectorAll(".style-option").forEach(function(btn){ btn.addEventListener("click", function(){ setMapStyle(this.dataset.style); }); });',
-            'function initPage() { buildTripList(); buildMap(); updateSelectedTripDisplay(); setMapStyle(currentMapStyle); }',
+            'function initPage() {',
+            '  buildTripList();',
+            '  try {',
+            '    buildMap();',
+            '    setMapStyle(currentMapStyle);',
+            '  } catch (err) {',
+            '    console.warn("Combined map failed to initialize", err);',
+            '  }',
+            '  updateSelectedTripDisplay();',
+            '}',
             'initPage();',
             'window.addEventListener("resize", function(){ map.invalidateSize(); });',
             '</script>',
