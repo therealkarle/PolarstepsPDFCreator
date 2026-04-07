@@ -4188,7 +4188,6 @@ class CombinedHtmlBuilder:
             f'<div class="stat-card"><div class="label">Steps</div><div class="value">{stats["total_steps"]}</div></div>',
             f'<div class="stat-card"><div class="label">Travel days</div><div class="value">{stats["total_trip_days"]}</div></div>',
             f'<div class="stat-card"><div class="label">Kilometers</div><div class="value">{stats["total_km"]:.0f}</div></div>',
-            f'<div class="stat-card"><div class="label">Photos</div><div class="value">{stats["total_photos"]}</div></div>',
             f'<div class="stat-card"><div class="label">Period</div><div class="value">{stats["period_range"] or "n/a"}</div></div>',
             '</div>',
             '</div>',
