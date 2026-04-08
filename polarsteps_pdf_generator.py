@@ -6240,11 +6240,11 @@ def prompt_loop(trips: list, cache_manager: CacheManager, script_dir: Path, conf
                 html_name += '.html'
                 html_path = html_dir / html_name
                 builder = CombinedHtmlBuilder(html_path, result['trips'], config=config, language_manager=lang, cli_language_manager=lang)
-                print(f"Building combined HTML overview: {html_path}")
+                print(lang.t('cli.combined_html_building', path=html_path))
                 if builder.build():
-                    print(f"Combined HTML written: {html_path}")
+                    print(lang.t('cli.combined_html_written', path=html_path))
                 else:
-                    print(f"Failed to build combined HTML: {html_path}")
+                    print(lang.t('cli.combined_html_failed', path=html_path))
                 continue
 
             # Render command
@@ -6921,12 +6921,12 @@ def main():
             combined_path = Path(combined_path)
             if not combined_path.is_absolute() and combined_path.parent == Path('.'):
                 combined_path = output_folder_html / combined_path.name
-        print(f"Building combined HTML overview: {combined_path}")
+        print(lang.t('cli.combined_html_building', path=combined_path))
         builder = CombinedHtmlBuilder(combined_path, filtered_trips, config=config, language_manager=lang, cli_language_manager=lang)
         if builder.build():
-            print(f"Combined HTML written: {combined_path}")
+            print(lang.t('cli.combined_html_written', path=combined_path))
         else:
-            print(f"Failed to build combined HTML: {combined_path}")
+            print(lang.t('cli.combined_html_failed', path=combined_path))
         return
 
     # Handle statistics from CLI

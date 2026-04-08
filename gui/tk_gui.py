@@ -823,7 +823,7 @@ class App(tk.Tk):
         self.frm_bottom = frm_bottom
         self.stats_btn = ttk.Button(frm_bottom, text=self.lang.t('gui.statistics'), command=self._on_show_statistics)
         self.stats_btn.pack(side=tk.RIGHT, padx=(6, 0))
-        self.combined_html_btn = ttk.Button(frm_bottom, text="Combined HTML", command=self._on_combined_html)
+        self.combined_html_btn = ttk.Button(frm_bottom, text=self.lang.t('gui.combined_html'), command=self._on_combined_html)
         self.combined_html_btn.pack(side=tk.RIGHT, padx=(6, 0))
         # add tooltip explaining button action
         try:
@@ -849,6 +849,13 @@ class App(tk.Tk):
             self._stats_tooltip = _Tooltip(self.stats_btn, tt_text)
             self.stats_btn.bind('<Enter>', lambda e: self._stats_tooltip.show(e.x_root + 10, e.y_root + 10))
             self.stats_btn.bind('<Leave>', lambda e: self._stats_tooltip.hide())
+            try:
+                combined_tt_text = self.lang.t('gui.combined_html_tooltip')
+            except Exception:
+                combined_tt_text = 'Build a combined HTML overview for selected or filtered trips'
+            self._combined_html_tooltip = _Tooltip(self.combined_html_btn, combined_tt_text)
+            self.combined_html_btn.bind('<Enter>', lambda e: self._combined_html_tooltip.show(e.x_root + 10, e.y_root + 10))
+            self.combined_html_btn.bind('<Leave>', lambda e: self._combined_html_tooltip.hide())
         except Exception:
             self._stats_tooltip = None
         self.render_btn = ttk.Button(frm_bottom, text=self.lang.t('gui.render_selected'), command=self._on_render)
@@ -2651,7 +2658,7 @@ class App(tk.Tk):
             return
 
         self.combined_html_btn.config(state=tk.DISABLED)
-        self.status_text.set(f"Building combined HTML for {len(trips)} trip(s)...")
+        self.status_text.set(self.lang.t('gui.combined_html_building', count=len(trips)))
         threading.Thread(target=self._combined_html_worker, args=(trips,), daemon=True).start()
 
     def _combined_html_worker(self, trips):
@@ -2716,7 +2723,7 @@ class App(tk.Tk):
                     self._open_path(html_path)
                 self.log_queue.put(('combined_html_done', {'path': str(html_path)}))
             else:
-                self.log_queue.put(('combined_html_error', f'Failed to build combined HTML: {html_path}'))
+                self.log_queue.put(('combined_html_error', self.lang.t('gui.combined_html_error_description', path=html_path)))
         except Exception as exc:
             self.log_queue.put(('combined_html_error', str(exc)))
 
@@ -3156,7 +3163,7 @@ class App(tk.Tk):
                     messagebox.showerror(self.lang.t('gui.statistics'), self.lang.t('gui.stats_error_payload').format(payload=payload))
                 elif typ == 'combined_html_done':
                     try:
-                        self.status_text.set(self.lang.t('gui.status_done'))
+                        self.status_text.set(self.lang.t('gui.combined_html_done'))
                     except Exception:
                         self.status_text.set('Combined HTML generation complete')
                     try:
@@ -3172,7 +3179,7 @@ class App(tk.Tk):
                         self.combined_html_btn.config(state=tk.NORMAL)
                     except Exception:
                         pass
-                    messagebox.showerror('Combined HTML', payload)
+                    messagebox.showerror(self.lang.t('gui.combined_html_error_title'), payload)
                 elif typ == 'pkg_install_start':
                     # disable package controls and configure overall progress bar
                     try:
