@@ -3163,12 +3163,6 @@ class App(tk.Tk):
                         self.combined_html_btn.config(state=tk.NORMAL)
                     except Exception:
                         pass
-                    path = payload.get('path') if isinstance(payload, dict) else None
-                    if path:
-                        try:
-                            messagebox.showinfo('Combined HTML', f'Combined HTML written: {path}')
-                        except Exception:
-                            pass
                 elif typ == 'combined_html_error':
                     try:
                         self.status_text.set(self.lang.t('gui.status_ready'))
