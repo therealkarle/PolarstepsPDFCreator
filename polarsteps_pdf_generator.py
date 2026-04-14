@@ -11,9 +11,10 @@ Features:
 """
 import io
 from pathlib import Path
-from typing import Optional, List, Tuple
+from typing import TYPE_CHECKING, Any, Optional, List, Tuple, Sequence, Union
 from datetime import datetime, timedelta, date
 import re
+import webbrowser
 try:
     import pycountry  # type: ignore[reportMissingImports]
 except Exception:
@@ -181,6 +182,79 @@ def _parse_simple_toml(content: str) -> dict:
                 parsed = val
         current[key] = parsed
     return data
+
+
+def _shared_detail_media_css() -> List[str]:
+    return [
+        '.photo-wrapper { position: relative; margin-top: 8px; }',
+        '.photo-viewer { width: 100%; height: 320px; background: #000; position: relative; border: 1px solid #ccc; border-radius: 4px; overflow: hidden; }',
+        '.photo-viewer img { width: 100%; height: 100%; object-fit: contain; background: #000; }',
+        '.photo-nav { position: absolute; top: 50%; left: 0; right: 0; pointer-events: auto; display: flex; justify-content: space-between; transform: translateY(-50%); padding: 0 6px; }',
+        '.photo-nav-btn { pointer-events: auto; border: none; background: rgba(26,95,122,0.8); color: white; width: 34px; height: 34px; border-radius: 50%; cursor: pointer; font-size: 1.1rem; font-weight: bold; }',
+        '.photo-idx { position: absolute; bottom: 8px; right: 12px; color: #fff; background: rgba(0,0,0,0.5); padding: 2px 8px; border-radius: 12px; font-size: 0.85rem; }',
+        '.video-box { margin-top: 6px; }',
+        '.video-box video { width: 100%; border-radius: 4px; border: 1px solid #ccc; }',
+    ]
+
+
+def _shared_step_media_carousel_js() -> List[str]:
+    return [
+        'function createStepMediaCarousel(step) {',
+        '  var mediaItems = [];',
+        '  if (step.photos && step.photos.length) { step.photos.forEach(function(src){ mediaItems.push({ type: "image", src: src }); }); }',
+        '  if (step.videos && step.videos.length) { step.videos.forEach(function(src){ mediaItems.push({ type: "video", src: src }); }); }',
+        '  if (mediaItems.length === 0) { return null; }',
+        '  var wrapper = document.createElement("div"); wrapper.className = "photo-wrapper";',
+        '  var viewer = document.createElement("div"); viewer.className = "photo-viewer";',
+        '  var idxLabel = document.createElement("div"); idxLabel.className = "photo-idx";',
+        '  var nav = document.createElement("div"); nav.className = "photo-nav";',
+        '  var prevBtn = document.createElement("button"); prevBtn.type = "button"; prevBtn.className = "photo-nav-btn"; prevBtn.textContent = "◀";',
+        '  var nextBtn = document.createElement("button"); nextBtn.type = "button"; nextBtn.className = "photo-nav-btn"; nextBtn.textContent = "▶";',
+        '  var currentIdx = 0;',
+        '  function setMedia(index) {',
+        '    if (mediaItems.length === 0) return;',
+        '    if (index < 0) index = mediaItems.length - 1;',
+        '    if (index >= mediaItems.length) index = 0;',
+        '    currentIdx = index;',
+        '    var item = mediaItems[index];',
+        '    while (viewer.firstChild) viewer.removeChild(viewer.firstChild);',
+        '    if (item.type === "video") {',
+        '      var videoEl = document.createElement("video");',
+        '      videoEl.controls = true;',
+        '      videoEl.preload = "metadata";',
+        '      videoEl.playsInline = true;',
+        '      videoEl.autoplay = true;',
+        '      videoEl.style.width = "100%";',
+        '      videoEl.style.height = "100%";',
+        '      videoEl.style.objectFit = "contain";',
+        '      videoEl.src = item.src;',
+        '      viewer.appendChild(videoEl);',
+        '      var playPromise = videoEl.play();',
+        '      if (playPromise && playPromise.catch) {',
+        '        playPromise.catch(function(){',
+        '          try { videoEl.muted = true; videoEl.play(); } catch (e) {}',
+        '        });',
+        '      }',
+        '    } else {',
+        '      var imgEl = document.createElement("img");',
+        '      imgEl.src = item.src;',
+        '      imgEl.style.width = "100%";',
+        '      imgEl.style.height = "100%";',
+        '      imgEl.style.objectFit = "contain";',
+        '      viewer.appendChild(imgEl);',
+        '    }',
+        '    viewer.appendChild(idxLabel);',
+        '    idxLabel.innerText = (index + 1) + " / " + mediaItems.length;',
+        '  }',
+        '  prevBtn.addEventListener("click", function(event){ event.stopPropagation(); event.preventDefault(); setMedia(currentIdx - 1); });',
+        '  nextBtn.addEventListener("click", function(event){ event.stopPropagation(); event.preventDefault(); setMedia(currentIdx + 1); });',
+        '  nav.appendChild(prevBtn); nav.appendChild(nextBtn);',
+        '  wrapper.appendChild(viewer);',
+        '  wrapper.appendChild(nav);',
+        '  setMedia(0);',
+        '  return wrapper;',
+        '}',
+    ]
 
 
 def load_language_manager(language_code: str, script_dir: Path) -> LanguageManager:
@@ -442,6 +516,33 @@ class TripParser:
         self.trip_data = {}
         self.steps = []
 
+    def _resolve_media_reference(self, ref):
+        """Resolve media reference to a local path or remote URL string."""
+        if not ref:
+            return None
+        # preserve remote URLs directly
+        if isinstance(ref, str):
+            r = ref.strip()
+            if r.startswith("http://") or r.startswith("https://"):
+                return r
+            try:
+                p = Path(r)
+            except Exception:
+                p = None
+            if p is not None:
+                if p.is_file():
+                    return p
+                local = (self.trip_path / r).resolve()
+                if local.is_file():
+                    return local
+        elif isinstance(ref, Path):
+            if ref.is_file():
+                return ref
+            local = (self.trip_path / ref).resolve()
+            if local.is_file():
+                return local
+        return None
+
     def load(self):
         # Load trip.json
         try:
@@ -466,9 +567,17 @@ class TripParser:
                 # try to find photos/videos listed in step entry
                 if isinstance(s, dict):
                     for p in s.get("photos", []):
-                        photos.append(Path(self.trip_path) / p) if p else None
+                        if not p:
+                            continue
+                        media = self._resolve_media_reference(p)
+                        if media is not None:
+                            photos.append(media)
                     for v in s.get("videos", []):
-                        videos.append(Path(self.trip_path) / v) if v else None
+                        if not v:
+                            continue
+                        media = self._resolve_media_reference(v)
+                        if media is not None:
+                            videos.append(media)
                 if isinstance(data, dict):
                     data["description"] = _clean_text(data.get("description", ""))
                     data["display_name"] = _clean_text(data.get("display_name", data.get("name", ""))) or data.get("name")
@@ -542,6 +651,35 @@ class TripParser:
                         for ext in ("*.mp4", "*.mov", "*.mkv"):
                             videos.extend(sorted(videos_dir.glob(ext)))
 
+                # If step metadata itself references photos/videos, include them too.
+                if isinstance(data, dict):
+                    for p in data.get("photos", []) or []:
+                        if not p:
+                            continue
+                        media = self._resolve_media_reference(p)
+                        if media is not None and media not in photos:
+                            photos.append(media)
+                    for variant in ("photo", "media", "media_items", "photo_urls"):
+                        for p in data.get(variant, []) or []:
+                            if not p:
+                                continue
+                            media = self._resolve_media_reference(p)
+                            if media is not None and media not in photos:
+                                photos.append(media)
+                    for v in data.get("videos", []) or []:
+                        if not v:
+                            continue
+                        media = self._resolve_media_reference(v)
+                        if media is not None and media not in videos:
+                            videos.append(media)
+                    for variant in ("video", "video_urls", "media_items"):
+                        for v in data.get(variant, []) or []:
+                            if not v:
+                                continue
+                            media = self._resolve_media_reference(v)
+                            if media is not None and media not in videos:
+                                videos.append(media)
+
                 # Fallback: attempt to use a trip-level photos folder named like step
                 if not photos:
                     for c in trip_children:
@@ -591,6 +729,35 @@ class TripParser:
                         break
                 except Exception:
                     step_data = {}
+
+            # Add any media referenced in step metadata (for robustness)
+            if isinstance(step_data, dict):
+                for p in step_data.get("photos", []) or []:
+                    if not p:
+                        continue
+                    media = self._resolve_media_reference(p)
+                    if media is not None and media not in photos:
+                        photos.append(media)
+                for variant in ("photo", "media", "media_items", "photo_urls"):
+                    for p in step_data.get(variant, []) or []:
+                        if not p:
+                            continue
+                        media = self._resolve_media_reference(p)
+                        if media is not None and media not in photos:
+                            photos.append(media)
+                for v in step_data.get("videos", []) or []:
+                    if not v:
+                        continue
+                    media = self._resolve_media_reference(v)
+                    if media is not None and media not in videos:
+                        videos.append(media)
+                for variant in ("video", "video_urls", "media_items"):
+                    for v in step_data.get(variant, []) or []:
+                        if not v:
+                            continue
+                        media = self._resolve_media_reference(v)
+                        if media is not None and media not in videos:
+                            videos.append(media)
 
             if photos or videos or step_data:
                 # normalize location field if nested
@@ -674,6 +841,8 @@ except Exception:
 ESRI_SATELLITE_URL = "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
 # ESRI World Street Map tile template (Road)
 ESRI_ROAD_URL = "https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}"
+# OpenStreetMap standard tile template (Road)
+OSM_TILE_URL = "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
 # ESRI Reference labels (transparent overlay for hybrid-style maps)
 ESRI_LABELS_URL = "https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}"
 # Map colors
@@ -698,6 +867,26 @@ EMOJI_PATTERN = re.compile(
 
 # Pillow (PIL) for image processing
 from PIL import Image, ImageDraw, ImageOps
+
+try:
+    RESAMPLING_LANCZOS = Image.Resampling.LANCZOS
+except Exception:
+    RESAMPLING_LANCZOS = getattr(Image, "LANCZOS", Image.BICUBIC)
+
+if TYPE_CHECKING:
+    from staticmap import StaticMap as _StaticMap, CircleMarker as _CircleMarker, Line as _Line, IconMarker as _IconMarker
+    from typing import Protocol
+
+    class TripLike(Protocol):
+        steps: Sequence[dict]
+        trip_path: Path
+        def get_route_coordinates(self) -> List[tuple]: ...
+else:
+    _StaticMap = Any
+    _CircleMarker = Any
+    _Line = Any
+    _IconMarker = Any
+    TripLike = Any
 
 
 class MapGenerator:
@@ -815,7 +1004,7 @@ class MapGenerator:
             pass
         return str(id(trip_parser))
 
-    def _get_trip_step_coords(self, trip_parser: TripParser) -> List[Optional[tuple]]:
+    def _get_trip_step_coords(self, trip_parser: "TripLike") -> List[Optional[tuple]]:
         key = self._trip_cache_key(trip_parser)
         cached = self._trip_step_coords_cache.get(key)
         if cached is not None and len(cached) == len(trip_parser.steps):
@@ -824,7 +1013,7 @@ class MapGenerator:
         self._trip_step_coords_cache[key] = coords
         return coords
 
-    def _get_trip_route_coords(self, trip_parser: TripParser) -> List[tuple]:
+    def _get_trip_route_coords(self, trip_parser: "TripLike") -> List[tuple]:
         key = self._trip_cache_key(trip_parser)
         cached = self._trip_route_cache.get(key)
         if cached is not None:
@@ -842,7 +1031,7 @@ class MapGenerator:
             with Image.open(str(path)) as img:
                 img = img.convert("RGBA")
                 if size and (img.width != size or img.height != size):
-                    img = img.resize((size, size), Image.LANCZOS)
+                    img = img.resize((size, size), RESAMPLING_LANCZOS)
                 img = img.copy()
             self._cache_set(self._marker_image_cache, key, img, self._marker_image_cache_items)
             return img
@@ -1244,7 +1433,7 @@ class MapGenerator:
         except Exception:
             return False
 
-    def _create_map(self, width: int = None, height: int = None) -> "object":
+    def _create_map(self, width: int = None, height: int = None) -> "_StaticMap":
         """Create a StaticMap with configured tiles. If the configured tile provider
         is unavailable, fall back to road tiles to keep map generation working."""
         if StaticMap is None:
@@ -1266,7 +1455,7 @@ class MapGenerator:
             tile_size=256
         )
 
-    def generate_overview_map(self, trip_parser: TripParser) -> bytes:
+    def generate_overview_map(self, trip_parser: "TripLike") -> bytes:
         """Generate overview map with route and step markers.
         
         Uses the new Geographic Bounding Box system:
@@ -1333,7 +1522,9 @@ class MapGenerator:
             m.add_line(line)
 
         # Add step markers (use photo thumbnails when possible)
-        draw_markers_on_top = bool(self.label_overlay_url and center is not None)
+        # Always draw markers on top so thumbnail overlay rendering is used,
+        # including when IconMarker is unavailable or static map marker fallback is not ideal.
+        draw_markers_on_top = True
         markers_to_draw: List[dict] = []
         marker_entries: List[dict] = []
         for i, step in enumerate(trip_parser.steps):
@@ -1416,12 +1607,26 @@ class MapGenerator:
         photos = step.get("photos", [])
         photo_path = None
 
-        # Prefer a local photo if listed
+        # Prefer a local photo if listed (erste Step-Bild)
         if photos:
             candidate = photos[0]
-            photo_path = Path(candidate)
-            if not photo_path.exists():
-                photo_path = None
+            if isinstance(candidate, Path):
+                if candidate.exists():
+                    photo_path = candidate
+            elif isinstance(candidate, str):
+                if candidate.startswith(("http://", "https://")):
+                    photo_path = candidate
+                else:
+                    p = Path(candidate)
+                    if p.exists():
+                        photo_path = p
+            else:
+                try:
+                    p = Path(str(candidate))
+                    if p.exists():
+                        photo_path = p
+                except Exception:
+                    photo_path = None
 
         # Fallback: look for cover photo URL in step data
         if photo_path is None:
@@ -1478,7 +1683,7 @@ class MapGenerator:
                 raise ValueError("URL thumbnail requires download")
             with Image.open(photo_path) as img:
                 img = img.convert("RGBA")
-                img = ImageOps.fit(img, (size, size), method=Image.LANCZOS)
+                img = ImageOps.fit(img, (size, size), method=RESAMPLING_LANCZOS)
 
                 # Circular mask
                 mask = Image.new("L", (size, size), 0)
@@ -1546,7 +1751,7 @@ class MapGenerator:
             img = Image.new("RGBA", (int(size), int(size)), (0, 0, 0, 0))
             draw = ImageDraw.Draw(img)
             # Draw ring by outlining ellipse
-            draw.ellipse((0, 0, size - 1, size - 1), outline=(r, g, b, a), width=int(thickness))
+            draw.ellipse((0, 0, int(size) - 1, int(size) - 1), outline=(int(r), int(g), int(b), int(a)), width=int(thickness))
             img.save(cache_path, format="PNG")
             return cache_path
         except Exception:
@@ -1583,7 +1788,7 @@ class MapGenerator:
         z = max(0, min(19, z))
         return z
 
-    def generate_step_map_for_step(self, trip_parser: TripParser, step_index: int, width: int = 0, height: int = 0) -> bytes:
+    def generate_step_map_for_step(self, trip_parser: "TripLike", step_index: int, width: int = 0, height: int = 0) -> bytes:
         """Generate a map for a specific step using Geographic Bounding Box approach.
         
         NEW DISTANCE-BASED SYSTEM (2026):
@@ -1691,7 +1896,8 @@ class MapGenerator:
         marker_radius = max(4, int(round(marker_px * 0.3)))
         normal_indices = [i for i in range(len(trip_parser.steps)) if i != step_index]
         draw_order = normal_indices + ([step_index] if 0 <= step_index < len(trip_parser.steps) else [])
-        draw_markers_on_top = bool(self.label_overlay_url)
+        # Always stratify to drawer layer (Pillow overlay) to ensure photo thumbnails are visible.
+        draw_markers_on_top = True
         markers_to_draw: List[dict] = []
         
         marker_entries: List[dict] = []
@@ -2339,10 +2545,6 @@ class StatisticsGenerator:
         if 0 < len(token) <= 30 and len(token.split()) <= 3:
             return token.title()
         return ''
-
-    def _parse_date(self, v):
-        if v is None:
-            return None
 
     def _batch_reverse_geocode(self, coord_map: dict, debug: bool = False):
         """coord_map: cache_key -> (lat, lon). Performs batch rg.search and stores normalized names in cache."""
@@ -3029,6 +3231,7 @@ class StatisticsGenerator:
                 all_stats.append(per_trip_summary)
 
         # clamp travel_dates to today so future-dates within trips are ignored
+        today = None
         try:
             today = datetime.now().date()
             travel_dates = set(d for d in travel_dates if d <= today)
@@ -3190,6 +3393,1192 @@ class StatisticsGenerator:
             return False
 
 
+class InteractiveHtmlBuilder:
+    """Builds a standalone interactive HTML travel journal with Leaflet map."""
+
+    def __init__(self, output_path: Path, trip_parser: TripParser, config: dict = None, language_manager: LanguageManager = None, cli_language_manager: LanguageManager = None):
+        self.output_path = Path(output_path)
+        self.trip_parser = trip_parser
+        self.config = config or {}
+        self.lang = language_manager or get_default_language_manager()
+        self.cli_lang = cli_language_manager or get_default_language_manager()
+        self.photo_max_width = int(self.config.get("html_photo_max_width", 1200))
+        self._image_data_cache = OrderedDict()
+        self._memory_cache_items = int(self.config.get("html_memory_cache_items", 256))
+
+    def _cache_get(self, cache: OrderedDict, key):
+        if key in cache:
+            cache.move_to_end(key)
+            return cache[key]
+        return None
+
+    def _cache_set(self, cache: OrderedDict, key, value):
+        if self._memory_cache_items <= 0:
+            return
+        cache[key] = value
+        cache.move_to_end(key)
+        while len(cache) > self._memory_cache_items:
+            cache.popitem(last=False)
+
+    def _image_file_to_data_url(self, path: Path) -> Optional[str]:
+        try:
+            key = None
+            try:
+                stat = path.stat()
+                key = (str(path), int(stat.st_mtime_ns), self.photo_max_width)
+                cached = self._cache_get(self._image_data_cache, key)
+                if cached is not None:
+                    return cached
+            except Exception:
+                key = None
+
+            with Image.open(path) as img:
+                img = img.convert("RGB")
+                if self.photo_max_width > 0 and img.width > self.photo_max_width:
+                    ratio = float(self.photo_max_width) / float(img.width)
+                    new_h = max(1, int(round(img.height * ratio)))
+                    img = img.resize((self.photo_max_width, new_h), RESAMPLING_LANCZOS)
+                buf = io.BytesIO()
+                img.save(buf, format="JPEG", quality=88)
+                buf.seek(0)
+                data = buf.read()
+                b64 = base64.b64encode(data).decode("ascii")
+                url = f"data:image/jpeg;base64,{b64}"
+                if key is not None:
+                    self._cache_set(self._image_data_cache, key, url)
+                return url
+        except Exception:
+            return None
+
+    def _is_html_osm_available(self) -> bool:
+        try:
+            test_url = OSM_TILE_URL.format(s="a", z=2, x=1, y=1)
+            headers = {
+                "User-Agent": "Mozilla/5.0 (compatible; PolarstepsPDFCreator/1.0)",
+                "Referer": "https://www.openstreetmap.org/"
+            }
+            r = requests.get(test_url, headers=headers, timeout=6)
+            if r is None or r.status_code != 200:
+                return False
+            content = r.content or b""
+            if b"Access blocked" in content or b"Referer is required" in content:
+                return False
+            ctype = r.headers.get("content-type", "")
+            return ctype.startswith("image") and len(content) > 100
+        except Exception:
+            return False
+
+    def _escape(self, text: str) -> str:
+        return html.escape(text or "")
+
+    def _location_to_coordinates(self, location: dict):
+        if not isinstance(location, dict):
+            return None, None
+        lat = location.get("lat") or location.get("latitude")
+        lon = location.get("lon") or location.get("lng") or location.get("longitude")
+        try:
+            return float(lat), float(lon)
+        except Exception:
+            return None, None
+
+    def _build_html(self) -> str:
+        trip_name = self.trip_parser.get_trip_name()
+        start_date, end_date = self.trip_parser.get_trip_dates()
+        total_km = self.trip_parser.get_total_km()
+        step_count = len(self.trip_parser.steps)
+        date_str = ""
+        date_fmt = self.lang.get_date_format("date.format.trip", "%d.%m.%Y")
+        if start_date and end_date:
+            date_str = f"{start_date.strftime(date_fmt)} - {end_date.strftime(date_fmt)}"
+        elif start_date:
+            date_str = start_date.strftime(date_fmt)
+
+        trip_days = 0
+        try:
+            if start_date and end_date:
+                trip_days = max(1, (end_date - start_date).days + 1)
+            elif start_date:
+                trip_days = 1
+        except Exception:
+            trip_days = 0
+
+        subtitle = self.lang.t(
+            "pdf.subtitle",
+            date=date_str,
+            steps=step_count,
+            steps_label=self.lang.t("pdf.steps_label"),
+            km=total_km,
+            km_label=self.lang.t("units.km"),
+        )
+
+        steps_data = []
+        for i, step in enumerate(self.trip_parser.steps, start=1):
+            step_data = step.get("data", {}) if isinstance(step, dict) else {}
+            display_name = step_data.get("display_name", f"{self.lang.t('pdf.step_label')} {i}")
+            description = step_data.get("description", "") if isinstance(step_data, dict) else ""
+            location = step_data.get("location", {}) if isinstance(step_data, dict) else {}
+            lat, lon = self._location_to_coordinates(location)
+
+            # normalize step date for timeline display
+            start_time = step_data.get("start_time")
+            step_date_str = ""
+            if start_time:
+                try:
+                    if isinstance(start_time, (int, float)):
+                        step_date_str = datetime.fromtimestamp(start_time).strftime(date_fmt)
+                    else:
+                        numeric_ts = float(start_time)
+                        step_date_str = datetime.fromtimestamp(numeric_ts).strftime(date_fmt)
+                except Exception:
+                    step_date_str = str(start_time)
+
+            photo_list = []
+            for p in step.get("photos", []):
+                try:
+                    if isinstance(p, str) and (p.startswith("http://") or p.startswith("https://")):
+                        photo_list.append(p)
+                        continue
+                    path = Path(p)
+                    if not path.is_file() and hasattr(self.trip_parser, 'trip_path'):
+                        path = (self.trip_parser.trip_path / p)
+                    if path.is_file():
+                        data_url = self._image_file_to_data_url(path)
+                        if data_url:
+                            photo_list.append(data_url)
+                    elif isinstance(p, str) and p.startswith("file:"):
+                        photo_list.append(p)
+                except Exception:
+                    continue
+
+            # Fallback to cover/big photo fields if no local step photos are present
+            if not photo_list:
+                for key in ("cover_photo", "cover_photo_path", "cover_photo_thumb_path", "main_media_item_path", "cover_photo_url"):
+                    try:
+                        val = step_data.get(key) if isinstance(step_data, dict) else None
+                        if isinstance(val, dict):
+                            val = val.get("path") or val.get("small_thumbnail_path") or val.get("large_thumbnail_path")
+                        if not isinstance(val, str) or not val:
+                            continue
+                        if val.startswith("http://") or val.startswith("https://") or val.startswith("file:"):
+                            # remote URL or file URL
+                            photo_list.append(val)
+                            break
+                        local_path = Path(val)
+                        if not local_path.is_file() and hasattr(self.trip_parser, 'trip_path'):
+                            local_path = self.trip_parser.trip_path / val
+                        if local_path.is_file():
+                            data_url = self._image_file_to_data_url(local_path)
+                            if data_url:
+                                photo_list.append(data_url)
+                                break
+                    except Exception:
+                        continue
+
+            video_list = []
+            for v in step.get("videos", []):
+                try:
+                    if isinstance(v, str) and (v.startswith("http://") or v.startswith("https://") or v.startswith("file:")):
+                        video_list.append(v)
+                        continue
+                    if isinstance(v, str):
+                        file_path = Path(v)
+                        if not file_path.is_file() and hasattr(self.trip_parser, 'trip_path'):
+                            file_path = (self.trip_parser.trip_path / v)
+                        if file_path.is_file():
+                            video_list.append(file_path.resolve().as_uri())
+                            continue
+                    if isinstance(v, Path) and v.is_file():
+                        video_list.append(v.resolve().as_uri())
+                except Exception:
+                    continue
+
+            steps_data.append({
+                "step_number": i,
+                "title": display_name,
+                "meta": {
+                    "date": step_date_str or (step_data.get("start_time") if step_data.get("start_time") is not None else ""),
+                    "location": location.get("name") or "",
+                },
+                "description": self._escape(description).replace("\n", "<br/>"),
+                "lat": lat,
+                "lon": lon,
+                "photos": photo_list,
+                "videos": video_list,
+            })
+
+        steps_json = json.dumps(steps_data, ensure_ascii=False)
+
+        html_parts = [
+            '<!DOCTYPE html>',
+            '<html lang="en">',
+            '<head>',
+            '<meta charset="utf-8"/>',
+            '<meta name="viewport" content="width=device-width, initial-scale=1.0"/>',
+            '<title>' + self._escape(trip_name) + '</title>',
+            '<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>',
+            '<style>',
+            'body { font-family: "Segoe UI", sans-serif; background:#f6f7f8; margin:0; padding:0; }',
+            '.step-photo-marker { border-radius: 50% !important; overflow: hidden !important; border: 2px solid #fff !important; box-shadow: 0 0 4px rgba(0,0,0,0.4) !important; }',
+            '.leaflet-marker-icon.step-photo-marker { width: 44px !important; height: 44px !important; }',
+            '.top-bar { background: #1A5F7A; color: #fff; padding: 12px 16px; display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 8px; }',
+            '.top-bar h1 { margin:0; font-size: 1.25rem; }',
+            '.top-bar .stats { font-size: 0.9rem; color: #e8f7ff; }',
+            '.timeline { display: flex; gap: 8px; overflow-x: auto; overflow-y: hidden; padding: 8px 16px; background: #fff; border-bottom: 1px solid #ddd; }',
+            '.timeline-item { flex: 0 0 auto; padding: 6px 10px; border-radius: 12px; background: #f0f5f9; font-size: 0.82rem; cursor: pointer; white-space: nowrap; }',
+            '.timeline-item.active { background: #1A5F7A; color: #fff; font-weight: bold; }',
+            '.layout { display: flex; flex-wrap: nowrap; }',
+            '.sidebar { flex: 0 0 auto; width: 70%; max-width: calc(100% - 320px); min-width: 320px; background: #fff; border-right: 1px solid #ccc; height: calc(100vh - 136px); overflow-y: auto; }',
+            '.map-resize-handle { width: 6px; cursor: col-resize; background: rgba(0,0,0,0.15); }',
+            '.map-container { flex: 0 0 auto; width: 28%; min-width: 320px; height: calc(100vh - 136px); position: relative; }',
+            '#map { width: 100%; height: 100%; }',
+            '.step-item { padding: 14px 12px; border-bottom: 1px solid #eee; cursor: pointer; }',
+            '.step-item.active { background: #e8f5ff; border-left: 4px solid #1A5F7A; }',
+            '.step-title { font-weight: 700; font-size: 1.1rem; margin-bottom: 4px; }',
+            '.step-meta { font-size: 0.82rem; color: #666; margin-bottom: 6px; }',
+            '.step-desc { font-size: 0.98rem; line-height: 1.5; margin: 8px 0; color: #333; }',
+        ] + _shared_detail_media_css() + [
+            '.controls { padding: 10px; background: #fff; border-top: 1px solid #ddd; display: flex; justify-content: flex-end; gap: 8px; align-items: center; }',
+            '.controls button { padding: 6px 10px; border: 1px solid #1A5F7A; background: #1A5F7A; color: #fff; border-radius: 4px; cursor: pointer; }',
+            '.controls button:hover { background: #146077; }',
+            '.view-switch { display: flex; border: 1px solid #1A5F7A; border-radius: 6px; overflow: hidden; }',
+            '.view-switch button { padding: 6px 10px; border: none; border-right: 1px solid #1A5F7A; background: #e6f4f8; color: #1A5F7A; font-weight: 600; }',
+            '.view-switch button:last-child { border-right: none; }',
+            '.view-switch button.active { background: #1A5F7A; color: #fff; }',
+            '.sidebar.hidden, .map-container.hidden, .map-resize-handle.hidden { display: none !important; }',
+            'body.map-only .sidebar, body.map-only .map-resize-handle { display: none !important; }',
+            'body.map-only .map-container { width: 100% !important; min-width: 0 !important; max-width: 100% !important; flex: 1 1 100% !important; }',
+            'body.steps-only .map-container, body.steps-only .map-resize-handle { display: none !important; }',
+            'body.steps-only .sidebar { width: 100% !important; min-width: 0 !important; max-width: 100% !important; flex: 1 1 100% !important; }',
+            'body.both .sidebar { width: 70%; }',
+            'body.both .map-container { width: 28%; }',
+            '</style>',
+            '</head>',
+            '<body>',
+            '<div class="top-bar">',
+            '<h1>' + self._escape(trip_name) + '</h1>',
+            '<div class="stats">' + self._escape(date_str) + ' • ' + str(trip_days) + ' days • ' + str(step_count) + ' steps • ' + str(total_km) + ' km</div>',
+            '</div>',
+            '<div class="timeline" id="timeline"></div>',
+            '<div class="layout">',
+            '<div class="sidebar" id="step-list"></div>',
+            '<div id="map-resize-handle" class="map-resize-handle" title="Drag to resize map"></div>',
+            '<div class="map-container"><div id="map"></div></div>',
+            '</div>',
+            '<div class="controls">',
+            '<div class="view-switch">',
+            '<button id="view-steps-btn">Steps</button>',
+            '<button id="view-both-btn" class="active">Both</button>',
+            '<button id="view-map-btn">Map</button>',
+            '</div>',
+            '<button id="prev-step">Previous</button>',
+            '<button id="next-step">Next</button>',
+            '</div>',
+            '<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>',
+            '<script>',
+            'var steps = ' + steps_json + ';',
+            'var htmlMapStyle = ' + json.dumps(str(self.config.get("html_map_style", "road")).lower().strip()) + ';',
+            'var htmlOsmAvailable = ' + json.dumps(self._is_html_osm_available()) + ';',
+            'var osmLayer = L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", { attribution: "&copy; OpenStreetMap contributors", maxZoom: 18, subdomains: ["a", "b", "c"], errorTileUrl: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQImWNgYGD4DwABBAEAQco6VwAAAABJRU5ErkJggg==" });',
+            'var esriRoadLayer = L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}", { attribution: "Tiles &copy; Esri &mdash; Source: Esri, HERE, Garmin, USGS, NGA, EPA", maxZoom: 18 });',
+            'var satelliteLayer = L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", { attribution: "Tiles &copy; Esri &mdash; Source: Esri, HERE, Garmin, USGS, NGA, EPA", maxZoom: 18 });',
+            'var hybridLayer = L.layerGroup([satelliteLayer, L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}", { attribution: "Tiles &copy; Esri &mdash; Source: Esri, HERE, Garmin, USGS, NGA, EPA", opacity: 0.7, maxZoom: 18 })]);',
+            'var baseLayers = { "Satellite": satelliteLayer, "Hybrid": hybridLayer };',
+            'if (htmlOsmAvailable) { baseLayers["OpenStreetMap"] = osmLayer; } else { baseLayers["Road (fallback)"] = esriRoadLayer; }',
+            'var selectedLayer = esriRoadLayer;',
+            'if (htmlMapStyle === "satellite") { selectedLayer = satelliteLayer; } else if (htmlMapStyle === "hybrid") { selectedLayer = hybridLayer; } else if (htmlMapStyle === "road" && htmlOsmAvailable) { selectedLayer = osmLayer; }',
+            'var map = L.map("map", { layers: [selectedLayer] }).setView([0,0],2);',
+            'L.control.layers(baseLayers, null, { collapsed: false }).addTo(map);',
+            'var markers = [];',
+            'var currentIndex = -1;',
+            'function normalizeNumber(x) { return (typeof x === "number" && !isNaN(x) ? x : null); }',
+            'function updateActiveStep(index) {',
+            '  document.querySelectorAll(".step-item").forEach(function(n){ n.classList.toggle("active", n.id === "step-" + index); });',
+            '  document.querySelectorAll(".timeline-item").forEach(function(n){ n.classList.toggle("active", n.dataset.stepIndex === String(index)); });',
+            '  var activeTimelineItem = document.querySelector(\'.timeline-item.active\');',
+            '  if (activeTimelineItem && activeTimelineItem.scrollIntoView) {',
+            '    activeTimelineItem.scrollIntoView({ behavior: \'smooth\', inline: \'center\', block: \'nearest\' });',
+            '  }',
+            '}',
+            'function showStep(index, scrollStep=true, forceBoth=false) {',
+            '  if (index < 0 || index >= steps.length) return;',
+            '  if (forceBoth) { setViewMode(0); }',
+            '  if (currentIndex === index) return;',
+            '  currentIndex = index;',
+            '  var step = steps[index];',
+
+            '  var lat = normalizeNumber(step.lat), lon = normalizeNumber(step.lon);',
+            '  if (lat !== null && lon !== null) { map.flyTo([lat, lon], 12, {duration: 0.8}); }',
+            '  updateActiveStep(index);',
+            '  if (scrollStep) { var el = document.getElementById("step-" + index); if (el) { el.scrollIntoView({behavior: "smooth", block: "center"}); }}',
+            '  if (markers[index] && markers[index].openPopup) { markers[index].openPopup(); }',
+            '}',
+            'var routeCoords = [];',
+            'for (var i = 0; i < steps.length; i++) {',
+            '  var s = steps[i];',
+            '  if (normalizeNumber(s.lat) !== null && normalizeNumber(s.lon) !== null) { routeCoords.push([s.lat, s.lon]); }',
+            '}',
+            'if (routeCoords.length > 1) { var routeLine = L.polyline(routeCoords, {color: "#1E90FF", weight: 4, opacity: 0.75}).addTo(map); map.fitBounds(routeLine.getBounds().pad(0.08)); } else if (routeCoords.length === 1) { map.setView(routeCoords[0], 10); }',
+            'for (var i = 0; i < steps.length; i++) {',
+            '  var s = steps[i];',
+            '  if (normalizeNumber(s.lat) === null || normalizeNumber(s.lon) === null) continue;',
+            '  var marker = null;',
+            '  if (s.photos && s.photos.length > 0) {',
+            '    try {',
+            '      var icon = L.icon({',
+            '        iconUrl: s.photos[0],',
+            '        iconSize: [44, 44],',
+            '        iconAnchor: [22, 44],',
+            '        popupAnchor: [0, -44],',
+            '        className: "step-photo-marker"',
+            '      });',
+            '      marker = L.marker([s.lat, s.lon], { icon: icon }).addTo(map);',
+            '    } catch (err) {',
+            '      marker = L.marker([s.lat, s.lon]).addTo(map);',
+            '    }',
+            '  } else {',
+            '    marker = L.marker([s.lat, s.lon]).addTo(map);',
+            '  }',
+            '  marker.bindPopup("<strong>" + s.title + "</strong>");',
+            '  marker.stepIndex = i;',
+            '  marker.on("click", function() { showStep(this.stepIndex, true, true); });',
+            '  markers[i] = marker;',
+            '}',
+            'function renderTimeline() {',
+            '  var el = document.getElementById("timeline"); el.innerHTML = "";',
+            '  for (var i = 0; i < steps.length; i++) {',
+            '    var item = document.createElement("div"); item.className = "timeline-item"; item.dataset.stepIndex = i; item.textContent = (i + 1) + ". " + steps[i].title + (steps[i].meta.date ? " (" + steps[i].meta.date + ")" : "");',
+            '    item.addEventListener("click", function(){ showStep(parseInt(this.dataset.stepIndex,10)); });',
+            '    el.appendChild(item);',
+            '  }',
+            '}',
+            'function renderStepList() {',
+            '  var container = document.getElementById("step-list"); container.innerHTML = "";',
+            '  for (let i = 0; i < steps.length; i++) {',
+            '    let step = steps[i];',
+            '    var wrapper = document.createElement("div"); wrapper.className = "step-item"; wrapper.id = "step-" + i;',
+            '    var title = document.createElement("div"); title.className = "step-title"; title.textContent = (i + 1) + ". " + step.title; wrapper.appendChild(title);',
+            '    var meta = document.createElement("div"); meta.className = "step-meta"; var mt = []; if (step.meta.location) mt.push(step.meta.location); if (step.meta.date) mt.push(step.meta.date); meta.textContent = mt.join(" • "); wrapper.appendChild(meta);',
+            '    var desc = document.createElement("div"); desc.className = "step-desc"; desc.innerHTML = step.description || ""; wrapper.appendChild(desc);',
+            '    var carousel = createStepMediaCarousel(step);',
+            '    if (carousel) { wrapper.appendChild(carousel); }',
+            '    // Video carousel items are handled together with photos in step media carousel.',
+            '    wrapper.addEventListener("click", function(event){ var target = event.target; if (target.closest && (target.closest(".photo-nav") || target.closest(".photo-viewer") || target.closest("video"))) { return; } showStep(parseInt(this.id.replace("step-",""),10), true); });',
+            '    container.appendChild(wrapper);',
+            '  }',
+            '}',
+        ] + _shared_step_media_carousel_js() + [
+            'renderTimeline(); renderStepList();',
+            'var timelineEl = document.getElementById("timeline");',
+            'if (timelineEl) {',
+            '  timelineEl.addEventListener("wheel", function(evt){',
+            '    if (!evt.deltaY) return;',
+            '    evt.preventDefault();',
+            '    var delta = evt.deltaY;',
+            '    if (evt.deltaMode === 1) { delta *= 16; }',
+            '    timelineEl.scrollLeft += delta;',
+            '  });',
+            '}',
+            'var stepListEl = document.getElementById("step-list");',
+            'var observer = new IntersectionObserver(function(entries){ entries.forEach(function(entry){ if (entry.isIntersecting && entry.intersectionRatio > 0.4) { var target = entry.target; var idx = parseInt(target.id.replace("step-",""),10); if (idx !== currentIndex) { showStep(idx, false); } } }); }, { root: stepListEl, threshold: [0.4] });',
+            'document.querySelectorAll(".step-item").forEach(function(item){ observer.observe(item); });',
+            'if (steps.length > 0) showStep(0);',
+            'document.getElementById("prev-step").addEventListener("click", function(){ showStep(Math.max(0, currentIndex - 1), true); });',
+            'document.getElementById("next-step").addEventListener("click", function(){ showStep(Math.min(steps.length - 1, currentIndex + 1), true); });',
+            'var viewModes = ["both", "map-only", "steps-only"];',
+            'var currentViewMode = 0;',
+            'function setViewMode(mode) {',
+            '  currentViewMode = ((mode % viewModes.length) + viewModes.length) % viewModes.length;',
+            '  document.body.className = viewModes[currentViewMode];',
+            '  document.getElementById("view-steps-btn").classList.toggle("active", currentViewMode === 2);',
+            '  document.getElementById("view-both-btn").classList.toggle("active", currentViewMode === 0);',
+            '  document.getElementById("view-map-btn").classList.toggle("active", currentViewMode === 1);',
+            '  console.log("setViewMode", currentViewMode, document.body.className);',
+            '  if (map && map.invalidateSize) { map.invalidateSize(); }',
+            '  var stepList = document.querySelector(".sidebar");',
+            '  var mapWrap = document.querySelector(".map-container");',
+            '  var resizeHandle = document.querySelector(".map-resize-handle");',
+            '  if (currentViewMode === 0) {',
+            '    stepList.style.display = "block"; mapWrap.style.display = "block"; resizeHandle.style.display = "block";',
+            '    stepList.style.width = "70%"; stepList.style.minWidth = "320px"; stepList.style.maxWidth = "calc(100% - 320px)"; stepList.style.flex = "0 0 auto";',
+            '    mapWrap.style.width = "28%"; mapWrap.style.minWidth = "320px"; mapWrap.style.maxWidth = ""; mapWrap.style.flex = "0 0 auto";',
+            '  }',
+            '  else if (currentViewMode === 1) {',
+            '    stepList.style.display = "none"; resizeHandle.style.display = "none"; mapWrap.style.display = "block";',
+            '    mapWrap.style.width = "100%"; mapWrap.style.minWidth = "0"; mapWrap.style.maxWidth = "100%"; mapWrap.style.flex = "1 1 100%";',
+            '  }',
+            '  else if (currentViewMode === 2) {',
+            '    mapWrap.style.display = "none"; resizeHandle.style.display = "none"; stepList.style.display = "block";',
+            '    stepList.style.width = "100%"; stepList.style.minWidth = "0"; stepList.style.maxWidth = "100%"; stepList.style.flex = "1 1 100%";',
+            '  }',
+            '}',
+            'document.getElementById("view-steps-btn").addEventListener("click", function(){ console.log("view-steps clicked"); setViewMode(2); });',
+            'document.getElementById("view-both-btn").addEventListener("click", function(){ console.log("view-both clicked"); setViewMode(0); });',
+            'document.getElementById("view-map-btn").addEventListener("click", function(){ console.log("view-map clicked"); setViewMode(1); });',
+            'setViewMode(0);',
+            'window.addEventListener("resize", function(){ map.invalidateSize(); });',
+            'var resizeHandle = document.getElementById("map-resize-handle");',
+            'var sidebar = document.querySelector(".sidebar");',
+            'var mapContainer = document.querySelector(".map-container");',
+            'var isResizing = false;',
+            'var lastClientX = 0;',
+            'resizeHandle.addEventListener("mousedown", function(evt){ isResizing=true; lastClientX=evt.clientX; document.body.style.cursor="col-resize"; document.body.style.userSelect="none"; evt.preventDefault(); });',
+            'document.addEventListener("mousemove", function(evt){ if(!isResizing) return; var dx=evt.clientX-lastClientX; lastClientX=evt.clientX; var newSidebarWidth=Math.max(250, sidebar.offsetWidth+dx); var newMapWidth=Math.max(250, mapContainer.offsetWidth-dx); var totalWidth = newSidebarWidth + newMapWidth + resizeHandle.offsetWidth; var available = window.innerWidth - 20; if(totalWidth > available) { var overflow = totalWidth - available; if(dx > 0) { newSidebarWidth -= overflow; } else { newMapWidth -= overflow; } } if(newSidebarWidth < 250 || newMapWidth < 250) return; sidebar.style.width=newSidebarWidth+"px"; mapContainer.style.width=newMapWidth+"px"; map.invalidateSize(); });',
+            'document.addEventListener("mouseup", function(){ if(isResizing){ isResizing=false; document.body.style.cursor=""; document.body.style.userSelect=""; map.invalidateSize(); }});',
+            '</script>',
+            '</body>',
+            '</html>'
+        ]
+
+        return "\n".join(html_parts)
+
+    def build(self):
+        html_text = self._build_html()
+        try:
+            self.output_path.parent.mkdir(parents=True, exist_ok=True)
+            self.output_path.write_text(html_text, encoding='utf-8')
+            return True
+        except Exception as e:
+            print(self.cli_lang.t("render.error", error=e))
+            return False
+
+
+class CombinedHtmlBuilder:
+    """Builds a combined interactive HTML overview for multiple trips."""
+
+    def __init__(self, output_path: Path, trip_paths: list, config: dict = None, language_manager: LanguageManager = None, cli_language_manager: LanguageManager = None):
+        self.output_path = Path(output_path)
+        self.trip_paths = list(trip_paths or [])
+        self.config = config or {}
+        self.lang = language_manager or get_default_language_manager()
+        self.cli_lang = cli_language_manager or get_default_language_manager()
+        self.photo_max_width = int(self.config.get("html_photo_max_width", 1200))
+        self._image_data_cache = OrderedDict()
+        self._memory_cache_items = int(self.config.get("html_memory_cache_items", 256))
+
+    def _cache_get(self, cache: OrderedDict, key):
+        if key in cache:
+            cache.move_to_end(key)
+            return cache[key]
+        return None
+
+    def _cache_set(self, cache: OrderedDict, key, value):
+        if self._memory_cache_items <= 0:
+            return
+        cache[key] = value
+        cache.move_to_end(key)
+        while len(cache) > self._memory_cache_items:
+            cache.popitem(last=False)
+
+    def _image_file_to_data_url(self, path: Path) -> Optional[str]:
+        try:
+            key = None
+            try:
+                stat = path.stat()
+                key = (str(path), int(stat.st_mtime_ns), self.photo_max_width)
+                cached = self._cache_get(self._image_data_cache, key)
+                if cached is not None:
+                    return cached
+            except Exception:
+                key = None
+
+            with Image.open(path) as img:
+                img = img.convert("RGB")
+                if self.photo_max_width > 0 and img.width > self.photo_max_width:
+                    ratio = float(self.photo_max_width) / float(img.width)
+                    new_h = max(1, int(round(img.height * ratio)))
+                    img = img.resize((self.photo_max_width, new_h), RESAMPLING_LANCZOS)
+                buf = io.BytesIO()
+                img.save(buf, format="JPEG", quality=88)
+                buf.seek(0)
+                data = buf.read()
+                b64 = base64.b64encode(data).decode("ascii")
+                url = f"data:image/jpeg;base64,{b64}"
+                if key is not None:
+                    self._cache_set(self._image_data_cache, key, url)
+                return url
+        except Exception:
+            return None
+
+    def _escape(self, text: str) -> str:
+        return html.escape(text or "")
+
+    def _normalize_number(self, value):
+        try:
+            if value is None:
+                return None
+            if isinstance(value, (int, float)):
+                return float(value)
+            if isinstance(value, str) and value.strip():
+                return float(value.strip())
+        except Exception:
+            pass
+        return None
+
+    def _location_to_coordinates(self, location: dict):
+        if not isinstance(location, dict):
+            return None, None
+        lat = location.get("lat") or location.get("latitude")
+        lon = location.get("lon") or location.get("lng") or location.get("longitude")
+        try:
+            return float(lat), float(lon)
+        except Exception:
+            return None, None
+
+    def _normalize_step_date(self, value):
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            try:
+                return datetime.fromtimestamp(int(value))
+            except Exception:
+                pass
+        if isinstance(value, str):
+            for fmt in ("%Y-%m-%d", "%Y-%m-%dT%H:%M:%S", "%d.%m.%Y", "%Y/%m/%d"):
+                try:
+                    return datetime.strptime(value, fmt)
+                except Exception:
+                    continue
+            try:
+                return datetime.fromisoformat(value)
+            except Exception:
+                pass
+        return None
+
+    def _format_date(self, dt: Optional[datetime]) -> str:
+        if not dt:
+            return ""
+        date_fmt = self.lang.get_date_format("date.format.trip", "%d.%m.%Y")
+        try:
+            return dt.strftime(date_fmt)
+        except Exception:
+            return str(dt)
+
+    def _load_trips(self):
+        loaded = []
+        for trip_path in self.trip_paths:
+            try:
+                parser = TripParser(trip_path)
+                parser.load()
+            except Exception:
+                continue
+
+            start_date, end_date = parser.get_trip_dates()
+            if start_date and end_date and end_date < start_date:
+                end_date = start_date
+
+            trip_name = parser.get_trip_name() or trip_path.name
+            trip_days = 0
+            if start_date and end_date:
+                trip_days = max(1, (end_date.date() - start_date.date()).days + 1)
+            elif start_date:
+                trip_days = 1
+
+            steps = []
+            for step_idx, step in enumerate(parser.steps, start=1):
+                data = step.get("data", {}) if isinstance(step, dict) else {}
+                display_name = data.get("display_name") or f"{self.lang.t('pdf.step_label') if hasattr(self.lang, 't') else 'Step'} {step_idx}"
+                location = data.get("location", {}) if isinstance(data, dict) else {}
+                lat, lon = self._location_to_coordinates(location)
+                start_time = data.get("start_time") or data.get("startDate") or data.get("start_date") or data.get("time") or data.get("date") or data.get("timestamp")
+                step_date_dt = self._normalize_step_date(start_time)
+                photo_urls = []
+                photo_url = None
+                for p in step.get("photos", []):
+                    try:
+                        source_url = None
+                        if isinstance(p, str) and (p.startswith("http://") or p.startswith("https://") or p.startswith("file:")):
+                            source_url = p
+                        else:
+                            path = Path(p)
+                            if not path.is_file() and hasattr(parser, 'trip_path'):
+                                path = parser.trip_path / p
+                            if path.is_file():
+                                source_url = path.resolve().as_uri()
+                        if source_url:
+                            if photo_url is None:
+                                photo_url = source_url
+                            photo_urls.append(source_url)
+                    except Exception:
+                        continue
+
+                step_videos = []
+                for v in step.get("videos", []) or []:
+                    try:
+                        if isinstance(v, str) and (v.startswith("http://") or v.startswith("https://") or v.startswith("file:")):
+                            step_videos.append(v)
+                        elif isinstance(v, Path) and v.is_file():
+                            step_videos.append(v.resolve().as_uri())
+                    except Exception:
+                        continue
+
+                steps.append({
+                    "step_index": step_idx,
+                    "title": display_name,
+                    "description": self._escape(data.get("description", "") if isinstance(data, dict) else ""),
+                    "date": self._format_date(step_date_dt),
+                    "location_name": location.get("name") if isinstance(location, dict) else "",
+                    "location_detail": location.get("detail") if isinstance(location, dict) else "",
+                    "lat": lat,
+                    "lon": lon,
+                    "photo": photo_url,
+                    "photos": photo_urls,
+                    "videos": step_videos,
+                })
+
+            loaded.append({
+                "id": len(loaded),
+                "path": str(trip_path),
+                "name": trip_name,
+                "start_date": start_date.isoformat() if start_date else "",
+                "end_date": end_date.isoformat() if end_date else "",
+                "start_date_str": self._format_date(start_date),
+                "end_date_str": self._format_date(end_date),
+                "date_range": self._format_date(start_date) + (" - " + self._format_date(end_date) if start_date and end_date else ""),
+                "trip_days": trip_days,
+                "total_km": parser.get_total_km(),
+                "steps": steps,
+            })
+
+        def sort_key(item):
+            try:
+                return datetime.fromisoformat(item["start_date"]) if item["start_date"] else datetime.min
+            except Exception:
+                return datetime.min
+
+        return sorted(loaded, key=sort_key)
+
+    def _compute_stats(self, trips):
+        total_steps = 0
+        total_photos = 0
+        total_videos = 0
+        total_km = 0.0
+        total_trip_days = 0
+        period_start = None
+        period_end = None
+
+        for trip in trips:
+            total_steps += len(trip.get("steps", []))
+            total_km += float(trip.get("total_km", 0) or 0)
+            total_trip_days += int(trip.get("trip_days", 0) or 0)
+            if trip.get("start_date"):
+                try:
+                    dt = datetime.fromisoformat(trip.get("start_date"))
+                    if not period_start or dt < period_start:
+                        period_start = dt
+                except Exception:
+                    pass
+            if trip.get("end_date"):
+                try:
+                    dt = datetime.fromisoformat(trip.get("end_date"))
+                    if not period_end or dt > period_end:
+                        period_end = dt
+                except Exception:
+                    pass
+            for step in trip.get("steps", []):
+                if step.get("photo"):
+                    total_photos += 1
+                total_videos += len(step.get("videos", []) or [])
+
+        return {
+            "trip_count": len(trips),
+            "total_steps": total_steps,
+            "total_photos": total_photos,
+            "total_videos": total_videos,
+            "total_km": total_km,
+            "total_trip_days": total_trip_days,
+            "period_start": period_start.isoformat() if period_start else "",
+            "period_end": period_end.isoformat() if period_end else "",
+            "period_range": self._format_date(period_start) + (" - " + self._format_date(period_end) if period_start and period_end else ""),
+        }
+
+    def _trip_colors(self):
+        return [
+            "#1E90FF", "#E63946", "#2A9D8F", "#F4A261", "#457B9D", "#8A2BE2", "#FF6347", "#6A5ACD", "#20B2AA", "#FFB703",
+        ]
+
+    def _build_html(self) -> str:
+        trips = self._load_trips()
+        stats = self._compute_stats(trips)
+        trip_data_json = json.dumps(trips, ensure_ascii=False)
+        # protect embedded JSON from closing the script tag in HTML if data contains </script>
+        trip_data_json = trip_data_json.replace('</script>', '<\\/script>')
+        trip_data_json = trip_data_json.replace('\u2028', '\\u2028').replace('\u2029', '\\u2029')
+        colors = self._trip_colors()
+        colors_json = json.dumps(colors)
+
+        trip_list_items = []
+        for index, trip in enumerate(trips):
+            trip_list_items.append(
+                '<div class="trip-item" data-trip-id="' + str(trip['id']) + '">' +
+                '<div class="title">' + self._escape(trip['name']) + '</div>' +
+                '<div class="meta">' + self._escape(trip['date_range'] or 'No dates') + ' • ' + str(int(trip['total_km'] or 0)) + ' km • ' + str(len(trip['steps'])) + ' steps</div>' +
+                '</div>'
+            )
+        trip_list_html = ''.join(trip_list_items)
+
+        html_parts = [
+            '<!DOCTYPE html>',
+            '<html lang="en">',
+            '<head>',
+            '<meta charset="utf-8"/>',
+            '<meta name="viewport" content="width=device-width, initial-scale=1.0"/>',
+            '<title>Combined Trip Overview</title>',
+            '<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>',
+            '<noscript><style>.noscript-warning{padding:16px;background:#ffe8e8;color:#900;text-align:center;font-weight:700;}</style></noscript>',
+            '<style>',
+            '.top-bar { background: #1A5F7A; color: #fff; padding: 16px; }',
+            '.top-bar h1 { margin: 0 0 8px 0; font-size: 1.5rem; }',
+            '.stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; }',
+            '.stat-card { background: rgba(255,255,255,0.14); border: 1px solid rgba(255,255,255,0.2); border-radius: 12px; padding: 12px 14px; }',
+            '.stat-card .label { font-size: 0.85rem; opacity: 0.8; }',
+            '.stat-card .value { font-size: 1.2rem; font-weight: 700; margin-top: 4px; }',
+            'body { font-family: "Segoe UI", sans-serif; background:#f6f7f8; margin:0; padding:0; color:#2c3e50; min-height:100vh; overflow-x:hidden; }',
+            '.main-layout { display: grid; grid-template-columns: minmax(250px, auto) 8px minmax(250px, 1fr); gap: 12px; padding: 16px; min-height: calc(100vh - 120px); align-items: stretch; }',
+            '.trip-list { background:#fff; border-radius: 16px; box-shadow: 0 2px 12px rgba(0,0,0,0.05); overflow:hidden; display:flex; flex-direction:column; min-width: 250px; }',
+            '.trip-list h2 { margin: 0; padding: 16px; font-size: 1rem; border-bottom: 1px solid #eee; }',
+            '#trip-list { overflow-y:auto; max-height: none; }',
+            '.trip-item { padding: 14px 16px; border-bottom: 1px solid #f0f0f0; cursor: pointer; }',
+            '.trip-item:last-child { border-bottom: none; }',
+            '.trip-item.active { background: #fff1f1; border-left: 4px solid #ff3b3b; }',
+            '.trip-item .title { font-weight: 700; margin-bottom: 4px; }',
+            '.trip-item .meta { font-size: 0.85rem; color: #555; }',
+            '.map-panel { display: grid; grid-template-rows: minmax(220px, auto) 8px minmax(320px, auto); gap: 0; min-width: 0; }',
+            '.map-panel.no-selection { grid-template-columns: 1fr; grid-template-rows: 1fr; }',
+            '.map-panel.no-selection .detail-resize-handle, .map-panel.no-selection .details-panel { display: none !important; }',
+            '.map-wrap { position: relative; background:#fff; border-radius: 16px; overflow:hidden; box-shadow: 0 2px 12px rgba(0,0,0,0.05); min-height: 220px; min-width: 0; height: 100%; }',
+            '.map-wrap .settings-menu { position: absolute; bottom: 16px; right: 16px; z-index: 9999; }',
+            '.map-wrap .settings-toggle { border:none; width: 44px; height: 44px; border-radius: 50%; background: rgba(255,255,255,0.9); color: #1A5F7A; font-size: 20px; font-weight: 700; cursor: pointer; box-shadow: 0 10px 24px rgba(0,0,0,0.18); display: flex; align-items: center; justify-content: center; }',
+            '.map-wrap .settings-panel { position: absolute; bottom: 72px; right: 0; min-width: 240px; background: rgba(255,255,255,0.92); border-radius: 16px; box-shadow: 0 24px 50px rgba(0,0,0,0.18); padding: 14px; display: none; backdrop-filter: blur(18px); }',
+            '.map-wrap .settings-panel.open { display: block; }',
+            '.map-wrap .settings-panel h3 { margin: 0 0 12px 0; font-size: 0.95rem; color: #0f3f54; }',
+            '.map-wrap .settings-panel .settings-item { margin-bottom: 10px; }',
+            '.map-wrap .settings-panel .settings-item:last-child { margin-bottom: 0; }',
+            '.map-wrap .settings-panel .style-options { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }',
+            '.map-wrap .settings-panel .style-option { width: 100%; border: 1px solid #cde7f2; border-radius: 10px; background: #f2fbff; color: #0f3f54; padding: 8px 10px; cursor: pointer; text-align: center; font-weight: 700; }',
+            '.map-wrap .settings-panel .style-option.active { background: #1A5F7A; color: #fff; border-color: #0f3f54; }',
+            '.map-wrap .settings-panel button.secondary { background: #2a9d8f; }',
+            '#combined-map { width: 100%; height: 100%; min-height: 100%; }',
+            '.step-marker-icon { border-radius: 50%; overflow: hidden; border: 2px solid rgba(255,255,255,0.9); box-shadow: 0 0 0 3px rgba(255,255,255,0.95); background: #fff; }',
+            '.step-marker-icon img { width: 100%; height: 100%; object-fit: cover; display: block; }',
+            '.details-panel { background:#fff; border-radius: 16px; padding: 16px; box-shadow: 0 2px 12px rgba(0,0,0,0.05); display:flex; flex-direction:column; overflow:hidden; min-height: 320px; max-height: none; min-width: 0; }',
+            '.details-panel h2 { margin-top:0; }',
+            '.detail-actions { display:flex; justify-content:flex-end; margin: 12px 0 0 0; }',
+            '.main-resize-handle, .detail-resize-handle { background: rgba(0,0,0,0.08); border-radius: 4px; }',
+            '.main-resize-handle { width: 8px; cursor: col-resize; }',
+            '.detail-resize-handle { width: auto; height: 8px; cursor: row-resize; }',
+            'body.detail-fullscreen .detail-resize-handle { width: 8px; height: auto; cursor: col-resize; }',
+            'body.detail-fullscreen .main-resize-handle { display:none !important; }',
+            '.fullscreen-toggle { border:none; padding: 10px 14px; border-radius: 10px; cursor:pointer; background:#2a9d8f; color:#fff; font-weight:700; }',
+            '.step-row { padding: 10px 0; border-bottom: 1px solid #f0f0f0; }',
+            '.step-row:last-child { border-bottom: none; }',
+            '.step-row .step-title { font-weight: 700; }',
+            '.step-row .step-meta { font-size: 0.85rem; color: #555; margin-top: 4px; }',
+            '.step-row .step-location-detail { font-size: 0.82rem; color: #666; margin-top: 4px; }',
+            '.step-row .step-desc { font-size: 0.95rem; line-height: 1.5; margin: 10px 0 0 0; color: #333; }',
+            '.step-row .step-media { margin-top: 10px; }',
+            '.step-row .step-media img { width: 100%; max-height: 260px; object-fit: cover; border-radius: 12px; }',
+            '#selected-step-list { overflow-y:auto; max-height: none; padding-right: 8px; }',
+            'body.detail-fullscreen .main-layout { grid-template-columns: 1fr; }',
+            'body.detail-fullscreen .trip-list, body.detail-fullscreen .settings-menu { display:none !important; }',
+            'body.detail-fullscreen .map-panel { display: grid; grid-template-columns: 420px 8px minmax(0, 1fr); grid-template-rows: 1fr; gap: 0; align-items: start; }',
+            'body.detail-fullscreen .details-panel { order: 1; max-height: calc(100vh - 96px); border-radius: 16px; box-shadow: 0 2px 12px rgba(0,0,0,0.05); min-width: 250px; }',
+            'body.detail-fullscreen .detail-resize-handle { order: 2; }',
+            'body.detail-fullscreen .map-wrap { order: 3; min-height: calc(100vh - 96px); min-width: 250px; }',
+            'body.detail-fullscreen #selected-step-list { max-height: calc(100vh - 210px); }',
+        ] + _shared_detail_media_css() + [
+            '.step-row .video-list { display:flex; flex-wrap:wrap; gap:8px; margin-top: 10px; }',
+            '.step-row .video-link { display:inline-block; padding: 8px 10px; background:#1A5F7A; color:#fff; border-radius: 12px; text-decoration:none; font-size: 0.85rem; }',
+            '.controls { display:flex; flex-wrap:wrap; align-items:center; gap:10px; margin:0; }',
+            '.controls button { border:none; padding: 10px 14px; border-radius: 10px; cursor:pointer; background:#1A5F7A; color:#fff; font-weight:700; }',
+            '.controls button.secondary { background:#2a9d8f; }',
+            '.controls button.active { background:#0f3f54; }',
+            '.trip-banner { padding: 12px 16px; display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; border-bottom: 1px solid #eee; }',
+            '.trip-banner .badge { background:#1A5F7A; color:#fff; border-radius: 999px; padding: 4px 10px; font-size:0.82rem; }',
+            '@media (max-width: 1040px) { .main-layout { grid-template-columns: 1fr; } .map-panel { order: -1; } }',
+            '</style>',
+            '</head>',
+            '<body>',
+            '<noscript><div class="noscript-warning">JavaScript muss aktiviert sein, damit die Karte und Trip-Auswahl funktionieren.</div></noscript>',
+            '<div class="top-bar">',
+            '<h1>Combined Trip Overview</h1>',
+            '<div class="stats-grid">',
+            f'<div class="stat-card"><div class="label">Trips</div><div class="value">{stats["trip_count"]}</div></div>',
+            f'<div class="stat-card"><div class="label">Steps</div><div class="value">{stats["total_steps"]}</div></div>',
+            f'<div class="stat-card"><div class="label">Travel days</div><div class="value">{stats["total_trip_days"]}</div></div>',
+            f'<div class="stat-card"><div class="label">Kilometers</div><div class="value">{stats["total_km"]:.0f}</div></div>',
+            f'<div class="stat-card"><div class="label">Period</div><div class="value">{stats["period_range"] or "n/a"}</div></div>',
+            '</div>',
+            '</div>',
+            '<div class="main-layout">',
+            '<div class="trip-list">',
+            '<h2>Trips sorted by start date</h2>',
+            '<div id="trip-list">' + trip_list_html + '</div>',
+            '</div>',
+            '<div id="main-resize-handle" class="main-resize-handle" title="Drag to resize trips/map"></div>',
+            '<div class="map-panel">',
+            '<div class="map-wrap">',
+            '<div class="settings-menu">',
+            '<button id="map-settings-toggle" class="settings-toggle">⚙</button>',
+            '<div class="settings-panel" id="map-settings-panel">',
+            '<h3>Map settings</h3>',
+            '<div class="settings-item"><button id="show-all" class="secondary">Show all trips</button></div>',
+            '<div class="settings-item"><button id="show-selected" class="secondary">Show selected trip</button></div>',
+            '<div class="settings-item"><button id="fit-map" class="secondary">Fit map</button></div>',
+            '<div class="settings-item">Map style</div>',
+            '<div class="settings-item style-options">',
+            '<button type="button" class="style-option" data-style="road">Street</button>',
+            '<button type="button" class="style-option" data-style="satellite">Satellite</button>',
+            '<button type="button" class="style-option" data-style="hybrid">Hybrid</button>',
+            '</div>',
+            '</div>',
+            '</div>',
+            '<div id="combined-map"></div>',
+            '</div>',
+            '<div id="detail-resize-handle" class="detail-resize-handle" title="Drag to resize detail/map"></div>',
+            '<div class="details-panel">',
+            '<h2 id="selected-trip-title">Select a trip to inspect details</h2>',
+            '<div id="selected-trip-meta"></div>',
+            '<div id="selected-step-list"></div>',
+            '</div>',
+            '</div>',
+            '</div>',
+            '<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>',
+            '<script>',
+            'var trips = ' + trip_data_json + ';',
+            'var tripColors = ' + colors_json + ';',
+            'var mutedRouteColor = "rgba(120, 130, 140, 0.65)";',
+            'var selectedRouteColor = "#ff3b3b";',
+            'var selectedTripId = null;',
+            'var htmlMapStyle = ' + json.dumps(str(self.config.get("html_map_style", "road")).lower().strip()) + ';',
+            'var leafletAvailable = (typeof L !== "undefined");',
+            'if (!leafletAvailable) {',
+            '  var mapEl = document.getElementById("combined-map");',
+            '  if (mapEl) {',
+            '    mapEl.innerHTML = \'<div style="height:100%;display:flex;align-items:center;justify-content:center;padding:18px;color:#345;">Map unavailable (Leaflet failed to load). Detail view is still available.</div>\';',
+            '  }',
+            '  var noopBounds = { pad: function(){ return this; } };',
+            '  var noopLayer = { addTo: function(){ return this; }, setStyle: function(){}, getBounds: function(){ return noopBounds; } };',
+            '  var noopMarker = { bindPopup: function(){ return this; }, on: function(){ return this; }, addTo: function(){ return this; } };',
+            '  var noopMap = { setView: function(){ return this; }, fitBounds: function(){ return this; }, invalidateSize: function(){ return this; }, addLayer: function(){ return this; }, removeLayer: function(){ return this; } };',
+            '  L = {',
+            '    tileLayer: function(){ return noopLayer; },',
+            '    layerGroup: function(){ return noopLayer; },',
+            '    map: function(){ return noopMap; },',
+            '    polyline: function(){ return noopLayer; },',
+            '    divIcon: function(opts){ return opts || {}; },',
+            '    marker: function(){ return noopMarker; },',
+            '    circleMarker: function(){ return noopMarker; },',
+            '    latLngBounds: function(){ return noopBounds; }',
+            '  };',
+            '}',
+            'var esriRoadLayer = L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}", { attribution: "Tiles &copy; Esri &mdash; Source: Esri, HERE, Garmin, USGS, NGA, EPA", maxZoom: 18 });',
+            'var satelliteLayer = L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", { attribution: "Tiles &copy; Esri &mdash; Source: Esri, HERE, Garmin, USGS, NGA, EPA", maxZoom: 18 });',
+            'var hybridLayer = L.layerGroup([satelliteLayer, L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}", { attribution: "Tiles &copy; Esri &mdash; Source: Esri, HERE, Garmin, USGS, NGA, EPA", opacity: 0.7, maxZoom: 18 })]);',
+            'var mapStyleLayers = { road: esriRoadLayer, satellite: satelliteLayer, hybrid: hybridLayer };',
+            'var currentMapStyle = htmlMapStyle && mapStyleLayers[htmlMapStyle] ? htmlMapStyle : "road";',
+            'var map = L.map("combined-map", { layers: [mapStyleLayers[currentMapStyle]], zoomControl: true }).setView([0, 0], 2);',
+            'var markers = [];',
+            'var polylines = [];',
+            'var tripLayers = {};',
+            'var mainResize = null;',
+            'var detailResize = null;',
+            'function buildTripList() {',
+            '  var container = document.getElementById("trip-list");',
+            '  container.innerHTML = "";',
+            '  trips.forEach(function(trip, index) {',
+            '    var item = document.createElement("div");',
+            '    item.className = "trip-item";',
+            '    item.dataset.tripId = trip.id;',
+            '    item.innerHTML = \'<div class="title">\' + (index + 1) + ". " + trip.name + \'</div>\' +',
+            '      \'<div class="meta">\' + (trip.date_range || "No dates") + " • " + trip.total_km + " km • " + trip.steps.length + " steps</div>";',
+            '    item.addEventListener("click", function() {',
+            '      if (selectedTripId === trip.id) {',
+            '        showAllTrips();',
+            '      } else {',
+            '        selectTrip(trip.id);',
+            '      }',
+            '    });',
+            '    container.appendChild(item);',
+            '  });',
+            '}',
+            'function buildMap() {',
+            '  var allCoords = [];',
+            '  trips.forEach(function(trip, index) {',
+            '    var coords = trip.steps.filter(function(step){ return step.lat !== null && step.lon !== null; }).map(function(step){ return [step.lat, step.lon]; });',
+            '    if (coords.length === 0) { return; }',
+            '    var originalColor = tripColors[index % tripColors.length];',
+            '    var line = L.polyline(coords, { color: mutedRouteColor, weight: 3, opacity: 0.7 }).addTo(map);',
+            '    polylines.push({ tripId: trip.id, layer: line, normalStyle: { color: mutedRouteColor, weight: 3, opacity: 0.7 }, highlightStyle: { color: selectedRouteColor, weight: 6, opacity: 1.0 } });',
+            '    if (!tripLayers[trip.id]) { tripLayers[trip.id] = []; }',
+            '    coords.forEach(function(coord) { allCoords.push(coord); });',
+            '    trip.steps.forEach(function(step) {',
+            '      if (step.lat === null || step.lon === null) { return; }',
+            '      var marker;',
+            '      if (step.photo) {',
+            '        var safeTitle = (step.title || "").replace(/\"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");',
+            '        var iconHtml = "<div class=\\\"step-marker-icon\\\" data-trip-id=\\\"" + trip.id + "\\\" style=\\\"width:36px;height:36px;border-color:" + mutedRouteColor + ";\\\">" +',
+            '          "<img src=\\\"" + step.photo + "\\\" alt=\\\"" + safeTitle + "\\\"/>" +',
+            '          "</div>";',
+            '        var stepIcon = L.divIcon({ html: iconHtml, className: "step-marker-divicon", iconSize: [36, 36], iconAnchor: [18, 18], popupAnchor: [0, -18] });',
+            '        marker = L.marker([step.lat, step.lon], { icon: stepIcon });',
+            '      } else {',
+            '        marker = L.circleMarker([step.lat, step.lon], { radius: 6, color: mutedRouteColor, fillColor: mutedRouteColor, fillOpacity: 0.75, weight: 1 });',
+            '      }',
+            '      var popup = "<strong>" + step.title + "</strong><br/>" +',
+            '        (trip.name ? "<em>" + trip.name + "</em><br/>" : "") +',
+            '        (step.date ? step.date + "<br/>" : "") +',
+            '        (step.location_name ? step.location_name + "<br/>" : "");',
+            '      marker.bindPopup(popup);',
+            '      marker.on("click", function(){ selectTrip(trip.id, true); });',
+            '      marker.addTo(map);',
+            '      if (marker.bringToFront) { marker.bringToFront(); }',
+            '      tripLayers[trip.id].push({ marker: marker, photo: !!step.photo });',
+            '      markers.push(marker);',
+            '    });',
+            '  });',
+            '  if (allCoords.length > 0) { var bounds = L.latLngBounds(allCoords); map.fitBounds(bounds.pad(0.1)); }',
+            '}',
+            'function resetTripMarkers() {',
+            '  Object.keys(tripLayers).forEach(function(tripId) {',
+            '    tripLayers[tripId].forEach(function(item) {',
+            '      if (!item || !item.marker) { return; }',
+            '      if (item.photo && item.marker.getElement) {',
+            '        var el = item.marker.getElement();',
+            '        if (el) {',
+            '          var iconEl = el.querySelector(\'.step-marker-icon\');',
+            '          if (iconEl) { iconEl.style.borderColor = mutedRouteColor; }',
+            '        }',
+            '      } else if (item.marker.setStyle) {',
+            '        item.marker.setStyle({ color: mutedRouteColor, fillColor: mutedRouteColor, fillOpacity: 0.75, weight: 1 });',
+            '      }',
+            '    });',
+            '  });',
+            '}',
+            'function setMapStyle(style) {',
+            '  if (!mapStyleLayers[style] || style === currentMapStyle) { return; }',
+            '  if (mapStyleLayers[currentMapStyle]) { map.removeLayer(mapStyleLayers[currentMapStyle]); }',
+            '  currentMapStyle = style;',
+            '  map.addLayer(mapStyleLayers[currentMapStyle]);',
+            '  map.invalidateSize();',
+            '  document.querySelectorAll(".style-option").forEach(function(btn){ btn.classList.toggle("active", btn.dataset.style === currentMapStyle); });',
+            '}',
+        ] + _shared_step_media_carousel_js() + [
+            'function toggleSettingsPanel(open) {',
+            '  var panel = document.getElementById("map-settings-panel");',
+            '  if (!panel) { return; }',
+            '  panel.classList.toggle("open", open === undefined ? !panel.classList.contains("open") : open);',
+            '}',
+            'function updateSelectedTripDisplay() {',
+            '  document.querySelectorAll(".trip-item").forEach(function(item){',
+            '    item.classList.toggle("active", item.dataset.tripId === String(selectedTripId));',
+            '  });',
+            '  var mapPanel = document.querySelector(".map-panel");',
+            '  if (mapPanel) { mapPanel.classList.toggle("no-selection", selectedTripId === null); }',
+            '  var title = document.getElementById("selected-trip-title");',
+            '  var meta = document.getElementById("selected-trip-meta");',
+            '  var stepList = document.getElementById("selected-step-list");',
+            '  if (selectedTripId === null) {',
+            '    title.textContent = "Select a trip to inspect details";',
+            '    meta.innerHTML = "";',
+            '    stepList.innerHTML = "";',
+            '    return;',
+            '  }',
+            '  var trip = trips.find(function(t){ return t.id === selectedTripId; });',
+            '  if (!trip) { return; }',
+            '  title.textContent = trip.name;',
+            '  meta.innerHTML = \'<div class="trip-banner"><span class="badge">\' + (trip.date_range || "No dates") + \'</span>\' +',
+            '    \'<span class="badge">\' + trip.total_km + " km</span>" +',
+            '    \'<span class="badge">\' + trip.steps.length + " steps</span></div>";',
+            '  if (!document.getElementById("fullscreen-detail-btn")) {',
+            '    var detailActions = document.createElement("div");',
+            '    detailActions.className = "detail-actions";',
+            '    var btn = document.createElement("button");',
+            '    btn.id = "fullscreen-detail-btn";',
+            '    btn.className = "fullscreen-toggle";',
+            '    btn.setAttribute("aria-label", "Toggle detail fullscreen");',
+            '    btn.title = "Toggle detail fullscreen";',
+            '    btn.innerHTML = \'<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M4 4h6V2H2v8h2V4zm14 0h4v4h2V2h-8v2h2zm0 16h-2v2h8v-8h-2v6h-6zm-14 0v-6H2v8h8v-2H4z" fill="currentColor"/></svg>\';',
+            '    btn.addEventListener("click", function(evt){ evt.stopPropagation(); setDetailFullscreen(!document.body.classList.contains("detail-fullscreen")); });',
+            '    detailActions.appendChild(btn);',
+            '    meta.parentNode.insertBefore(detailActions, meta.nextSibling);',
+            '  }',
+            '  stepList.innerHTML = "";',
+            '  trip.steps.forEach(function(step, index) {',
+            '    var row = document.createElement("div"); row.className = "step-row";',
+            '    row.innerHTML = \'<div class="step-title">\' + (index + 1) + ". " + step.title + \'</div>\' +',
+            '      \'<div class="step-meta">\' + (step.date || "") + (step.location_name ? " • " + step.location_name : "") + \'</div>\' +',
+            '      (step.location_detail ? \'<div class="step-location-detail">\' + step.location_detail + \'</div>\' : \'\');',
+            '    if (step.description) {',
+            '      row.innerHTML += \'<div class="step-desc">\' + step.description + \'</div>\';',
+            '    }',
+            '    var carousel = createStepMediaCarousel(step);',
+            '    if (carousel) {',
+            '      row.appendChild(carousel);',
+            '    }',
+            '    if (!carousel && step.videos && step.videos.length) {',
+            '      var videoList = document.createElement("div");',
+            '      videoList.className = "step-media video-list";',
+            '      step.videos.forEach(function(src, videoIndex) {',
+            '        var link = document.createElement("a");',
+            '        link.className = "video-link";',
+            '        link.href = src;',
+            '        link.target = "_blank";',
+            '        link.rel = "noopener noreferrer";',
+            '        link.textContent = "Video " + (videoIndex + 1);',
+            '        videoList.appendChild(link);',
+            '      });',
+            '      row.appendChild(videoList);',
+            '    }',
+            '    row.addEventListener("click", function(){',
+            '      if (step.lat !== null && step.lon !== null) { map.setView([step.lat, step.lon], 10); }',
+            '    });',
+            '    stepList.appendChild(row);',
+            '  });',
+            '}',
+            'function clearTripHighlight() {',
+            '  polylines.forEach(function(entry){ if (entry.normalStyle) { entry.layer.setStyle(entry.normalStyle); } else { entry.layer.setStyle({ color: mutedRouteColor, weight: 3, opacity: 0.7 }); } });',
+            '  resetTripMarkers();',
+            '}',
+            'function selectTrip(tripId, keepMap=false) {',
+            '  selectedTripId = tripId;',
+            '  updateSelectedTripDisplay();',
+            '  clearTripHighlight();',
+            '  var entry = polylines.find(function(entry){ return entry.tripId === tripId; });',
+            '  if (entry) { entry.layer.setStyle(entry.highlightStyle || { color: selectedRouteColor, weight: 6, opacity: 1.0 }); if (entry.layer.bringToFront) { entry.layer.bringToFront(); } if (!keepMap) { map.fitBounds(entry.layer.getBounds().pad(0.12)); } }',
+            '  if (tripLayers[tripId]) { tripLayers[tripId].forEach(function(item){ if (!item || !item.marker) { return; } if (item.photo && item.marker.getElement) { var el = item.marker.getElement(); if (el) { var iconEl = el.querySelector(\'.step-marker-icon\'); if (iconEl) { iconEl.style.borderColor = selectedRouteColor; } } } else if (item.marker.setStyle) { item.marker.setStyle({ color: selectedRouteColor, fillColor: selectedRouteColor, fillOpacity: 1.0, weight: 2 }); } if (item.marker.bringToFront) { item.marker.bringToFront(); } }); }',
+            '  var trip = trips.find(function(t){ return t.id === tripId; });',
+            '  if (trip) {',
+            '    updateSelectedTripDisplay();',
+            '    if (!keepMap && trip.steps.length) {',
+            '      var coords = trip.steps.filter(function(step){ return step.lat !== null && step.lon !== null; }).map(function(step){ return [step.lat, step.lon]; });',
+            '      if (coords.length) { map.fitBounds(L.latLngBounds(coords).pad(0.12)); }',
+            '    }',
+            '  }',
+            '  updateSelectedTripDisplay();',
+            '}',
+            'function showAllTrips() {',
+            '  selectedTripId = null;',
+            '  updateSelectedTripDisplay();',
+            '  clearTripHighlight();',
+            '  var allCoords = [];',
+            '  trips.forEach(function(trip){',
+            '    trip.steps.forEach(function(step){ if (step.lat !== null && step.lon !== null) { allCoords.push([step.lat, step.lon]); }});',
+            '  });',
+            '  if (allCoords.length) { map.fitBounds(L.latLngBounds(allCoords).pad(0.1)); }',
+            '}',
+            'document.getElementById("show-all").addEventListener("click", function(){ showAllTrips(); });',
+            'document.getElementById("show-selected").addEventListener("click", function(){ if (trips.length) { selectTrip(trips[0].id); } });',
+            'document.getElementById("fit-map").addEventListener("click", function(){ showAllTrips(); });',
+            'document.getElementById("map-settings-toggle").addEventListener("click", function(evt){ evt.stopPropagation(); toggleSettingsPanel(); });',
+            'document.getElementById("map-settings-panel").addEventListener("click", function(evt){ evt.stopPropagation(); });',
+            'document.addEventListener("click", function(){ toggleSettingsPanel(false); });',
+            'document.querySelectorAll(".style-option").forEach(function(btn){ btn.addEventListener("click", function(){ setMapStyle(this.dataset.style); }); });',
+            'function setDetailFullscreen(enabled) {',
+            '  document.body.classList.toggle("detail-fullscreen", enabled);',
+            '  var btn = document.getElementById("fullscreen-detail-btn");',
+            '  if (btn) { btn.classList.toggle("active", enabled); }',
+            '  if (detailResize) { detailResize.setOrientation(enabled ? "horizontal" : "vertical"); }',
+            '  if (!enabled) {',
+            '    var detailsPanel = document.querySelector(".details-panel");',
+            '    var mapWrapEl = document.querySelector(".map-wrap");',
+            '    if (detailsPanel) { detailsPanel.style.width = ""; detailsPanel.style.height = ""; }',
+            '    if (mapWrapEl) { mapWrapEl.style.width = ""; mapWrapEl.style.height = ""; }',
+            '  }',
+            '  if (map && map.invalidateSize) { setTimeout(function(){ map.invalidateSize(); }, 200); }',
+            '}',
+            'function createDragResize(handleEl, firstEl, secondEl, orientation) {',
+            '  var mode = orientation || "horizontal";',
+            '  var isDragging = false;',
+            '  var lastClientX = 0;',
+            '  var lastClientY = 0;',
+            '  function setOrientation(newMode) {',
+            '    mode = newMode;',
+            '    if (mode === "horizontal") { handleEl.style.cursor = "col-resize"; } else { handleEl.style.cursor = "row-resize"; }',
+            '  }',
+            '  handleEl.addEventListener("mousedown", function(evt){',
+            '    isDragging = true;',
+            '    lastClientX = evt.clientX;',
+            '    lastClientY = evt.clientY;',
+            '    document.body.style.cursor = mode === "horizontal" ? "col-resize" : "row-resize";',
+            '    document.body.style.userSelect = "none";',
+            '    evt.preventDefault();',
+            '  });',
+            '  document.addEventListener("mousemove", function(evt){',
+            '    if (!isDragging) return;',
+            '    var dx = evt.clientX - lastClientX;',
+            '    var dy = evt.clientY - lastClientY;',
+            '    lastClientX = evt.clientX;',
+            '    lastClientY = evt.clientY;',
+            '    if (mode === "horizontal") {',
+            '      var newFirst = Math.max(250, firstEl.offsetWidth + dx);',
+            '      var newSecond = Math.max(250, secondEl.offsetWidth - dx);',
+            '      var total = newFirst + newSecond + handleEl.offsetWidth;',
+            '      var avail = window.innerWidth - 20;',
+            '      if (total > avail) { var overflow = total - avail; if (dx > 0) { newFirst -= overflow; } else { newSecond -= overflow; } }',
+            '      if (newFirst < 250 || newSecond < 250) return;',
+            '      firstEl.style.width = newFirst + "px";',
+            '      secondEl.style.width = newSecond + "px";',
+            '      if (map && map.invalidateSize) { map.invalidateSize(); }',
+            '    } else {',
+            '      var newFirst = Math.max(220, firstEl.offsetHeight + dy);',
+            '      var newSecond = Math.max(220, secondEl.offsetHeight - dy);',
+            '      var total = newFirst + newSecond + handleEl.offsetHeight;',
+            '      var avail = window.innerHeight - 20;',
+            '      if (total > avail) { var overflow = total - avail; if (dy > 0) { newFirst -= overflow; } else { newSecond -= overflow; } }',
+            '      if (newFirst < 220 || newSecond < 220) return;',
+            '      var parentGrid = firstEl.parentElement === secondEl.parentElement ? firstEl.parentElement : null;',
+            '      if (parentGrid && window.getComputedStyle(parentGrid).display === "grid") {',
+            '        parentGrid.style.gridTemplateRows = newFirst + "px " + handleEl.offsetHeight + "px " + newSecond + "px";',
+            '      } else {',
+            '        firstEl.style.height = newFirst + "px";',
+            '        secondEl.style.height = newSecond + "px";',
+            '      }',
+            '      if (map && map.invalidateSize) { map.invalidateSize(); }',
+            '    }',
+            '  });',
+            '  document.addEventListener("mouseup", function(){',
+            '    if (isDragging) { isDragging = false; document.body.style.cursor = ""; document.body.style.userSelect = ""; if (map && map.invalidateSize) { map.invalidateSize(); } }',
+            '  });',
+            '  return { setOrientation: setOrientation };',
+            '}',
+            'function initPage() {',
+            '  buildTripList();',
+            '  try {',
+            '    buildMap();',
+            '    setMapStyle(currentMapStyle);',
+            '  } catch (err) {',
+            '    console.warn("Combined map failed to initialize", err);',
+            '  }',
+            '  updateSelectedTripDisplay();',
+            '  var mainResizeHandle = document.getElementById("main-resize-handle");',
+            '  var detailResizeHandle = document.getElementById("detail-resize-handle");',
+            '  var tripListEl = document.querySelector(".trip-list");',
+            '  var mapPanelEl = document.querySelector(".map-panel");',
+            '  var detailsPanel = document.querySelector(".details-panel");',
+            '  var mapWrapEl = document.querySelector(".map-wrap");',
+            '  if (mainResizeHandle && tripListEl && mapPanelEl) { mainResize = createDragResize(mainResizeHandle, tripListEl, mapPanelEl, "horizontal"); }',
+            '  if (detailResizeHandle && mapWrapEl && detailsPanel) { detailResize = createDragResize(detailResizeHandle, mapWrapEl, detailsPanel, "vertical"); }',
+            '  document.body.addEventListener("keyup", function(evt){ if (evt.key === "Escape" && document.body.classList.contains("detail-fullscreen")) { setDetailFullscreen(false); } });',
+            '}',
+            'initPage();',
+            'window.addEventListener("resize", function(){ map.invalidateSize(); });',
+            '</script>',
+            '</body>',
+            '</html>'
+        ]
+        return "\n".join(html_parts)
+
+    def build(self):
+        html_text = self._build_html()
+        try:
+            self.output_path.parent.mkdir(parents=True, exist_ok=True)
+            self.output_path.write_text(html_text, encoding='utf-8')
+            return True
+        except Exception as e:
+            print(self.cli_lang.t("render.error", error=e))
+            return False
+
+
 class HtmlPDFBuilder:
     """Builds the PDF document using HTML/CSS rendered by Playwright (Chromium)."""
 
@@ -3203,9 +4592,16 @@ class HtmlPDFBuilder:
         self.cli_lang = cli_language_manager or get_default_language_manager()
 
         # Layout options
-        self.max_photos_per_step = int(self.config.get("max_photos_per_step", 6))
+        # renamed from max_photos_per_step
+        self.photos_before_page_break = int(self.config.get("photos_before_page_break", self.config.get("max_photos_per_step", 6)))
+        self.fill_page_with_photos = bool(self.config.get("fill_page_with_photos", True))
+        self.min_photos_per_step = int(self.config.get("min_photos_per_step", self.photos_before_page_break))
+        self.max_photos_per_page = int(self.config.get("max_photos_per_page", 0))  # 0 = no explicit limit
+        self.photo_wall_fill_limit = int(self.config.get("photo_wall_fill_limit", max(self.min_photos_per_step * 2, self.min_photos_per_step)))
         self.appendix_show_undisplayed_media = bool(self.config.get("appendix_show_undisplayed_media", True))
         self.photo_max_width = int(self.config.get("html_photo_max_width", 1200))
+        self.photo_masonry_columns = int(self.config.get("html_photo_masonry_columns", self.config.get("photo_wall_columns", 3)))
+        self.photo_masonry_gap = int(self.config.get("html_photo_masonry_gap", self.config.get("photo_wall_gap", 8)))
         self._memory_cache_items = int(self.config.get("html_memory_cache_items", 256))
         self._image_data_cache = OrderedDict()
         self._map_data_cache = OrderedDict()
@@ -3232,6 +4628,51 @@ class HtmlPDFBuilder:
         cache.move_to_end(key)
         while len(cache) > self._memory_cache_items:
             cache.popitem(last=False)
+
+    def _split_step_photos(self, photo_paths: List[Path]) -> Tuple[List[Path], List[Path]]:
+        """Return (photos_to_show, extra_photos) for a step.
+
+        Behavior:
+                - Base amount per step is photos_before_page_break.
+                - If fill_page_with_photos=true, add a limited number of photos intended
+                    to fill the current page, then move the rest to extra_photos.
+                - If fill_page_with_photos=false, show exactly the base amount.
+                - If total photos are below base amount, show all photos.
+        """
+        if not photo_paths:
+            return [], []
+
+        count = len(photo_paths)
+        if count == 0:
+            return [], []
+
+        # threshold: minimal displayed images before considering page break
+        threshold = int(self.config.get("photos_before_page_break", self.photos_before_page_break))
+        if threshold <= 0:
+            threshold = 1
+
+        if count <= threshold:
+            return list(photo_paths), []
+
+        if self.fill_page_with_photos:
+            fill_limit = int(self.config.get("photo_wall_fill_limit", self.photo_wall_fill_limit))
+            if fill_limit <= 0:
+                fill_limit = threshold
+
+            # "photo_wall_fill_limit" dient als absolutes Maximum
+            hard_cap = threshold
+            if fill_limit > 0:
+                hard_cap = min(hard_cap, fill_limit)
+
+            target = min(count, hard_cap)
+            photos_to_show = list(photo_paths[:target])
+            extra_photos = list(photo_paths[target:])
+            return photos_to_show, extra_photos
+
+        # strict threshold behavior: only threshold images, rest extra
+        photos_to_show = list(photo_paths[:threshold])
+        extra_photos = list(photo_paths[threshold:])
+        return photos_to_show, extra_photos
 
     def _image_bytes_to_data_url(self, data: bytes, mime: str = "image/png") -> str:
         b64 = base64.b64encode(data).decode("ascii")
@@ -3274,7 +4715,7 @@ class HtmlPDFBuilder:
                     if img.width > self.photo_max_width:
                         ratio = float(self.photo_max_width) / float(img.width)
                         new_h = max(1, int(round(img.height * ratio)))
-                        img = img.resize((self.photo_max_width, new_h), Image.LANCZOS)
+                        img = img.resize((self.photo_max_width, new_h), RESAMPLING_LANCZOS)
                 buf = io.BytesIO()
                 img.save(buf, format="JPEG", quality=88)
                 buf.seek(0)
@@ -3360,22 +4801,44 @@ class HtmlPDFBuilder:
 
         return "\n".join(parts)
 
+    def _should_open_pdf(self) -> bool:
+        renderer_mode = str(self.config.get("renderer_mode", self.config.get("renderer", "both"))).strip().lower()
+        if renderer_mode not in ("pdf", "html", "both"):
+            renderer_mode = "both"
+
+        if renderer_mode == "html":
+            return False
+
+        try:
+            return bool(self.config.get("open_pdf_after_render", True))
+        except Exception:
+            return True
+
     def _build_photo_grid_html(self, photo_paths: List[Path]) -> str:
         if not photo_paths:
             return ""
         items = []
+
+        def _photo_url(p):
+            if isinstance(p, str) and (p.startswith("http://") or p.startswith("https://") or p.startswith("file:")):
+                return p
+            try:
+                return self._image_file_to_data_url(Path(p))
+            except Exception:
+                return None
+
         workers = max(1, min(int(self._photo_workers), len(photo_paths)))
         if workers > 1:
             try:
                 with ThreadPoolExecutor(max_workers=workers) as executor:
-                    urls = list(executor.map(self._image_file_to_data_url, photo_paths))
+                    urls = list(executor.map(_photo_url, photo_paths))
                 for url in urls:
                     if url:
                         items.append(f"<img src=\"{url}\"/>")
             except Exception:
                 for p in photo_paths:
                     try:
-                        url = self._image_file_to_data_url(p)
+                        url = _photo_url(p)
                         if url:
                             items.append(f"<img src=\"{url}\"/>")
                     except Exception:
@@ -3383,13 +4846,34 @@ class HtmlPDFBuilder:
         else:
             for p in photo_paths:
                 try:
-                    url = self._image_file_to_data_url(p)
+                    url = _photo_url(p)
                     if url:
                         items.append(f"<img src=\"{url}\"/>")
                 except Exception:
                     continue
         if items:
             return f"<div class=\"photo-grid\">{''.join(items)}</div>"
+        return ""
+
+    def _build_video_grid_html(self, video_paths: List[str]) -> str:
+        if not video_paths:
+            return ""
+        videos = []
+        for v in video_paths:
+            try:
+                if isinstance(v, str) and (v.startswith("http://") or v.startswith("https://") or v.startswith("file:")):
+                    video_url = v
+                else:
+                    video_url = Path(v).resolve().as_uri()
+                videos.append(
+                    "<div class=\"video-box\"><video controls preload=\"metadata\" style=\"width:100%; max-height:360px;\">"
+                    f"<source src=\"{self._escape(video_url)}\" />"
+                    "</video></div>"
+                )
+            except Exception:
+                continue
+        if videos:
+            return "".join(videos)
         return ""
 
     def _build_html(self) -> str:
@@ -3497,8 +4981,9 @@ class HtmlPDFBuilder:
             except Exception:
                 overview_img = ""
 
-        photo_wall_gap = int(self.config.get("photo_wall_gap", 0))
-        photo_wall_columns = int(self.config.get("photo_wall_columns", 3))
+        # Use masonry-style column settings for photo layout
+        photo_wall_gap = self.photo_masonry_gap
+        photo_wall_columns = self.photo_masonry_columns
 
         html_parts = [
             "<!doctype html>",
@@ -3512,17 +4997,23 @@ class HtmlPDFBuilder:
             ".subtitle { text-align: center; font-size: 14pt; margin-bottom: 10mm; }",
             ".map { width: 100%; height: auto; display: block; margin: 0 auto; }",
             ".page-break { page-break-after: always; }",
+            ".step { page-break-inside: auto; }",
+            ".step-intro { page-break-inside: avoid; page-break-after: avoid; }",
+            ".photo-grid { page-break-inside: auto; }",
+            ".step-desc-rest { page-break-inside: auto; margin-top: 2mm; }",
             ".step-title { color: #1A5F7A; font-size: 18pt; margin: 6mm 0 2mm; }",
             ".step-meta { color: #666; font-size: 10pt; margin: 0 0 4mm; }",
             ".step-desc { font-size: 11pt; line-height: 1.35; margin: 0 0 4mm; }",
             ".step-list { margin: 0 0 4mm 6mm; }",
-            f".photo-grid {{ column-count: {photo_wall_columns}; column-gap: {photo_wall_gap}px; margin: 2mm 0 4mm; }}",
-            f".photo-grid img {{ width: 100%; height: auto; display: block; break-inside: avoid; margin: 0 0 {photo_wall_gap}px 0; }}",
+            ".photo-grid { column-count: %d; column-gap: %dpx; width: 100%%; margin: 0 0 4mm; page-break-inside: auto; }" % (self.photo_masonry_columns, self.photo_masonry_gap),
+            ".photo-grid img { width: 100%%; height: auto; display: block; margin-bottom: %dpx; break-inside: avoid; page-break-inside: auto; }" % (self.photo_masonry_gap),
             ".appendix-title { color: #1A5F7A; font-size: 20pt; margin: 4mm 0 2mm; }",
             ".appendix-subtitle { color: #666; font-size: 10pt; margin: 0 0 4mm; }",
             ".appendix-step-title { color: #1A5F7A; font-size: 14pt; margin: 6mm 0 2mm; }",
             ".video-header { margin-top: 3mm; font-weight: 600; }",
             ".video-link { display: block; color: #0066CC; text-decoration: none; font-size: 10pt; }",
+            ".video-box { margin-top: 6px; }",
+            ".video-box video { width: 100%; max-height: 360px; border-radius: 4px; border: 1px solid #ccc; }",
             "a.link { color: #0066CC; text-decoration: none; }",
             "a.link:hover { text-decoration: underline; }",
             "</style>",
@@ -3605,31 +5096,45 @@ class HtmlPDFBuilder:
                 step_map_html = ""
 
             description = step_data.get("description", "") if isinstance(step_data, dict) else ""
-            desc_html = self._build_description_html(description)
+            desc_lines = description.splitlines()
+            desc_intro_text = "\n".join(desc_lines[:10])
+            desc_rest_text = "\n".join(desc_lines[10:]) if len(desc_lines) > 10 else ""
+
+            desc_intro_html = self._build_description_html(desc_intro_text)
+            desc_rest_html = self._build_description_html(desc_rest_text) if desc_rest_text else ""
 
             # Photo grid
-            photos_to_show = photos[: self.max_photos_per_step]
-            extra_photos = photos[self.max_photos_per_step :]
-            photo_html = self._build_photo_grid_html([Path(p) for p in photos_to_show])
+            photos_to_show = [Path(p) if not (isinstance(p, str) and (p.startswith('http://') or p.startswith('https://') or p.startswith('file:'))) else p for p in photos]
+            photo_html = self._build_photo_grid_html(photos_to_show)
 
-            if self.appendix_show_undisplayed_media and (extra_photos or videos):
+            # Video blocks for this step
+            video_html = self._build_video_grid_html(videos)
+
+            # Add all media to step (no split hiding) and in appendix only if extra exists due explicit config.
+            extra_photos = []
+            if self.appendix_show_undisplayed_media and extra_photos:
                 appendix_items.append({
                     "step_number": step_number,
                     "display_name": display_name or f"{self.lang.t('pdf.step_label')} {step_number}",
                     "extra_photos": extra_photos,
-                    "videos": videos,
+                    "videos": [],
                 })
 
-            html_parts.extend([
+            step_section = [
                 "<div class=\"step\">",
+                "<div class=\"step-intro\">",
                 f"<div class=\"step-title\">{self._escape(title_text)}</div>",
                 f"<div class=\"step-meta\">{self._escape(meta_text)}</div>",
                 step_map_html,
-                desc_html,
-                photo_html,
+                desc_intro_html,
                 "</div>",
-                "<div class=\"page-break\"></div>",
-            ])
+            ]
+
+            if desc_rest_html:
+                step_section.append(f"<div class=\"step-desc-rest\">{desc_rest_html}</div>")
+
+            step_section.extend([photo_html, video_html, "</div>"])
+            html_parts.extend(step_section)
 
         if self.appendix_show_undisplayed_media and appendix_items:
             html_parts.extend([
@@ -3755,26 +5260,7 @@ class HtmlPDFBuilder:
             except Exception:
                 pass
 
-        # Optionally open the rendered PDF file after creation (config key: open_pdf_after_render)
-        try:
-            open_after = bool(self.config.get("open_pdf_after_render", True))
-        except Exception:
-            open_after = True
-
-        if open_after:
-            try:
-                t_open = time.perf_counter()
-                if os.name == "nt":
-                    # Windows
-                    os.startfile(str(self.output_path))
-                elif sys.platform == "darwin":
-                    subprocess.run(["open", str(self.output_path)], check=False)
-                else:
-                    # Linux/Unix
-                    subprocess.run(["xdg-open", str(self.output_path)], check=False)
-                print(self.cli_lang.t("render.open_pdf_done", seconds=time.perf_counter() - t_open))
-            except Exception as e:
-                print(self.lang.t("render.open_pdf_failed", error=e))
+        return True
 
 
 class CacheManager:
@@ -4445,6 +5931,9 @@ def print_command_help(lang: LanguageManager = None):
             print(lang.t("cli.stats_help"))
         except Exception:
             pass
+        print("Additional commands:")
+        print("  html [selection]       Create combined overview HTML for selected trips")
+        print("  h [selection]          Shortcut for html")
 
 
 def prompt_loop(trips: list, cache_manager: CacheManager, script_dir: Path, config: dict, lang: LanguageManager):
@@ -4702,6 +6191,62 @@ def prompt_loop(trips: list, cache_manager: CacheManager, script_dir: Path, conf
                 print('Statistics completed.')
                 continue
 
+            # Combined HTML command
+            if cmd_lower.startswith('html') or cmd_lower.startswith('h ') or cmd_lower == 'h':
+                rest = cmd[4:].strip() if cmd_lower.startswith('html') else cmd[1:].strip()
+                parse_cmd = 'r ' + rest if rest else 'r'
+                result = parse_render_command(parse_cmd, trips, cache_manager, lang=lang)
+
+                if not result['valid']:
+                    if result.get('error_code') == 'no_selection_or_mode':
+                        user_choice = input(lang.t(
+                            "cli.no_selection_prompt",
+                            yes=lang.t("general.yes"),
+                            no=lang.t("general.no"),
+                        )).strip()
+                        if not user_choice:
+                            print(lang.t("cli.cancelled_return"))
+                            continue
+                        if lang.is_yes(user_choice):
+                            parse_cmd = 'r -a'
+                            result = parse_render_command(parse_cmd, trips, cache_manager, lang=lang)
+                            if not result['valid']:
+                                print(lang.t("cli.error_prefix", error=result['error']))
+                                continue
+                        elif lang.is_no(user_choice):
+                            print(lang.t("cli.cancelled_return"))
+                            continue
+                        else:
+                            cmd = user_choice
+                            continue
+                    else:
+                        print(lang.t("cli.error_prefix", error=result['error']))
+                        continue
+
+                if not result['trips']:
+                    print(lang.t("cli.no_trips_found"))
+                    continue
+
+                html_dir = Path(config.get('output_folder_html') or script_dir / 'TripPdfs')
+                html_dir.mkdir(parents=True, exist_ok=True)
+                html_name = 'combined_trips'
+                if result.get('year'):
+                    html_name += f"_{result['year']}"
+                elif result.get('start_date') and result.get('end_date'):
+                    try:
+                        html_name += f"_{result['start_date'].date()}_{result['end_date'].date()}"
+                    except Exception:
+                        html_name += '_range'
+                html_name += '.html'
+                html_path = html_dir / html_name
+                builder = CombinedHtmlBuilder(html_path, result['trips'], config=config, language_manager=lang, cli_language_manager=lang)
+                print(lang.t('cli.combined_html_building', path=html_path))
+                if builder.build():
+                    print(lang.t('cli.combined_html_written', path=html_path))
+                else:
+                    print(lang.t('cli.combined_html_failed', path=html_path))
+                continue
+
             # Render command
             if cmd_lower.startswith('render') or cmd_lower.startswith('r ') or cmd_lower == 'r':
                 result = parse_render_command(cmd, trips, cache_manager, lang=lang)
@@ -4818,7 +6363,7 @@ def prompt_loop(trips: list, cache_manager: CacheManager, script_dir: Path, conf
             print("\n" + lang.t("cli.exiting"))
             break
 
-    def select_trip(trips: list, cache_manager: CacheManager, show_rendered: bool = True) -> Optional[Path]:
+    def select_trip(trips: list, cache_manager: CacheManager, show_rendered: bool = True) -> Union[Path, str, None]:
         """Let user select a trip from the console."""
         if not trips:
             print(lang.t("cli.no_trips_found"))
@@ -5000,6 +6545,23 @@ def create_map_generator_from_config(config: dict = None, lang: LanguageManager 
     return map_gen
 
 
+def _resolve_output_dirs(config: dict, script_dir: Path):
+    try:
+        base_dir = Path(config.get('output_folder')) if config.get('output_folder') else script_dir / 'TripPdfs'
+    except Exception:
+        base_dir = script_dir / 'TripPdfs'
+    pdf_dir = Path(config.get('output_folder_pdf') or base_dir)
+    html_dir = Path(config.get('output_folder_html') or base_dir)
+    return pdf_dir, html_dir
+
+
+def _should_open_html(config: dict) -> bool:
+    try:
+        return bool(config.get('open_html_after_render', True))
+    except Exception:
+        return True
+
+
 def render_trip(trip_path: Path, script_dir: Path, config: dict, cache_manager: CacheManager, check_stop=None, lang: LanguageManager = None, progress_callback=None) -> bool:
     """Render a single trip to PDF. Returns True if successful, False if error or stopped."""
     lang = lang or get_default_language_manager()
@@ -5019,28 +6581,26 @@ def render_trip(trip_path: Path, script_dir: Path, config: dict, cache_manager: 
         print(lang.t("render.steps_count", count=len(parser.steps)))
         print(lang.t("render.total_km", km=parser.get_total_km()))
         
-        # Generate PDF
+        # Generate base output name
         trip_name_safe = "".join(c if c.isalnum() or c in " -_" else "_" for c in parser.get_trip_name())
-        # allow configuration of where PDFs are written
-        pdfs_dir = None
-        try:
-            configured = config.get('output_folder')
-            if configured:
-                pdfs_dir = Path(configured)
-        except Exception:
-            pdfs_dir = None
-        if not pdfs_dir:
-            pdfs_dir = script_dir / "TripPdfs"
-        try:
-            pdfs_dir.mkdir(parents=True, exist_ok=True)
-        except Exception:
-            pdfs_dir = trip_path.parent
 
-        output_path = pdfs_dir / f"{trip_name_safe}.pdf"
-        
-        # Determine map URL + hybrid labels
+        # Determine renderer mode (pdf/html/both)
+        renderer_mode = str(config.get("renderer_mode", config.get("renderer", "both"))).strip().lower()
+        if renderer_mode not in ("pdf", "html", "both"):
+            renderer_mode = "both"
+
+        html_open_after = _should_open_html(config)
+        try:
+            pdf_open_after = bool(config.get("open_pdf_after_render", True))
+        except Exception:
+            pdf_open_after = True
+
+        pdf_dir, html_dir = _resolve_output_dirs(config, script_dir)
+        pdf_dir.mkdir(parents=True, exist_ok=True)
+        html_dir.mkdir(parents=True, exist_ok=True)
+
+        # Determine map URL + hybrid labels (only needed for PDF rendering)
         map_style = str(config.get("map_style", "hybrid")).lower().strip()
-        # Accept common synonyms for convenience
         if map_style in ("street", "streets"):
             map_style = "road"
         if map_style in ("sat",):
@@ -5048,21 +6608,63 @@ def render_trip(trip_path: Path, script_dir: Path, config: dict, cache_manager: 
 
         print(lang.t("render.map_style", style=map_style))
         map_gen = create_map_generator_from_config(config=config, lang=lang, purpose="render")
-        
-        # No legacy config loading - the new [maps] section is authoritative for map sizing and padding.
 
         # Use PDF-specific language if configured
         pdf_lang = config.get("_pdf_language_manager", lang)
-        
-        print(lang.t("render.renderer"))
-        pdf_builder = HtmlPDFBuilder(output_path, parser, map_gen, config=config, language_manager=pdf_lang, cli_language_manager=lang, progress_callback=progress_callback)
-        pdf_builder.build()
-        
-        # Mark as rendered
-        cache_manager.mark_rendered(trip_path)
-        
-        print(lang.t("render.done_pdf", path=output_path))
-        return True
+
+        did_output = False
+        errors = []
+
+        if renderer_mode in ("html", "both"):
+            html_output_path = html_dir / f"{trip_name_safe}.html"
+            print(lang.t("render.renderer") + " (HTML)")
+            try:
+                html_builder = InteractiveHtmlBuilder(html_output_path, parser, config=config, language_manager=pdf_lang, cli_language_manager=lang)
+                if html_builder.build():
+                    did_output = True
+                    print(lang.t("render.done_html", path=html_output_path) if hasattr(lang, 't') else f"HTML generated: {html_output_path}")
+                    # auto-open HTML output for HTML-only and both modes (when configured)
+                    if html_open_after:
+                        try:
+                            webbrowser.open_new_tab(html_output_path.as_uri())
+                        except Exception:
+                            pass
+                else:
+                    errors.append(f"HTML generation failed for {html_output_path}")
+            except Exception as e:
+                errors.append(str(e))
+
+        if renderer_mode in ("pdf", "both"):
+            output_path = pdf_dir / f"{trip_name_safe}.pdf"
+            print(lang.t("render.renderer") + " (PDF)")
+            try:
+                pdf_builder = HtmlPDFBuilder(output_path, parser, map_gen, config=config, language_manager=pdf_lang, cli_language_manager=lang, progress_callback=progress_callback)
+                if pdf_builder.build():
+                    did_output = True
+                    print(lang.t("render.done_pdf", path=output_path))
+                    if pdf_open_after:
+                        t0 = time.perf_counter()
+                        try:
+                            if os.name == "nt":
+                                os.startfile(str(output_path))
+                            elif sys.platform == "darwin":
+                                subprocess.run(["open", str(output_path)], check=False)
+                            else:
+                                subprocess.run(["xdg-open", str(output_path)], check=False)
+                            print(lang.t("render.open_pdf_done", seconds=time.perf_counter() - t0))
+                        except Exception as e:
+                            print(lang.t("render.open_pdf_failed", error=e))
+                else:
+                    errors.append(f"PDF generation failed for {output_path}")
+            except Exception as e:
+                errors.append(str(e))
+
+        if did_output:
+            cache_manager.mark_rendered(trip_path)
+            return True
+
+        print(lang.t("render.error", error='; '.join(errors)))
+        return False
     except Exception as e:
         print(lang.t("render.error", error=e))
         return False
@@ -5156,6 +6758,9 @@ def main():
     # allow zero or more Polarsteps Data folder paths; if omitted, fallback to config/default
     parser.add_argument('bsp_folder', nargs='*', help=lang.t("cli.argparse_bsp_help"))
     parser.add_argument('--output-folder', help=lang.t("cli.argparse_output_help"))
+    parser.add_argument('--output-folder-pdf', help='Output path for PDF files (optional)')
+    parser.add_argument('--output-folder-html', help='Output path for HTML files (optional)')
+    parser.add_argument('--renderer-mode', choices=['pdf', 'html', 'both'], default='both', help='Renderer mode: pdf, html, or both')
     parser.add_argument('--clear-cache', action='store_true', help=lang.t("cli.argparse_clear_cache"))
     # Statistics flags
     parser.add_argument('--stats', action='store_true', help='Show statistics for trips (prints summary)')
@@ -5167,6 +6772,7 @@ def main():
     parser.add_argument('--debug-countries', action='store_true', help='Show debug information for country detection')
     parser.add_argument('--stats-json', help='Write statistics JSON to file')
     parser.add_argument('--stats-map', help='Write overview map PNG to file')
+    parser.add_argument('--combined-html', nargs='?', const='combined_trips.html', help='Write combined overview HTML for the selected trips or filters. If no path is given, writes TripPdfs/combined_trips.html.')
     parser.add_argument('--yes', action='store_true', help='Do not prompt for confirmation')
     # update flags
     parser.add_argument('--check-update', action='store_true', help='Check GitHub for a newer version and exit')
@@ -5235,18 +6841,32 @@ def main():
         print(lang.t("cli.no_trips_in_bsp"))
         sys.exit(1)
     
-    # Determine output folder for generated PDFs (config or CLI)
+    # Determine output folders for generated content (config or CLI)
     if args.output_folder:
         output_folder = Path(args.output_folder)
     else:
         output_folder = Path(config.get('output_folder', '')) if config.get('output_folder') else script_dir / 'TripPdfs'
-    # ensure directory exists when used later
-    try:
-        output_folder.mkdir(parents=True, exist_ok=True)
-    except Exception:
-        pass
+    if args.output_folder_pdf:
+        output_folder_pdf = Path(args.output_folder_pdf)
+    else:
+        output_folder_pdf = Path(config.get('output_folder_pdf', '')) if config.get('output_folder_pdf') else output_folder
+    if args.output_folder_html:
+        output_folder_html = Path(args.output_folder_html)
+    else:
+        output_folder_html = Path(config.get('output_folder_html', '')) if config.get('output_folder_html') else output_folder
+
+    # ensure directories exist when used later
+    for d in (output_folder, output_folder_pdf, output_folder_html):
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+
     # store back into config so render_trip can pick it up
     config['output_folder'] = str(output_folder)
+    config['output_folder_pdf'] = str(output_folder_pdf)
+    config['output_folder_html'] = str(output_folder_html)
+    config['renderer_mode'] = args.renderer_mode
     
     # Move legacy cache locations into cache/
     _migrate_legacy_cache_paths()
@@ -5268,6 +6888,46 @@ def main():
         print(lang.t("cli.scanning_trips", path=paths_str))
     except Exception:
         pass
+
+    # Handle combined overview HTML from CLI
+    if args.combined_html is not None:
+        if not trips:
+            print(lang.t("cli.no_trips_in_bsp"))
+            return
+        start_date = None
+        end_date = None
+        try:
+            if args.stats_from:
+                start_date = datetime.fromisoformat(args.stats_from)
+            if args.stats_to:
+                end_date = datetime.fromisoformat(args.stats_to)
+        except Exception:
+            print("Invalid date format for --from/--to. Use YYYY-MM-DD.")
+            return
+
+        filtered_trips = filter_trips_by_date(trips, args.stats_year, start_date, end_date)
+        if args.unrendered:
+            cm2 = CacheManager(get_cache_dir() / "rendered_trips_cache.json")
+            filtered_trips = [t for t in filtered_trips if not cm2.is_rendered(t)]
+
+        if not filtered_trips:
+            print("No trips match the requested filters.")
+            return
+
+        combined_path = args.combined_html
+        if combined_path is None or str(combined_path).strip() == "":
+            combined_path = output_folder_html / "combined_trips.html"
+        else:
+            combined_path = Path(combined_path)
+            if not combined_path.is_absolute() and combined_path.parent == Path('.'):
+                combined_path = output_folder_html / combined_path.name
+        print(lang.t('cli.combined_html_building', path=combined_path))
+        builder = CombinedHtmlBuilder(combined_path, filtered_trips, config=config, language_manager=lang, cli_language_manager=lang)
+        if builder.build():
+            print(lang.t('cli.combined_html_written', path=combined_path))
+        else:
+            print(lang.t('cli.combined_html_failed', path=combined_path))
+        return
 
     # Handle statistics from CLI
     if args.stats:
