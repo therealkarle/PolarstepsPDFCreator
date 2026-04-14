@@ -2,6 +2,7 @@
 
 # Data exports and generated outputs
 BSPData/
+BSPDataOld/
 TripPdfs/
 tmp_pdf_text.txt
 stats_smoke_map.png
@@ -17,8 +18,7 @@ temp/html/
 # Virtual environments
 .venv/
 venv/
-env/
-ENV/
+.env
 .Python
 
 # Python compiled files
@@ -75,6 +75,7 @@ htmlcov/
 # Environment / secrets
 .env
 .env.*
+!.env.example
 secrets/
 *.pem
 *.key

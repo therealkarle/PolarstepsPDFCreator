@@ -9,7 +9,7 @@ reader=PdfReader(str(p))
 text='\n'.join(page.extract_text() or '' for page in reader.pages)
 # print some stats
 print('Pages:', len(reader.pages))
-# find sample around 'Säntis'
+# find sample around certain trip-related terms
 for s in ['Säntis','Hochlitten','Herz','Stern']:
     idx = text.find(s)
     if idx!=-1:
