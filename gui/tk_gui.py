@@ -462,24 +462,70 @@ class App(tk.Tk):
         except Exception:
             pass
 
-        # Resize and center window to fit content (but limit to screen size)
+        # Resize and place window inside visible desktop work area (taskbar-safe)
         try:
             self.update_idletasks()
             req_w = self.winfo_reqwidth()
             req_h = self.winfo_reqheight()
-            screen_w = self.winfo_screenwidth()
-            screen_h = self.winfo_screenheight()
-            max_w = int(screen_w * 0.95)
-            max_h = int(screen_h * 0.95)
+
+            # Defaults for non-Windows platforms or API failures
+            work_x = 0
+            work_y = 0
+            work_w = self.winfo_screenwidth()
+            work_h = self.winfo_screenheight()
+
+            # On Windows, use desktop work area so taskbar is respected.
+            if sys.platform == 'win32':
+                try:
+                    class _RECT(ctypes.Structure):
+                        _fields_ = [
+                            ('left', ctypes.c_long),
+                            ('top', ctypes.c_long),
+                            ('right', ctypes.c_long),
+                            ('bottom', ctypes.c_long),
+                        ]
+
+                    rect = _RECT()
+                    SPI_GETWORKAREA = 0x0030
+                    ok = ctypes.windll.user32.SystemParametersInfoW(
+                        SPI_GETWORKAREA, 0, ctypes.byref(rect), 0
+                    )
+                    if ok:
+                        work_x = int(rect.left)
+                        work_y = int(rect.top)
+                        work_w = max(1, int(rect.right - rect.left))
+                        work_h = max(1, int(rect.bottom - rect.top))
+                except Exception:
+                    pass
+
+            # Keep a small margin so shadows/title bar are always visible.
+            max_w = max(500, work_w - 24)
+            max_h = max(400, work_h - 24)
             w = min(req_w + 40, max_w)
-            h = min(req_h + 80, max_h)
-            x = max(0, (screen_w - w) // 2)
-            y = max(0, (screen_h - h) // 8)
+            # Start at half of the desktop work area height so the full window stays visible.
+            h = min(max_h, max(400, work_h // 2))
+
+            x = work_x + max(0, (work_w - w) // 2)
+            y = work_y + max(0, (work_h - h) // 2)
             self.geometry(f"{w}x{h}+{x}+{y}")
             try:
-                self.minsize(min(w, max_w), min(h, max_h))
+                # Allow shrinking below start size while keeping UI usable.
+                self.minsize(min(700, max_w), min(500, max_h))
             except Exception:
                 pass
+
+            # Start maximized/fullscreen for best visibility by default.
+            try:
+                # Windows and many Tk themes support zoomed state
+                self.state('zoomed')
+            except Exception:
+                try:
+                    self.attributes('-zoomed', True)
+                except Exception:
+                    try:
+                        self.attributes('-fullscreen', True)
+                    except Exception:
+                        pass
         except Exception:
             pass
 
@@ -509,9 +555,11 @@ class App(tk.Tk):
         tab_settings = ttk.Frame(self.notebook)
         self.notebook.add(tab_trips, text=self.lang.t('gui.tab_trips'))
         self.notebook.add(tab_settings, text=self.lang.t('gui.tab_settings'))
+        self.tab_trips = tab_trips
 
         frm_top = ttk.Frame(tab_trips)
         frm_top.pack(fill=tk.X, padx=10, pady=(10, 6))
+        self.frm_top = frm_top
 
         ttk.Label(frm_top, text=self.lang.t('gui.bsp_folder')).pack(side=tk.LEFT)
         ttk.Entry(frm_top, textvariable=self.bsp_path, width=45).pack(side=tk.LEFT, padx=(6, 6))
@@ -528,13 +576,16 @@ class App(tk.Tk):
 
         frm_mid = ttk.Frame(tab_trips)
         frm_mid.pack(fill=tk.BOTH, expand=True, padx=10, pady=6)
+        self.frm_mid = frm_mid
 
         lbl = ttk.Label(frm_mid, text=self.lang.t('gui.available_trips_label'))
         lbl.pack(anchor=tk.W)
+        self.lbl_available_trips = lbl
 
         # Treeview with multiple columns: rendered flag, trip name, date range, travel days, folder name
+        # Keep list compact so control rows remain visible at half-screen window height.
         self.trips_tree = ttk.Treeview(frm_mid, columns=('rendered', 'trip', 'dates', 'days', 'folder'),
-                                      show='headings', selectmode=tk.EXTENDED, height=18)
+                          show='headings', selectmode=tk.EXTENDED, height=10)
         # prepare sort-state dict and current sort column
         self._sort_reverse = {}
         self._current_sort_col = None
@@ -583,6 +634,7 @@ class App(tk.Tk):
 
         frm_controls = ttk.Frame(tab_trips)
         frm_controls.pack(fill=tk.X, padx=10, pady=(6, 10))
+        self.frm_controls = frm_controls
 
         # Filters
         ttk.Label(frm_controls, text=self.lang.t('gui.filters')).pack(side=tk.LEFT)
@@ -768,8 +820,11 @@ class App(tk.Tk):
         # Buttons below progress bar (new dedicated row)
         frm_bottom = ttk.Frame(tab_trips)
         frm_bottom.pack(fill=tk.X, padx=10, pady=(6, 8))
+        self.frm_bottom = frm_bottom
         self.stats_btn = ttk.Button(frm_bottom, text=self.lang.t('gui.statistics'), command=self._on_show_statistics)
         self.stats_btn.pack(side=tk.RIGHT, padx=(6, 0))
+        self.combined_html_btn = ttk.Button(frm_bottom, text=self.lang.t('gui.combined_html'), command=self._on_combined_html)
+        self.combined_html_btn.pack(side=tk.RIGHT, padx=(6, 0))
         # add tooltip explaining button action
         try:
             # determine language for tooltip (read config if possible)
@@ -794,6 +849,13 @@ class App(tk.Tk):
             self._stats_tooltip = _Tooltip(self.stats_btn, tt_text)
             self.stats_btn.bind('<Enter>', lambda e: self._stats_tooltip.show(e.x_root + 10, e.y_root + 10))
             self.stats_btn.bind('<Leave>', lambda e: self._stats_tooltip.hide())
+            try:
+                combined_tt_text = self.lang.t('gui.combined_html_tooltip')
+            except Exception:
+                combined_tt_text = 'Build a combined HTML overview for selected or filtered trips'
+            self._combined_html_tooltip = _Tooltip(self.combined_html_btn, combined_tt_text)
+            self.combined_html_btn.bind('<Enter>', lambda e: self._combined_html_tooltip.show(e.x_root + 10, e.y_root + 10))
+            self.combined_html_btn.bind('<Leave>', lambda e: self._combined_html_tooltip.hide())
         except Exception:
             self._stats_tooltip = None
         self.render_btn = ttk.Button(frm_bottom, text=self.lang.t('gui.render_selected'), command=self._on_render)
@@ -820,6 +882,84 @@ class App(tk.Tk):
             self.bind_class('TCombobox', '<MouseWheel>', self._combobox_mousewheel)
             self.bind_class('TCombobox', '<Button-4>', self._combobox_mousewheel)
             self.bind_class('TCombobox', '<Button-5>', self._combobox_mousewheel)
+        except Exception:
+            pass
+
+        # Keep bottom controls visible: reduce visible trip rows when window is short.
+        try:
+            self._trip_rows_current = 10
+            self._trip_resize_job = None
+            self.bind('<Configure>', self._on_window_configure)
+            self.after(100, self._adjust_trip_rows)
+        except Exception:
+            pass
+
+    def _on_window_configure(self, event=None):
+        try:
+            if self._trip_resize_job is not None:
+                self.after_cancel(self._trip_resize_job)
+        except Exception:
+            pass
+        try:
+            self._trip_resize_job = self.after(80, self._adjust_trip_rows)
+        except Exception:
+            pass
+
+    def _adjust_trip_rows(self):
+        """Dynamically reduce tree rows so lower control area remains visible."""
+        try:
+            self._trip_resize_job = None
+            if not hasattr(self, 'trips_tree'):
+                return
+
+            try:
+                self.update_idletasks()
+            except Exception:
+                pass
+
+            content_h = 0
+            try:
+                content_h = int(self.tab_trips.winfo_height())
+            except Exception:
+                content_h = 0
+            if content_h <= 1:
+                total_h = int(self.winfo_height())
+                if total_h <= 1:
+                    return
+                content_h = max(100, total_h - 90)
+
+            # Reserve measured heights for all non-list controls in Trips tab.
+            reserved_h = 0
+            for name in ('frm_top', 'frm_controls', 'progress', 'status_label', 'frm_bottom'):
+                try:
+                    widget = getattr(self, name, None)
+                    if widget is not None:
+                        reserved_h += int(widget.winfo_reqheight())
+                except Exception:
+                    pass
+
+            # Keep some room for tab/frame paddings and section spacing.
+            reserved_h += 56
+
+            # The list frame itself includes label + tree heading + paddings.
+            list_overhead = 0
+            try:
+                list_overhead += int(self.lbl_available_trips.winfo_reqheight())
+            except Exception:
+                list_overhead += 24
+            list_overhead += 36
+
+            available_tree_h = content_h - reserved_h - list_overhead
+            row_px = 24
+            rows = max(1, min(18, int(available_tree_h // row_px)))
+
+            # Safety fallback for very tight layouts.
+            if available_tree_h < 90:
+                rows = 1
+
+            if rows != getattr(self, '_trip_rows_current', None):
+                self.trips_tree.configure(height=rows)
+                self._trip_rows_current = rows
         except Exception:
             pass
 
@@ -1165,6 +1305,14 @@ class App(tk.Tk):
         # new path settings for Polarsteps Data and output
         add_entry(grp_general, self.lang.t('gui.form.bsp_folder'), 'polarsteps_data_folder', var_type='path')
         add_entry(grp_general, self.lang.t('gui.form.output_folder'), 'output_folder', var_type='path')
+        add_entry(grp_general, self.lang.t('gui.form.output_folder_pdf'), 'output_folder_pdf', var_type='path')
+        add_entry(grp_general, self.lang.t('gui.form.output_folder_html'), 'output_folder_html', var_type='path')
+        var, cb = add_entry(grp_general, self.lang.t('gui.form.renderer_mode'), 'renderer_mode', var_type='combobox')
+        try:
+            cb['values'] = ['pdf', 'html', 'both']
+            var.set('both')
+        except Exception:
+            pass
         add_entry(grp_general, self.lang.t('gui.form.show_rendered_trips'), 'show_rendered_trips', var_type='bool')
         add_entry(grp_general, self.lang.t('gui.form.open_pdf_after_render'), 'open_pdf_after_render', var_type='bool')
         add_entry(grp_general, self.lang.t('gui.form.auto_update'), 'auto_update', var_type='bool')
@@ -2435,6 +2583,26 @@ class App(tk.Tk):
                             val = sval
                 cfg_overrides[key] = val
 
+        # Prefer current form values for renderer/open behavior to avoid stale config confusion.
+        try:
+            mode_var = self.config_vars.get('renderer_mode')
+            if mode_var is not None:
+                mode = str(mode_var.get() or '').strip().lower()
+                if mode in ('pdf', 'html', 'both'):
+                    cfg_overrides['renderer_mode'] = mode
+        except Exception:
+            pass
+        try:
+            pdf_open_var = self.config_vars.get('open_pdf_after_render')
+            if pdf_open_var is not None:
+                cfg_overrides['open_pdf_after_render'] = bool(pdf_open_var.get())
+        except Exception:
+            pass
+
+        # Hard safety: HTML-only mode must never auto-open PDF.
+        if str(cfg_overrides.get('renderer_mode', '')).strip().lower() == 'html':
+            cfg_overrides['open_pdf_after_render'] = False
+
         # store config overrides to be merged by worker
         self._current_config_overrides = cfg_overrides
 
@@ -2458,6 +2626,106 @@ class App(tk.Tk):
     def _on_stop(self):
         self.stop_flag.set()
         self.status_text.set("Stopping...")
+
+    def _open_path(self, path: Path):
+        try:
+            if os.name == 'nt':
+                os.startfile(str(path))
+            elif sys.platform == 'darwin':
+                subprocess.run(['open', str(path)], check=False)
+            else:
+                subprocess.run(['xdg-open', str(path)], check=False)
+        except Exception:
+            pass
+
+    def _on_combined_html(self):
+        try:
+            sel = self.trips_tree.selection()
+            if sel:
+                source = getattr(self, '_filtered_trips', None) or getattr(self, '_trips', [])
+                trips = [source[int(iid)] for iid in sel]
+            else:
+                trips = self._get_filtered_trips(include_rendered=True)
+        except ValueError:
+            messagebox.showerror(self.lang.t('gui.invalid_date_title'), self.lang.t('gui.invalid_date_msg'))
+            return
+        except Exception:
+            messagebox.showerror(self.lang.t('gui.selection_error_title'), self.lang.t('gui.selection_error_body'))
+            return
+
+        if not trips:
+            messagebox.showinfo(self.lang.t('gui.no_trips_for_stats_title'), self.lang.t('gui.no_trips_for_stats_body'))
+            return
+
+        self.combined_html_btn.config(state=tk.DISABLED)
+        self.status_text.set(self.lang.t('gui.combined_html_building', count=len(trips)))
+        threading.Thread(target=self._combined_html_worker, args=(trips,), daemon=True).start()
+
+    def _combined_html_worker(self, trips):
+        try:
+            config = {}
+            try:
+                config_file = SCRIPT_DIR / 'config.toml'
+                if config_file.exists():
+                    content = config_file.read_text(encoding='utf-8')
+                    if hasattr(m, '_tomllib') and m._tomllib:
+                        config = m._tomllib.loads(content)
+                    else:
+                        config = m._parse_simple_toml(content)
+            except Exception:
+                config = {}
+
+            try:
+                gui_overrides = getattr(self, '_current_config_overrides', {}) or {}
+                if isinstance(gui_overrides, dict):
+                    config.update(gui_overrides)
+            except Exception:
+                pass
+
+            try:
+                gui_lang = m.load_language_manager(config.get('language', 'en'), SCRIPT_DIR)
+                m._DEFAULT_LANGUAGE_MANAGER = gui_lang
+                config['_language_code'] = gui_lang.language_code
+                pdf_lang_code = config.get('pdf_language', '').strip()
+                if not pdf_lang_code:
+                    pdf_lang_code = config.get('language', gui_lang.language_code)
+                pdf_lang = m.load_language_manager(pdf_lang_code, SCRIPT_DIR)
+                config['_pdf_language_manager'] = pdf_lang
+                config['_pdf_language_code'] = pdf_lang.language_code
+            except Exception:
+                pass
+
+            output_folder_html = Path(config.get('output_folder_html') or config.get('output_folder') or SCRIPT_DIR / 'TripPdfs')
+            try:
+                output_folder_html.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                pass
+
+            html_name = 'combined_trips'
+            if not self.trips_tree.selection():
+                year = getattr(self, '_stats_filter_year', None)
+                sd = getattr(self, '_stats_filter_start', None)
+                ed = getattr(self, '_stats_filter_end', None)
+                if year:
+                    html_name += f"_{year}"
+                elif sd and ed:
+                    try:
+                        html_name += f"_{sd.date()}_{ed.date()}"
+                    except Exception:
+                        html_name += '_range'
+            html_path = output_folder_html / f"{html_name}.html"
+
+            builder = m.CombinedHtmlBuilder(html_path, trips, config=config, language_manager=gui_lang, cli_language_manager=gui_lang)
+            ok = builder.build()
+            if ok:
+                open_html = bool(config.get('open_html_after_render', True))
+                if open_html and html_path.exists():
+                    self._open_path(html_path)
+                self.log_queue.put(('combined_html_done', {'path': str(html_path)}))
+            else:
+                self.log_queue.put(('combined_html_error', self.lang.t('gui.combined_html_error_description', path=html_path)))
+        except Exception as exc:
+            self.log_queue.put(('combined_html_error', str(exc)))
 
     def _get_filtered_trips(self, include_rendered: bool = True):
         """Return list of trips filtered by the current date/year and render settings.
@@ -2681,19 +2949,48 @@ class App(tk.Tk):
                         progress_callback=lambda cur, tot, _name=trip.name: self.log_queue.put(("step_progress", (cur, tot, _name)))
                     )
                     if res:
-                        # open resulting PDF if exists
+                        # Open only artifacts that were actually rendered.
                         try:
                             parser = m.TripParser(trip)
                             parser.load()
                             trip_name_safe = "".join(c if c.isalnum() or c in " -_" else "_" for c in parser.get_trip_name())
-                            pdf_path = SCRIPT_DIR / 'TripPdfs' / f"{trip_name_safe}.pdf"
                         except Exception:
-                            pdf_path = SCRIPT_DIR / 'TripPdfs' / f"{trip.name}.pdf"
-                        if pdf_path.exists():
+                            trip_name_safe = trip.name
+
+                        renderer_mode = str(config.get('renderer_mode', config.get('renderer', 'both'))).strip().lower()
+                        if renderer_mode not in ('pdf', 'html', 'both'):
+                            renderer_mode = 'both'
+
+                        try:
+                            pdf_open_after = bool(config.get('open_pdf_after_render', True))
+                        except Exception:
+                            pdf_open_after = True
+                        try:
+                            html_open_after = bool(config.get('open_html_after_render', True))
+                        except Exception:
+                            html_open_after = True
+
+                        self.log_queue.put(("info", f"Render mode resolved: {renderer_mode} (open_html={html_open_after}, open_pdf={pdf_open_after})"))
+
+                        pdf_dir, html_dir = m._resolve_output_dirs(config, SCRIPT_DIR)
+                        pdf_path = pdf_dir / f"{trip_name_safe}.pdf"
+                        html_path = html_dir / f"{trip_name_safe}.html"
+
+                        def _open_path(path: Path):
                             try:
-                                os.startfile(str(pdf_path))
+                                if os.name == 'nt':
+                                    os.startfile(str(path))
+                                elif sys.platform == 'darwin':
+                                    subprocess.run(['open', str(path)], check=False)
+                                else:
+                                    subprocess.run(['xdg-open', str(path)], check=False)
                             except Exception:
                                 pass
+
+                        if renderer_mode in ('html', 'both') and html_open_after and html_path.exists():
+                            _open_path(html_path)
+                        if renderer_mode in ('pdf', 'both') and pdf_open_after and pdf_path.exists():
+                            _open_path(pdf_path)
                         self.log_queue.put(("info", f"Rendered: {trip.name}"))
                         # Refresh visible list so rendered marks update
                         self.log_queue.put(("refresh_list", None))
@@ -2864,6 +3161,25 @@ class App(tk.Tk):
                         messagebox.showerror(self.lang.t('gui.statistics'), self.lang.t('gui.stats_error').format(error=e))
                 elif typ == 'stats_error':
                     messagebox.showerror(self.lang.t('gui.statistics'), self.lang.t('gui.stats_error_payload').format(payload=payload))
+                elif typ == 'combined_html_done':
+                    try:
+                        self.status_text.set(self.lang.t('gui.combined_html_done'))
+                    except Exception:
+                        self.status_text.set('Combined HTML generation complete')
+                    try:
+                        self.combined_html_btn.config(state=tk.NORMAL)
+                    except Exception:
+                        pass
+                elif typ == 'combined_html_error':
+                    try:
+                        self.status_text.set(self.lang.t('gui.status_ready'))
+                    except Exception:
+                        self.status_text.set('Ready')
+                    try:
+                        self.combined_html_btn.config(state=tk.NORMAL)
+                    except Exception:
+                        pass
+                    messagebox.showerror(self.lang.t('gui.combined_html_error_title'), payload)
                 elif typ == 'pkg_install_start':
                     # disable package controls and configure overall progress bar
                     try:

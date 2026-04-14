@@ -134,6 +134,7 @@ Notes:
 | `-ur`, `--unrendered` | Only unrendered trips (use to restrict) |
 | `-y YEAR` | Filter by year (e.g., `-y 2025`) |
 | `-d START;END` | Date range in dd.mm.yyyy format |
+| `--combined-html [FILE]` | Create a combined HTML overview for selected trips or filters. Defaults to `TripPdfs/combined_trips.html`. |
 | `-config(KEY=VALUE,...)` | Override config for this render (e.g., `-config(map_style="road", max_photos_per_step=4)`) |
 
 ### Selection Formats

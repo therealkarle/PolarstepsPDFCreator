@@ -1,7 +1,10 @@
 # --- App Behavior ---
 # Input/output locations (optional, can also be supplied on CLI)
 polarsteps_data_folder = "BSPData"
-output_folder = "TripPdfs"  # defaults to TripPdfs/ next to script
+output_folder = "TripPdfs" # defaults to TripPdfs/ next to script
+output_folder_pdf = "TripPdfs" # optional: separate folder for PDF output
+output_folder_html = "TripPdfs" # optional: separate folder for HTML output
+renderer_mode = "html" # pdf/html/both
 
 # Language selection (see LanguagePack/)
 # Supported: "en", "de" (copy a pack to add more)
@@ -34,7 +37,7 @@ emoji_scale = 1.2
 # Page margin in millimeters
 safety_margin_mm = 12
 # Minimum photos per step / number of photos after which a new page is started
-photos_before_page_break = 6  # legacy alias: max_photos_per_step
+photos_before_page_break = 6 # legacy alias: max_photos_per_step
 # Fill the current page with photos (only for the active page):
 # true  -> continue filling until the limit set by photos_before_page_break, leftover goes to additional media
 # false -> strictly show only photos_before_page_break in the step
@@ -49,6 +52,8 @@ photo_wall_gap = 2
 # --- General Map Settings ---
 # Map style: "hybrid" (satellite + labels), "satellite" (imagery only) or "road" (streets)
 map_style = "hybrid"
+# HTML map style: "road" uses OpenStreetMap, "satellite" uses ESRI imagery, "hybrid" uses ESRI imagery plus labels
+html_map_style = "road"
 # Opacity for hybrid label overlay (0.0-1.0)
 hybrid_labels_opacity = 1.0
 
