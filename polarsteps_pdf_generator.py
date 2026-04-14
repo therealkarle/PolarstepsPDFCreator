@@ -11,7 +11,7 @@ Features:
 """
 import io
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Optional, List, Tuple, Sequence, Union
+from typing import TYPE_CHECKING, Any, Callable, Optional, List, Tuple, Sequence, Union
 from datetime import datetime, timedelta, date
 import re
 import webbrowser
@@ -44,7 +44,7 @@ import threading
 import queue
 import html
 import hashlib
-import requests
+import requests  # type: ignore[reportMissingImports]
 import os
 import sys
 import subprocess
@@ -473,8 +473,9 @@ def maybe_update(script_dir: Path, config: dict, args) -> None:
             print(lang.t("cli.update_not_available"))
 
 # Optional Playwright (HTML -> PDF renderer)
+sync_playwright: Any = None
 try:
-    from playwright.sync_api import sync_playwright
+    from playwright.sync_api import sync_playwright  # type: ignore[reportMissingImports]
 except Exception:
     sync_playwright = None
 
@@ -514,7 +515,7 @@ class TripParser:
     def __init__(self, trip_path: Path):
         self.trip_path = Path(trip_path)
         self.trip_data = {}
-        self.steps = []
+        self.steps: List[dict[str, Any]] = []
 
     def _resolve_media_reference(self, ref):
         """Resolve media reference to a local path or remote URL string."""
@@ -581,7 +582,8 @@ class TripParser:
                 if isinstance(data, dict):
                     data["description"] = _clean_text(data.get("description", ""))
                     data["display_name"] = _clean_text(data.get("display_name", data.get("name", ""))) or data.get("name")
-                self.steps.append({"data": data, "photos": photos, "videos": videos})
+                self.steps.append({"data": data, "photos": photos, "videos": videos, "comments": []})
+            self._attach_comments_from_file()
             return
 
         # Fallback: use all_steps from trip.json (common export format)
@@ -695,7 +697,8 @@ class TripParser:
                             if photos:
                                 break
 
-                self.steps.append({"data": data, "photos": photos, "videos": videos})
+                self.steps.append({"data": data, "photos": photos, "videos": videos, "comments": []})
+            self._attach_comments_from_file()
             return
 
         # Otherwise, heuristically discover step directories
@@ -766,11 +769,73 @@ class TripParser:
                     step_data["location"] = loc
                 step_data.setdefault("display_name", child.name)
                 # try to get start_time from step_data else fallback to trip start
-                self.steps.append({"data": step_data, "photos": photos, "videos": videos})
+                self.steps.append({"data": step_data, "photos": photos, "videos": videos, "comments": []})
 
         # If still empty, create a single synthetic empty step using trip.json
         if not self.steps:
-            self.steps = [{"data": self.trip_data, "photos": [], "videos": []}]
+            self.steps = [{"data": self.trip_data, "photos": [], "videos": [], "comments": []}]
+
+        self._attach_comments_from_file()
+
+    def _attach_comments_from_file(self) -> None:
+        comment_data_path = self.trip_path / "comments.json"
+        if not comment_data_path.exists():
+            return
+
+        try:
+            with open(comment_data_path, "r", encoding="utf-8") as file:
+                comment_data = json.load(file)
+        except Exception:
+            return
+
+        if not isinstance(comment_data, dict):
+            return
+
+        steps_list = comment_data.get("steps")
+        if not isinstance(steps_list, list):
+            return
+
+        comments_by_id = {}
+        def _normalize_comment(value):
+            if isinstance(value, str):
+                return value
+            if isinstance(value, dict):
+                return str(value.get("text") or value.get("content") or value.get("body") or value.get("message") or value.get("comment") or value)
+            return str(value)
+
+        for item in steps_list:
+            if not isinstance(item, dict):
+                continue
+            step_id = item.get("id")
+            if step_id is None:
+                continue
+            comments = item.get("comments", [])
+            if not isinstance(comments, list):
+                comments = [comments]
+            normalized = [c for c in (_normalize_comment(c) for c in comments) if c]
+            comments_by_id[str(step_id)] = normalized
+
+        assigned = False
+        for step in self.steps:
+            data = step.get("data") if isinstance(step, dict) else {}
+            step_id = data.get("id") if isinstance(data, dict) else None
+            if step_id is not None and str(step_id) in comments_by_id:
+                step["comments"] = comments_by_id[str(step_id)]
+                assigned = True
+
+        if not assigned and len(steps_list) == len(self.steps):
+            for step, item in zip(self.steps, steps_list):
+                if not isinstance(item, dict):
+                    continue
+                comments = item.get("comments", [])
+                if not isinstance(comments, list):
+                    comments = [comments]
+                normalized = [c for c in (_normalize_comment(c) for c in comments) if c]
+                step["comments"] = normalized
+
+        for step in self.steps:
+            if "comments" not in step:
+                step["comments"] = []
 
     def get_trip_name(self) -> str:
         name = self.trip_data.get("name") if isinstance(self.trip_data, dict) else None
@@ -829,8 +894,12 @@ class TripParser:
         return coords
 
 # Static map helper and defaults
+StaticMap: Any = None
+CircleMarker: Any = None
+Line: Any = None
+IconMarker: Any = None
 try:
-    from staticmap import StaticMap, CircleMarker, Line, IconMarker
+    from staticmap import StaticMap, CircleMarker, Line, IconMarker  # type: ignore[reportMissingImports]
 except Exception:
     StaticMap = None
     CircleMarker = None
@@ -866,19 +935,22 @@ EMOJI_PATTERN = re.compile(
 )
 
 # Pillow (PIL) for image processing
-from PIL import Image, ImageDraw, ImageOps
+from PIL import Image, ImageDraw, ImageOps  # type: ignore[reportMissingImports]
 
 try:
-    RESAMPLING_LANCZOS = Image.Resampling.LANCZOS
+    RESAMPLING_LANCZOS: int = int(Image.Resampling.LANCZOS)
 except Exception:
-    RESAMPLING_LANCZOS = getattr(Image, "LANCZOS", Image.BICUBIC)
+    try:
+        RESAMPLING_LANCZOS = int(getattr(Image, "LANCZOS", getattr(Image, "BICUBIC", getattr(Image, "NEAREST", Image.Resampling.NEAREST))))
+    except Exception:
+        RESAMPLING_LANCZOS = int(Image.Resampling.NEAREST)
 
 if TYPE_CHECKING:
-    from staticmap import StaticMap as _StaticMap, CircleMarker as _CircleMarker, Line as _Line, IconMarker as _IconMarker
+    from staticmap import StaticMap as _StaticMap, CircleMarker as _CircleMarker, Line as _Line, IconMarker as _IconMarker  # type: ignore[reportMissingImports]
     from typing import Protocol
 
     class TripLike(Protocol):
-        steps: Sequence[dict]
+        steps: Any
         trip_path: Path
         def get_route_coordinates(self) -> List[tuple]: ...
 else:
@@ -918,10 +990,11 @@ class MapGenerator:
       - marker_thumb_size (base size in pixels)
     """
 
-    def __init__(self, width: int = 800, height: int = 450, marker_thumb_size: int = 40, url_template: str = ESRI_SATELLITE_URL, label_overlay_url: str = None, label_overlay_opacity: float = 0.7):
+    def __init__(self, width: int = 800, height: int = 450, marker_thumb_size: int = 40, url_template: str = ESRI_SATELLITE_URL, label_overlay_url: Optional[str] = None, label_overlay_opacity: float = 0.7):
         # Logical viewport dimensions (16:9 default)
         self.width = width
         self.height = height
+        self.lang: LanguageManager = get_default_language_manager()
         # Per-map dimensions (can be overridden from config)
         self.overview_width = width
         self.overview_height = height
@@ -995,7 +1068,7 @@ class MapGenerator:
         except Exception:
             return None
 
-    def _trip_cache_key(self, trip_parser: TripParser) -> str:
+    def _trip_cache_key(self, trip_parser: "TripLike") -> str:
         try:
             trip_path = getattr(trip_parser, "trip_path", None)
             if trip_path:
@@ -1321,7 +1394,7 @@ class MapGenerator:
             return False
         return False
 
-    def _find_neighbor_index(self, trip_parser: TripParser, step_index: int, direction: int, coords_cache: Optional[List[Optional[tuple]]] = None) -> Optional[int]:
+    def _find_neighbor_index(self, trip_parser: "TripLike", step_index: int, direction: int, coords_cache: Optional[List[Optional[tuple]]] = None) -> Optional[int]:
         """Find the nearest previous/next step that has coordinates.
 
         direction: -1 for previous, +1 for next
@@ -1433,14 +1506,16 @@ class MapGenerator:
         except Exception:
             return False
 
-    def _create_map(self, width: int = None, height: int = None) -> "_StaticMap":
+    def _create_map(self, width: Optional[int] = None, height: Optional[int] = None) -> "_StaticMap":
         """Create a StaticMap with configured tiles. If the configured tile provider
         is unavailable, fall back to road tiles to keep map generation working."""
         if StaticMap is None:
             lang = getattr(self, "lang", get_default_language_manager())
             raise RuntimeError(lang.t("render.staticmap_missing"))
-        w = int(round((width or self.width)))
-        h = int(round((height or self.height)))
+        fallback_width = self.width if getattr(self, 'width', None) is not None else 0
+        fallback_height = self.height if getattr(self, 'height', None) is not None else 0
+        w = int(round(width if width is not None else fallback_width))
+        h = int(round(height if height is not None else fallback_height))
 
         url = self.url_template
         # If satellite/hybrid fails, try road tiles as a fallback (keeps generation usable)
@@ -1683,9 +1758,7 @@ class MapGenerator:
                 raise ValueError("URL thumbnail requires download")
             with Image.open(photo_path) as img:
                 img = img.convert("RGBA")
-                img = ImageOps.fit(img, (size, size), method=RESAMPLING_LANCZOS)
-
-                # Circular mask
+                img = ImageOps.fit(img, (size, size), method=int(RESAMPLING_LANCZOS))
                 mask = Image.new("L", (size, size), 0)
                 draw = ImageDraw.Draw(mask)
                 draw.ellipse((0, 0, size - 1, size - 1), fill=255)
@@ -2140,9 +2213,9 @@ class StatisticsGenerator:
         },
     }
 
-    def __init__(self, map_generator: MapGenerator = None, config: dict = None):
-        self.map_generator = map_generator or MapGenerator()
-        self.config = config or {}
+    def __init__(self, map_generator: Optional[MapGenerator] = None, config: Optional[dict] = None):
+        self.map_generator: MapGenerator = map_generator if map_generator is not None else MapGenerator()
+        self.config = config if config is not None else {}
         # cache for reverse-geocode lookups: key -> country name
         self._rg_cache = {}
         self._country_localize_cache = {}
@@ -2286,16 +2359,17 @@ class StatisticsGenerator:
         # common possible keys
         try_keys = ['lat', 'latitude', 'lng', 'lon', 'longitude']
         for k in try_keys:
-            if k in location_data and location_data.get(k) not in (None, ''):
-                try:
-                    val = location_data.get(k)
-                    f = float(val)
-                    if k in ('lat', 'latitude'):
-                        lat = f
-                    else:
-                        lon = f
-                except Exception:
-                    pass
+            if k in location_data:
+                val = location_data.get(k)
+                if val not in (None, ''):
+                    try:
+                        f = float(val)
+                        if k in ('lat', 'latitude'):
+                            lat = f
+                        else:
+                            lon = f
+                    except Exception:
+                        pass
         # sometimes coords are provided as a tuple/list in 'coords' or 'latlng'
         if (lat is None or lon is None) and 'coords' in location_data:
             c = location_data.get('coords')
@@ -2627,7 +2701,7 @@ class StatisticsGenerator:
                         if cc:
                             return {
                                 'AF': 'Africa', 'AS': 'Asia', 'EU': 'Europe', 'NA': 'North America', 'OC': 'Oceania', 'SA': 'South America', 'AN': 'Antarctica'
-                            }.get(cc, cc)
+                            }.get(cc, cc) or ''
                 except Exception:
                     pass
         except Exception:
@@ -2848,7 +2922,7 @@ class StatisticsGenerator:
         }
         return stats
 
-    def compute_aggregate_stats(self, trip_paths: list, year: int = None, start_date: datetime = None, end_date: datetime = None, progress_callback=None, verbose: bool = False, debug_countries: bool = False) -> dict:
+    def compute_aggregate_stats(self, trip_paths: list, year: Optional[int] = None, start_date: Optional[datetime] = None, end_date: Optional[datetime] = None, progress_callback: Optional[Callable[[int, int, Any], Any]] = None, verbose: bool = False, debug_countries: bool = False) -> dict:
         """Aggregate stats across a list of trip paths (Path objects).
 
         Future trips (where the recorded start date is after today's date) are
@@ -2931,31 +3005,37 @@ class StatisticsGenerator:
                 lat = None
                 lon = None
                 for k in ('lat', 'latitude'):
-                    if k in loc_scan and loc_scan.get(k) not in (None, ''):
-                        try:
-                            lat = float(loc_scan.get(k))
-                        except Exception:
-                            lat = None
+                    if k in loc_scan:
+                        val = loc_scan.get(k)
+                        if val not in (None, ''):
+                            try:
+                                lat = float(val)
+                            except Exception:
+                                lat = None
                 for k in ('lon', 'lng', 'longitude'):
-                    if k in loc_scan and loc_scan.get(k) not in (None, ''):
-                        try:
-                            lon = float(loc_scan.get(k))
-                        except Exception:
-                            lon = None
+                    if k in loc_scan:
+                        val = loc_scan.get(k)
+                        if val not in (None, ''):
+                            try:
+                                lon = float(val)
+                            except Exception:
+                                lon = None
                 if (lat is None or lon is None) and 'coords' in loc_scan:
                     c = loc_scan.get('coords')
                     if isinstance(c, (list, tuple)) and len(c) >= 2:
                         try:
-                            lat = float(c[0])
-                            lon = float(c[1])
+                            if c[0] is not None and c[1] is not None:
+                                lat = float(c[0])
+                                lon = float(c[1])
                         except Exception:
                             pass
                 if (lat is None or lon is None) and 'latlng' in loc_scan:
                     c = loc_scan.get('latlng')
                     if isinstance(c, (list, tuple)) and len(c) >= 2:
                         try:
-                            lat = float(c[0])
-                            lon = float(c[1])
+                            if c[0] is not None and c[1] is not None:
+                                lat = float(c[0])
+                                lon = float(c[1])
                         except Exception:
                             pass
                 if lat is not None and lon is not None:
@@ -2973,14 +3053,14 @@ class StatisticsGenerator:
                 tp.load()
             except Exception:
                 # still report progress
-                if progress_callback:
+                if progress_callback is not None:
                     try:
                         progress_callback(idx, total, p)
                     except Exception:
                         pass
                 continue
             # report progress before filtering per-trip
-            if progress_callback:
+            if callable(progress_callback):
                 try:
                     progress_callback(idx, total, p)
                 except Exception:
@@ -3299,7 +3379,7 @@ class StatisticsGenerator:
 
         # never report a period that extends past today
         try:
-            if period_end and period_end > today:
+            if period_end is not None and today is not None and period_end > today:
                 period_end = today
         except Exception:
             pass
@@ -3361,8 +3441,8 @@ class StatisticsGenerator:
                 steps.append(s)
         # Create a tiny wrapper with steps and get_route_coordinates
         class _Combined:
-            def __init__(self, steps):
-                self.steps = steps
+            def __init__(self, steps: List[dict[str, Any]]):
+                self.steps: List[dict[str, Any]] = steps
                 self.trip_path = Path('.')
             def get_route_coordinates(self):
                 coords = []
@@ -3396,12 +3476,12 @@ class StatisticsGenerator:
 class InteractiveHtmlBuilder:
     """Builds a standalone interactive HTML travel journal with Leaflet map."""
 
-    def __init__(self, output_path: Path, trip_parser: TripParser, config: dict = None, language_manager: LanguageManager = None, cli_language_manager: LanguageManager = None):
+    def __init__(self, output_path: Path, trip_parser: TripParser, config: Optional[dict] = None, language_manager: Optional[LanguageManager] = None, cli_language_manager: Optional[LanguageManager] = None):
         self.output_path = Path(output_path)
         self.trip_parser = trip_parser
-        self.config = config or {}
-        self.lang = language_manager or get_default_language_manager()
-        self.cli_lang = cli_language_manager or get_default_language_manager()
+        self.config = config if config is not None else {}
+        self.lang = language_manager if language_manager is not None else get_default_language_manager()
+        self.cli_lang = cli_language_manager if cli_language_manager is not None else get_default_language_manager()
         self.photo_max_width = int(self.config.get("html_photo_max_width", 1200))
         self._image_data_cache = OrderedDict()
         self._memory_cache_items = int(self.config.get("html_memory_cache_items", 256))
@@ -3476,6 +3556,8 @@ class InteractiveHtmlBuilder:
             return None, None
         lat = location.get("lat") or location.get("latitude")
         lon = location.get("lon") or location.get("lng") or location.get("longitude")
+        if lat is None or lon is None:
+            return None, None
         try:
             return float(lat), float(lon)
         except Exception:
@@ -3535,6 +3617,8 @@ class InteractiveHtmlBuilder:
             photo_list = []
             for p in step.get("photos", []):
                 try:
+                    if not p:
+                        continue
                     if isinstance(p, str) and (p.startswith("http://") or p.startswith("https://")):
                         photo_list.append(p)
                         continue
@@ -3557,7 +3641,7 @@ class InteractiveHtmlBuilder:
                         val = step_data.get(key) if isinstance(step_data, dict) else None
                         if isinstance(val, dict):
                             val = val.get("path") or val.get("small_thumbnail_path") or val.get("large_thumbnail_path")
-                        if not isinstance(val, str) or not val:
+                        if not val or not isinstance(val, str):
                             continue
                         if val.startswith("http://") or val.startswith("https://") or val.startswith("file:"):
                             # remote URL or file URL
@@ -3577,6 +3661,8 @@ class InteractiveHtmlBuilder:
             video_list = []
             for v in step.get("videos", []):
                 try:
+                    if not v:
+                        continue
                     if isinstance(v, str) and (v.startswith("http://") or v.startswith("https://") or v.startswith("file:")):
                         video_list.append(v)
                         continue
@@ -3604,23 +3690,26 @@ class InteractiveHtmlBuilder:
                 "lon": lon,
                 "photos": photo_list,
                 "videos": video_list,
+                "comments": step.get("comments", []) if isinstance(step, dict) else [],
             })
 
         steps_json = json.dumps(steps_data, ensure_ascii=False)
+        steps_json = steps_json.replace('</script>', '<\\/script>')
+        steps_json = steps_json.replace('\u2028', '\\u2028').replace('\u2029', '\\u2029')
 
         html_parts = [
-            '<!DOCTYPE html>',
-            '<html lang="en">',
-            '<head>',
-            '<meta charset="utf-8"/>',
-            '<meta name="viewport" content="width=device-width, initial-scale=1.0"/>',
-            '<title>' + self._escape(trip_name) + '</title>',
-            '<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>',
-            '<style>',
-            'body { font-family: "Segoe UI", sans-serif; background:#f6f7f8; margin:0; padding:0; }',
-            '.step-photo-marker { border-radius: 50% !important; overflow: hidden !important; border: 2px solid #fff !important; box-shadow: 0 0 4px rgba(0,0,0,0.4) !important; }',
-            '.leaflet-marker-icon.step-photo-marker { width: 44px !important; height: 44px !important; }',
-            '.top-bar { background: #1A5F7A; color: #fff; padding: 12px 16px; display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 8px; }',
+                '<!DOCTYPE html>',
+                '<html lang="en">',
+                '<head>',
+                '<meta charset="utf-8"/>',
+                '<meta name="viewport" content="width=device-width, initial-scale=1.0"/>',
+                '<title>' + self._escape(trip_name) + '</title>',
+                '<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>',
+                '<style>',
+                'body { font-family: "Segoe UI", sans-serif; background:#f6f7f8; margin:0; padding:0; }',
+                '.step-photo-marker { border-radius: 50% !important; overflow: hidden !important; border: 2px solid #fff !important; box-shadow: 0 0 4px rgba(0,0,0,0.4) !important; }',
+                '.leaflet-marker-icon.step-photo-marker { width: 44px !important; height: 44px !important; }',
+                '.top-bar { background: #1A5F7A; color: #fff; padding: 12px 16px; display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 8px; }',
             '.top-bar h1 { margin:0; font-size: 1.25rem; }',
             '.top-bar .stats { font-size: 0.9rem; color: #e8f7ff; }',
             '.timeline { display: flex; gap: 8px; overflow-x: auto; overflow-y: hidden; padding: 8px 16px; background: #fff; border-bottom: 1px solid #ddd; }',
@@ -3636,6 +3725,9 @@ class InteractiveHtmlBuilder:
             '.step-title { font-weight: 700; font-size: 1.1rem; margin-bottom: 4px; }',
             '.step-meta { font-size: 0.82rem; color: #666; margin-bottom: 6px; }',
             '.step-desc { font-size: 0.98rem; line-height: 1.5; margin: 8px 0; color: #333; }',
+            '.step-comments { margin-top: 12px; padding: 12px 14px; background: #f4f7fb; border-left: 4px solid #1A5F7A; border-radius: 10px; color: #333; font-size: 0.95rem; }',
+            '.comment-item { margin-bottom: 8px; }',
+            '.comment-item:last-child { margin-bottom: 0; }',
         ] + _shared_detail_media_css() + [
             '.controls { padding: 10px; background: #fff; border-top: 1px solid #ddd; display: flex; justify-content: flex-end; gap: 8px; align-items: center; }',
             '.controls button { padding: 6px 10px; border: 1px solid #1A5F7A; background: #1A5F7A; color: #fff; border-radius: 4px; cursor: pointer; }',
@@ -3759,6 +3851,20 @@ class InteractiveHtmlBuilder:
             '    var title = document.createElement("div"); title.className = "step-title"; title.textContent = (i + 1) + ". " + step.title; wrapper.appendChild(title);',
             '    var meta = document.createElement("div"); meta.className = "step-meta"; var mt = []; if (step.meta.location) mt.push(step.meta.location); if (step.meta.date) mt.push(step.meta.date); meta.textContent = mt.join(" • "); wrapper.appendChild(meta);',
             '    var desc = document.createElement("div"); desc.className = "step-desc"; desc.innerHTML = step.description || ""; wrapper.appendChild(desc);',
+            '    if (step.comments && step.comments.length) {',
+            '      var commentsWrapper = document.createElement("div");',
+            '      commentsWrapper.className = "step-comments";',
+            '      step.comments.forEach(function(comment) {',
+            '        var commentItem = document.createElement("div");',
+            '        commentItem.className = "comment-item";',
+            '        commentItem.textContent = comment;',
+            '        if (commentItem.textContent.indexOf("\\n") >= 0) {',
+            '          commentItem.innerHTML = commentItem.textContent.replace(/\\n/g, "<br/>");',
+            '        }',
+            '        commentsWrapper.appendChild(commentItem);',
+            '      });',
+            '      wrapper.appendChild(commentsWrapper);',
+            '    }',
             '    var carousel = createStepMediaCarousel(step);',
             '    if (carousel) { wrapper.appendChild(carousel); }',
             '    // Video carousel items are handled together with photos in step media carousel.',
@@ -3845,12 +3951,12 @@ class InteractiveHtmlBuilder:
 class CombinedHtmlBuilder:
     """Builds a combined interactive HTML overview for multiple trips."""
 
-    def __init__(self, output_path: Path, trip_paths: list, config: dict = None, language_manager: LanguageManager = None, cli_language_manager: LanguageManager = None):
+    def __init__(self, output_path: Path, trip_paths: list, config: Optional[dict] = None, language_manager: Optional[LanguageManager] = None, cli_language_manager: Optional[LanguageManager] = None):
         self.output_path = Path(output_path)
-        self.trip_paths = list(trip_paths or [])
-        self.config = config or {}
-        self.lang = language_manager or get_default_language_manager()
-        self.cli_lang = cli_language_manager or get_default_language_manager()
+        self.trip_paths = list(trip_paths) if trip_paths is not None else []
+        self.config = config if config is not None else {}
+        self.lang = language_manager if language_manager is not None else get_default_language_manager()
+        self.cli_lang = cli_language_manager if cli_language_manager is not None else get_default_language_manager()
         self.photo_max_width = int(self.config.get("html_photo_max_width", 1200))
         self._image_data_cache = OrderedDict()
         self._memory_cache_items = int(self.config.get("html_memory_cache_items", 256))
@@ -3919,6 +4025,8 @@ class CombinedHtmlBuilder:
             return None, None
         lat = location.get("lat") or location.get("latitude")
         lon = location.get("lon") or location.get("lng") or location.get("longitude")
+        if lat is None or lon is None:
+            return None, None
         try:
             return float(lat), float(lon)
         except Exception:
@@ -4023,6 +4131,7 @@ class CombinedHtmlBuilder:
                     "photo": photo_url,
                     "photos": photo_urls,
                     "videos": step_videos,
+                    "comments": step.get("comments", []) if isinstance(step, dict) else [],
                 })
 
             loaded.append({
@@ -4175,6 +4284,9 @@ class CombinedHtmlBuilder:
             '.step-row .step-meta { font-size: 0.85rem; color: #555; margin-top: 4px; }',
             '.step-row .step-location-detail { font-size: 0.82rem; color: #666; margin-top: 4px; }',
             '.step-row .step-desc { font-size: 0.95rem; line-height: 1.5; margin: 10px 0 0 0; color: #333; }',
+            '.step-row .step-comments { margin-top: 10px; padding: 12px 14px; background: #f4f7fb; border-left: 4px solid #1A5F7A; border-radius: 10px; color: #333; font-size: 0.95rem; }',
+            '.step-row .comment-item { margin-bottom: 8px; }',
+            '.step-row .comment-item:last-child { margin-bottom: 0; }',
             '.step-row .step-media { margin-top: 10px; }',
             '.step-row .step-media img { width: 100%; max-height: 260px; object-fit: cover; border-radius: 12px; }',
             '#selected-step-list { overflow-y:auto; max-height: none; padding-right: 8px; }',
@@ -4410,6 +4522,20 @@ class CombinedHtmlBuilder:
             '      (step.location_detail ? \'<div class="step-location-detail">\' + step.location_detail + \'</div>\' : \'\');',
             '    if (step.description) {',
             '      row.innerHTML += \'<div class="step-desc">\' + step.description + \'</div>\';',
+            '    if (step.comments && step.comments.length) {',
+            '      var commentsWrapper = document.createElement("div");',
+            '      commentsWrapper.className = "step-comments";',
+            '      step.comments.forEach(function(comment) {',
+            '        var commentItem = document.createElement("div");',
+            '        commentItem.className = "comment-item";',
+            '        commentItem.textContent = comment;',
+            '        if (commentItem.textContent.indexOf("\\n") >= 0) {',
+            '          commentItem.innerHTML = commentItem.textContent.replace(/\\n/g, "<br/>");',
+            '        }',
+            '        commentsWrapper.appendChild(commentItem);',
+            '      });',
+            '      row.appendChild(commentsWrapper);',
+            '    }',
             '    }',
             '    var carousel = createStepMediaCarousel(step);',
             '    if (carousel) {',
@@ -4582,7 +4708,7 @@ class CombinedHtmlBuilder:
 class HtmlPDFBuilder:
     """Builds the PDF document using HTML/CSS rendered by Playwright (Chromium)."""
 
-    def __init__(self, output_path: Path, trip_parser: TripParser, map_generator: MapGenerator, config: dict = None, language_manager: LanguageManager = None, cli_language_manager: LanguageManager = None, progress_callback=None):
+    def __init__(self, output_path: Path, trip_parser: TripParser, map_generator: MapGenerator, config: Optional[dict] = None, language_manager: Optional[LanguageManager] = None, cli_language_manager: Optional[LanguageManager] = None, progress_callback: Optional[Callable[[int, int, Optional[str]], Any]] = None):
         self.output_path = Path(output_path)
         self.trip_parser = trip_parser
         self.map_generator = map_generator
@@ -4801,6 +4927,23 @@ class HtmlPDFBuilder:
 
         return "\n".join(parts)
 
+    def _build_comments_html(self, comments: list) -> str:
+        if not comments:
+            return ""
+        comment_entries = []
+        for comment in comments:
+            try:
+                text = str(comment or "")
+            except Exception:
+                text = ""
+            if not text.strip():
+                continue
+            safe = self._escape(text).replace("\n", "<br/>")
+            comment_entries.append(f"<div class=\"comment-item\">{safe}</div>")
+        if not comment_entries:
+            return ""
+        return "<div class=\"step-comments\">" + "".join(comment_entries) + "</div>"
+
     def _should_open_pdf(self) -> bool:
         renderer_mode = str(self.config.get("renderer_mode", self.config.get("renderer", "both"))).strip().lower()
         if renderer_mode not in ("pdf", "html", "both"):
@@ -4814,12 +4957,14 @@ class HtmlPDFBuilder:
         except Exception:
             return True
 
-    def _build_photo_grid_html(self, photo_paths: List[Path]) -> str:
+    def _build_photo_grid_html(self, photo_paths: Sequence[Union[Path, str]]) -> str:
         if not photo_paths:
             return ""
         items = []
 
         def _photo_url(p):
+            if p is None:
+                return None
             if isinstance(p, str) and (p.startswith("http://") or p.startswith("https://") or p.startswith("file:")):
                 return p
             try:
@@ -4861,6 +5006,8 @@ class HtmlPDFBuilder:
         videos = []
         for v in video_paths:
             try:
+                if not v:
+                    continue
                 if isinstance(v, str) and (v.startswith("http://") or v.startswith("https://") or v.startswith("file:")):
                     video_url = v
                 else:
@@ -4921,11 +5068,12 @@ class HtmlPDFBuilder:
             def _render_overview_map():
                 try:
                     # Report overview as first step
-                    try:
-                        if self.progress_callback:
-                            self.progress_callback(1, total_steps, trip_name)
-                    except Exception:
-                        pass
+                    cb = self.progress_callback
+                    if callable(cb):
+                        try:
+                            cb(1, total_steps, trip_name)
+                        except Exception:
+                            pass
                     print(self.cli_lang.t("render.rendering_title_overview"))
                     t0 = time.perf_counter()
                     mg = self._get_thread_map_generator()
@@ -4967,8 +5115,12 @@ class HtmlPDFBuilder:
             try:
                 # Report overview as first step
                 try:
-                    if self.progress_callback:
-                        self.progress_callback(1, total_steps, trip_name)
+                    cb = self.progress_callback
+                    if callable(cb):
+                        try:
+                            cb(1, total_steps, trip_name)
+                        except Exception:
+                            pass
                 except Exception:
                     pass
                 print(self.cli_lang.t("render.rendering_title_overview"))
@@ -5004,6 +5156,9 @@ class HtmlPDFBuilder:
             ".step-title { color: #1A5F7A; font-size: 18pt; margin: 6mm 0 2mm; }",
             ".step-meta { color: #666; font-size: 10pt; margin: 0 0 4mm; }",
             ".step-desc { font-size: 11pt; line-height: 1.35; margin: 0 0 4mm; }",
+            ".step-comments { margin: 0 0 6mm; padding: 8px 10px; background: #f4f7fb; border-left: 4px solid #1A5F7A; border-radius: 8px; }",
+            ".comment-item { margin-bottom: 6px; }",
+            ".comment-item:last-child { margin-bottom: 0; }",
             ".step-list { margin: 0 0 4mm 6mm; }",
             ".photo-grid { column-count: %d; column-gap: %dpx; width: 100%%; margin: 0 0 4mm; page-break-inside: auto; }" % (self.photo_masonry_columns, self.photo_masonry_gap),
             ".photo-grid img { width: 100%%; height: auto; display: block; margin-bottom: %dpx; break-inside: avoid; page-break-inside: auto; }" % (self.photo_masonry_gap),
@@ -5037,10 +5192,11 @@ class HtmlPDFBuilder:
 
             print(self.cli_lang.t("render.rendering_step", current=step_number, total=step_count, name=display_name))
             try:
-                if self.progress_callback:
+                cb = self.progress_callback
+                if callable(cb):
                     # Inform caller about step progress (current step includes overview as first step)
                     try:
-                        self.progress_callback(step_number + 1, total_steps, trip_name)
+                        cb(step_number + 1, total_steps, trip_name)
                     except Exception:
                         pass
             except Exception:
@@ -5102,9 +5258,11 @@ class HtmlPDFBuilder:
 
             desc_intro_html = self._build_description_html(desc_intro_text)
             desc_rest_html = self._build_description_html(desc_rest_text) if desc_rest_text else ""
+            comments_html = self._build_comments_html(step.get("comments", []) if isinstance(step, dict) else [])
 
             # Photo grid
-            photos_to_show = [Path(p) if not (isinstance(p, str) and (p.startswith('http://') or p.startswith('https://') or p.startswith('file:'))) else p for p in photos]
+            photos_to_show = [Path(p) for p in photos if p is not None and not (isinstance(p, str) and (p.startswith('http://') or p.startswith('https://') or p.startswith('file:')))]
+            photos_to_show += [p for p in photos if isinstance(p, str) and (p.startswith('http://') or p.startswith('https://') or p.startswith('file:'))]
             photo_html = self._build_photo_grid_html(photos_to_show)
 
             # Video blocks for this step
@@ -5132,6 +5290,8 @@ class HtmlPDFBuilder:
 
             if desc_rest_html:
                 step_section.append(f"<div class=\"step-desc-rest\">{desc_rest_html}</div>")
+            if comments_html:
+                step_section.append(comments_html)
 
             step_section.extend([photo_html, video_html, "</div>"])
             html_parts.extend(step_section)
@@ -5217,10 +5377,11 @@ class HtmlPDFBuilder:
                         last_error = None
                         # Notify caller that PDF file has been created (final progress step)
                         try:
-                            if self.progress_callback:
+                            cb = self.progress_callback
+                            if callable(cb):
                                 try:
                                     steps = getattr(self, '_total_steps', None) or (len(self.trip_parser.steps) + 2)
-                                    self.progress_callback(steps, steps, self.trip_parser.get_trip_name())
+                                    cb(steps, steps, self.trip_parser.get_trip_name())
                                 except Exception:
                                     pass
                         except Exception:
@@ -5366,7 +5527,7 @@ def find_trips(bsp_data_folder: Path) -> list:
     return unique_trips
 
 
-def filter_trips_by_date(trips: list, year: int = None, start_date: datetime = None, end_date: datetime = None) -> list:
+def filter_trips_by_date(trips: list, year: Optional[int] = None, start_date: Optional[datetime] = None, end_date: Optional[datetime] = None) -> list:
     """Return only trips that overlap the specified period.
 
     * A year filter behaves like ``start_date=YEAR-01-01, end_date=YEAR-12-31``.
@@ -5559,7 +5720,7 @@ def _resolve_index_token(token: str, total: int) -> Optional[int]:
     return None
 
 
-def parse_render_command(cmd_str: str, trips: list, cache_manager: CacheManager, lang: LanguageManager = None) -> dict:
+def parse_render_command(cmd_str: str, trips: list, cache_manager: CacheManager, lang: Optional[LanguageManager] = None) -> dict:
     """Parse a render command string.
 
     Format: render [flags] [selection]
@@ -5897,7 +6058,7 @@ def parse_render_command(cmd_str: str, trips: list, cache_manager: CacheManager,
     return result
 
 
-def display_trips(trips: list, cache_manager: CacheManager, title: str = None, lang: LanguageManager = None):
+def display_trips(trips: list, cache_manager: CacheManager, title: Optional[str] = None, lang: Optional[LanguageManager] = None):
     """Display a numbered list of trips with rendered status."""
     lang = lang or get_default_language_manager()
     header_title = title or lang.t("cli.available_trips_title")
@@ -5922,7 +6083,7 @@ def display_trips(trips: list, cache_manager: CacheManager, title: str = None, l
     print()
 
 
-def print_command_help(lang: LanguageManager = None):
+def print_command_help(lang: Optional[LanguageManager] = None):
         """Print available commands."""
         lang = lang or get_default_language_manager()
         print(lang.t("cli.command_help"))
@@ -6055,10 +6216,13 @@ def prompt_loop(trips: list, cache_manager: CacheManager, script_dir: Path, conf
                 # Print a concise header depending on filter
                 if result.get('year'):
                     print(f"Reise dieses Jahr: {result.get('year')}")
-                elif result.get('start_date') and result.get('end_date'):
-                    print(f"Reise im Zeitraum: {result.get('start_date').date()} bis {result.get('end_date').date()}")
                 else:
-                    print("Reise:")
+                    start_date = result.get('start_date')
+                    end_date = result.get('end_date')
+                    if start_date is not None and end_date is not None:
+                        print(f"Reise im Zeitraum: {start_date.date()} bis {end_date.date()}")
+                    else:
+                        print("Reise:")
 
                 for i, trip in enumerate(trips_to_stat, 1):
                     try:
@@ -6080,15 +6244,23 @@ def prompt_loop(trips: list, cache_manager: CacheManager, script_dir: Path, conf
                 # Ensure start/end period variables reflect requested year or explicit range
                 period_start = None
                 period_end = None
-                if result.get('year'):
-                    y = int(result.get('year'))
-                    period_start = datetime(y, 1, 1)
-                    period_end = datetime(y, 12, 31)
-                elif result.get('start_date') and result.get('end_date'):
-                    period_start = result.get('start_date')
-                    period_end = result.get('end_date')
+                year_value = result.get('year')
+                if year_value is not None:
+                    try:
+                        y = int(year_value)
+                        period_start = datetime(y, 1, 1)
+                        period_end = datetime(y, 12, 31)
+                    except Exception:
+                        period_start = None
+                        period_end = None
+                else:
+                    start_date = result.get('start_date')
+                    end_date = result.get('end_date')
+                    if start_date is not None and end_date is not None:
+                        period_start = start_date
+                        period_end = end_date
 
-                agg = sg.compute_aggregate_stats(trips_to_stat, year=result.get('year'), start_date=period_start, end_date=period_end, progress_callback=_progress, verbose=verbose)
+                agg = sg.compute_aggregate_stats(trips_to_stat, year=year_value, start_date=period_start, end_date=period_end, progress_callback=_progress, verbose=verbose)
 
                 # Determine period for ratio calculation
                 if period_start and period_end:
@@ -6465,7 +6637,7 @@ def _parse_aspect_ratio(value, fallback: float = MAP_ASPECT_RATIO) -> float:
         return float(fallback)
 
 
-def create_map_generator_from_config(config: dict = None, lang: LanguageManager = None, purpose: str = "render") -> MapGenerator:
+def create_map_generator_from_config(config: Optional[dict] = None, lang: Optional[LanguageManager] = None, purpose: str = "render") -> MapGenerator:
     """Create and configure a MapGenerator from app config.
 
     purpose:
@@ -6547,11 +6719,14 @@ def create_map_generator_from_config(config: dict = None, lang: LanguageManager 
 
 def _resolve_output_dirs(config: dict, script_dir: Path):
     try:
-        base_dir = Path(config.get('output_folder')) if config.get('output_folder') else script_dir / 'TripPdfs'
+        output_folder = config.get('output_folder')
+        base_dir = Path(str(output_folder)) if output_folder else script_dir / 'TripPdfs'
     except Exception:
         base_dir = script_dir / 'TripPdfs'
-    pdf_dir = Path(config.get('output_folder_pdf') or base_dir)
-    html_dir = Path(config.get('output_folder_html') or base_dir)
+    output_folder_pdf = config.get('output_folder_pdf')
+    output_folder_html = config.get('output_folder_html')
+    pdf_dir = Path(str(output_folder_pdf)) if output_folder_pdf else Path(base_dir)
+    html_dir = Path(str(output_folder_html)) if output_folder_html else Path(base_dir)
     return pdf_dir, html_dir
 
 
@@ -6562,7 +6737,7 @@ def _should_open_html(config: dict) -> bool:
         return True
 
 
-def render_trip(trip_path: Path, script_dir: Path, config: dict, cache_manager: CacheManager, check_stop=None, lang: LanguageManager = None, progress_callback=None) -> bool:
+def render_trip(trip_path: Path, script_dir: Path, config: dict, cache_manager: CacheManager, check_stop=None, lang: Optional[LanguageManager] = None, progress_callback=None) -> bool:
     """Render a single trip to PDF. Returns True if successful, False if error or stopped."""
     lang = lang or get_default_language_manager()
     try:
@@ -6670,7 +6845,7 @@ def render_trip(trip_path: Path, script_dir: Path, config: dict, cache_manager: 
         return False
 
 
-def get_date_filter_from_user(lang: LanguageManager = None) -> tuple:
+def get_date_filter_from_user(lang: Optional[LanguageManager] = None) -> tuple:
     """Ask user for date filter (year or date range). Returns (year, start_date, end_date)."""
     lang = lang or get_default_language_manager()
     print("\n" + lang.t("cli.date_filter_title"))

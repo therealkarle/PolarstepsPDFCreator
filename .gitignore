@@ -17,8 +17,7 @@ temp/html/
 # Virtual environments
 .venv/
 venv/
-env/
-ENV/
+.env
 .Python
 
 # Python compiled files
@@ -75,6 +74,7 @@ htmlcov/
 # Environment / secrets
 .env
 .env.*
+!.env.example
 secrets/
 *.pem
 *.key
