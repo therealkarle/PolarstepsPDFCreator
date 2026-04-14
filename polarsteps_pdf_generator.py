@@ -5265,9 +5265,7 @@ class HtmlPDFBuilder:
             photos_to_show += [p for p in photos if isinstance(p, str) and (p.startswith('http://') or p.startswith('https://') or p.startswith('file:'))]
             photo_html = self._build_photo_grid_html(photos_to_show)
 
-            # Video blocks for this step
-            video_html = self._build_video_grid_html(videos)
-
+            # Video content is intentionally excluded from PDF output
             # Add all media to step (no split hiding) and in appendix only if extra exists due explicit config.
             extra_photos = []
             if self.appendix_show_undisplayed_media and extra_photos:
@@ -5293,7 +5291,7 @@ class HtmlPDFBuilder:
             if comments_html:
                 step_section.append(comments_html)
 
-            step_section.extend([photo_html, video_html, "</div>"])
+            step_section.extend([photo_html, "</div>"])
             html_parts.extend(step_section)
 
         if self.appendix_show_undisplayed_media and appendix_items:
@@ -5312,20 +5310,6 @@ class HtmlPDFBuilder:
                     extra_html = self._build_photo_grid_html([Path(p) for p in extra_photos])
                     if extra_html:
                         html_parts.append(extra_html)
-
-                videos = item.get("videos", [])
-                if videos:
-                    links = []
-                    for video_path in videos:
-                        try:
-                            file_url = Path(video_path).resolve().as_uri()
-                        except Exception:
-                            file_url = str(video_path)
-                        name = Path(video_path).name
-                        links.append(f"<a class=\"video-link\" href=\"{self._escape(file_url)}\">{self._escape(name)}</a>")
-                    html_parts.append(
-                        f"<div class=\"video-header\">📹 {self._escape(self.lang.t('pdf.videos_label'))}</div>" + "".join(links)
-                    )
             html_parts.append("</div>")
 
         html_parts.append("</body></html>")
