@@ -4,7 +4,7 @@ polarsteps_data_folder = "BSPData"
 output_folder = "TripPdfs" # defaults to TripPdfs/ next to script
 output_folder_pdf = "TripPdfs" # optional: separate folder for PDF output
 output_folder_html = "TripPdfs" # optional: separate folder for HTML output
-renderer_mode = "html" # pdf/html/both
+renderer_mode = "both" # pdf/html/both
 
 # Language selection (see LanguagePack/)
 # Supported: "en", "de" (copy a pack to add more)

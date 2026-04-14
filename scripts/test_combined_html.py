@@ -34,4 +34,5 @@ if not result:
 text = output_path.read_text(encoding='utf-8')
 assert 'Combined Trip Overview' in text, 'Expected overview title not found in generated HTML.'
 assert 'combined-map' in text, 'Expected map container not found in generated HTML.'
+assert 'function openMediaModal' in text or 'id="media-modal"' in text, 'MEDIA MODAL NOT FOUND in combined HTML'
 print('Combined HTML smoke test passed:', output_path)

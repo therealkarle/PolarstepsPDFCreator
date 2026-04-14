@@ -14,7 +14,8 @@ try:
         if html_path.exists():
             html_text = html_path.read_text(encoding='utf-8')
             assert 'map-resize-handle' in html_text, 'RESIZE HANDLE NOT FOUND in HTML'
-            print('Resize handle confirmed in html output.')
+            assert 'function openMediaModal' in html_text or 'id="media-modal"' in html_text, 'MEDIA MODAL NOT FOUND in HTML'
+            print('Resize handle and fullscreen media modal confirmed in html output.')
         else:
             print('WARNING: expected html file not found:', html_path)
 except Exception as e:

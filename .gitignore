@@ -2,6 +2,7 @@
 
 # Data exports and generated outputs
 BSPData/
+BSPDataOld/
 TripPdfs/
 tmp_pdf_text.txt
 stats_smoke_map.png
