@@ -1741,12 +1741,17 @@ class App(tk.Tk):
         errs = []
         import os
         def _maybe_check_numeric(var, k, kind, minv=None, maxv=None):
+            if var is None:
+                return None
+            val_str = str(var.get()).strip()
+            if not val_str:
+                return None  # Optional or empty
             try:
                 v = None
                 if kind == 'int':
-                    v = int(var.get())
+                    v = int(val_str)
                 else:
-                    v = float(var.get())
+                    v = float(val_str)
                 if minv is not None and v < minv:
                     return f"{k}: value {v} < min {minv}"
                 if maxv is not None and v > maxv:
