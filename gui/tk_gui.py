@@ -1256,6 +1256,15 @@ class App(tk.Tk):
                     if p:
                         var.set(p)
                 ttk.Button(frm, text=self.lang.t('gui.browse'), command=_browse_path).pack(side=tk.LEFT, padx=(6,0))
+            elif var_type == 'directory':
+                var = tk.StringVar()
+                ent = ttk.Entry(frm, textvariable=var, width=36)
+                ent.pack(side=tk.LEFT)
+                def _browse_path():
+                    p = filedialog.askdirectory(initialdir=str(SCRIPT_DIR))
+                    if p:
+                        var.set(p)
+                ttk.Button(frm, text=self.lang.t('gui.browse'), command=_browse_path).pack(side=tk.LEFT, padx=(6,0))
             elif var_type == 'combobox':
                 var = tk.StringVar()
                 cb = ttk.Combobox(frm, textvariable=var, width=14)
@@ -1303,10 +1312,10 @@ class App(tk.Tk):
         add_entry(grp_general, self.lang.t('gui.form.language'), 'language')
         add_entry(grp_general, self.lang.t('gui.form.pdf_language'), 'pdf_language')
         # new path settings for Polarsteps Data and output
-        add_entry(grp_general, self.lang.t('gui.form.bsp_folder'), 'polarsteps_data_folder', var_type='path')
-        add_entry(grp_general, self.lang.t('gui.form.output_folder'), 'output_folder', var_type='path')
-        add_entry(grp_general, self.lang.t('gui.form.output_folder_pdf'), 'output_folder_pdf', var_type='path')
-        add_entry(grp_general, self.lang.t('gui.form.output_folder_html'), 'output_folder_html', var_type='path')
+        add_entry(grp_general, self.lang.t('gui.form.bsp_folder'), 'polarsteps_data_folder', var_type='directory')
+        add_entry(grp_general, self.lang.t('gui.form.output_folder'), 'output_folder', var_type='directory')
+        add_entry(grp_general, self.lang.t('gui.form.output_folder_pdf'), 'output_folder_pdf', var_type='directory')
+        add_entry(grp_general, self.lang.t('gui.form.output_folder_html'), 'output_folder_html', var_type='directory')
         var, cb = add_entry(grp_general, self.lang.t('gui.form.renderer_mode'), 'renderer_mode', var_type='combobox')
         try:
             cb['values'] = ['pdf', 'html', 'both']
