@@ -855,64 +855,8 @@ class TripParser:
         self._attach_comments_from_file()
 
     def _attach_comments_from_file(self) -> None:
-        comment_data_path = self.trip_path / "comments.json"
-        if not comment_data_path.exists():
-            return
-
-        try:
-            with open(comment_data_path, "r", encoding="utf-8") as file:
-                comment_data = json.load(file)
-        except Exception:
-            return
-
-        if not isinstance(comment_data, dict):
-            return
-
-        steps_list = comment_data.get("steps")
-        if not isinstance(steps_list, list):
-            return
-
-        comments_by_id = {}
-        def _normalize_comment(value):
-            if isinstance(value, str):
-                return value
-            if isinstance(value, dict):
-                return str(value.get("text") or value.get("content") or value.get("body") or value.get("message") or value.get("comment") or value)
-            return str(value)
-
-        for item in steps_list:
-            if not isinstance(item, dict):
-                continue
-            step_id = item.get("id")
-            if step_id is None:
-                continue
-            comments = item.get("comments", [])
-            if not isinstance(comments, list):
-                comments = [comments]
-            normalized = [c for c in (_normalize_comment(c) for c in comments) if c]
-            comments_by_id[str(step_id)] = normalized
-
-        assigned = False
-        for step in self.steps:
-            data = step.get("data") if isinstance(step, dict) else {}
-            step_id = data.get("id") if isinstance(data, dict) else None
-            if step_id is not None and str(step_id) in comments_by_id:
-                step["comments"] = comments_by_id[str(step_id)]
-                assigned = True
-
-        if not assigned and len(steps_list) == len(self.steps):
-            for step, item in zip(self.steps, steps_list):
-                if not isinstance(item, dict):
-                    continue
-                comments = item.get("comments", [])
-                if not isinstance(comments, list):
-                    comments = [comments]
-                normalized = [c for c in (_normalize_comment(c) for c in comments) if c]
-                step["comments"] = normalized
-
-        for step in self.steps:
-            if "comments" not in step:
-                step["comments"] = []
+        # Comment support is temporarily disabled.
+        return
 
     def get_trip_name(self) -> str:
         name = self.trip_data.get("name") if isinstance(self.trip_data, dict) else None
@@ -5005,21 +4949,8 @@ class HtmlPDFBuilder:
         return "\n".join(parts)
 
     def _build_comments_html(self, comments: list) -> str:
-        if not comments:
-            return ""
-        comment_entries = []
-        for comment in comments:
-            try:
-                text = str(comment or "")
-            except Exception:
-                text = ""
-            if not text.strip():
-                continue
-            safe = self._escape(text).replace("\n", "<br/>")
-            comment_entries.append(f"<div class=\"comment-item\">{safe}</div>")
-        if not comment_entries:
-            return ""
-        return "<div class=\"step-comments\">" + "".join(comment_entries) + "</div>"
+        # Comment rendering is temporarily disabled.
+        return ""
 
     def _should_open_pdf(self) -> bool:
         renderer_mode = str(self.config.get("renderer_mode", self.config.get("renderer", "both"))).strip().lower()

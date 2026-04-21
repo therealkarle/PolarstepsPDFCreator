@@ -1663,74 +1663,33 @@ class App(tk.Tk):
             return None
 
         # Attempt in-place patching if we have original lines cached
-        orig_lines = self._original_config_lines
-        if orig_lines is not None:
+        # Comment-preserving save support is temporarily disabled.
+        orig_lines = None
+
+        # Fallback: full dump (same as previous behavior)
+        out = None
+        if toml:
             try:
-                lines = list(orig_lines)
-                # process keys
-                for path, var in self.config_vars.items():
-                    parts = path.split('.')
-                    key = parts[-1]
-                    section = '.'.join(parts[:-1]) if len(parts) > 1 else None
-                    rng = _find_section_range(lines, section)
-                    if rng is None:
-                        # section does not exist; append it
-                        if section is not None:
-                            if lines and lines[-1].strip() != '':
-                                lines.append('')
-                            lines.append(f'[{section}]')
-                            rng = (len(lines) - 1, len(lines) - 1)
-                        else:
-                            rng = (0, len(lines) - 1)
-                    start, end = rng
+                out = toml.dumps(cfg)
+            except Exception:
+                out = None
+        if out is None:
+            lines_out = []
+            for k, v in cfg.items():
+                if isinstance(v, dict):
+                    lines_out.append(f"[{k}]")
+                    for sk, sv in v.items():
+                        lines_out.append(f"{sk} = {repr(sv)}")
+                else:
+                    lines_out.append(f"{k} = {repr(v)}")
+            out = '\n'.join(lines_out) + '\n'
 
-                    # format value
-                    try:
-                        if isinstance(var, tk.BooleanVar):
-                            val = bool(var.get())
-                        elif isinstance(var, tk.IntVar):
-                            val = int(var.get())
-                        elif isinstance(var, tk.DoubleVar):
-                            val = float(var.get())
-                        else:
-                            raw = var.get()
-                            val = '' if raw is None else raw
-                    except Exception:
-                        val = ''
-                    new_val = _fmt_val(val)
-
-                    idx = _find_key_in_range(lines, key, start, end)
-                    if idx is not None:
-                        orig = lines[idx]
-                        indent = orig[:len(orig) - len(orig.lstrip())]
-                        code, comment = _split_unquoted_hash(orig)
-                        # preserve any inline comment
-                        comment_suffix = (' ' + comment) if comment else ''
-                        lines[idx] = f"{indent}{key} = {new_val}{comment_suffix}"
-                    else:
-                        # append the key=value just before end (or after header)
-                        insert_at = end + 1
-                        # place after header if header exists
-                        if section is not None and lines[start].strip().startswith('['):
-                            insert_at = start + 1
-                        # insert a blank line for readability if needed
-                        if insert_at > 0 and insert_at <= len(lines) and lines[insert_at - 1].strip() != '':
-                            lines.insert(insert_at, '')
-                            insert_at += 1
-                        lines.insert(insert_at, f"{key} = {new_val}")
-                # write back file
-                content = '\n'.join(lines) + '\n'
-                cfg_file.write_text(content, encoding='utf-8')
-                # update cached original
-                self._original_config_lines = content.splitlines()
-                self._original_config_text = content
-                # refresh raw editor + form (keep form values as-is)
-                self._load_config_text()
-                messagebox.showinfo(self.lang.t('gui.saved'), self.lang.t('gui.saved_comments_preserved'))
-                return
-            except Exception as e:
-                # fall through to full dump on failure
-                print('Comment-preserving save failed, falling back to full dump:', e)
+        try:
+            cfg_file.write_text(out, encoding='utf-8')
+            self._load_config_text()
+            messagebox.showinfo(self.lang.t('gui.saved'), self.lang.t('gui.saved_full_rewrite'))
+        except Exception as e:
+            messagebox.showerror(self.lang.t('gui.error'), self.lang.t('gui.could_not_save_config').format(error=e))
 
     def _set_label_state(self, key, ok):
         """Set label color to red on error, default otherwise."""
