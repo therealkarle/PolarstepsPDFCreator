@@ -15,11 +15,14 @@ import time
 import traceback
 import subprocess
 from datetime import datetime
+from typing import Optional
 
 # Try to make the app DPI-aware on Windows to avoid blurry/scaled canvas rendering
+ctypes = None
 if sys.platform == 'win32':
     try:
-        import ctypes
+        import ctypes as _ctypes
+        ctypes = _ctypes
         try:
             ctypes.windll.user32.SetProcessDPIAware()
         except Exception:
@@ -106,8 +109,7 @@ except Exception:
         from importlib_metadata import version, PackageNotFoundError  # type: ignore
     except Exception:
         version = None
-        class PackageNotFoundError(Exception):
-            pass
+        PackageNotFoundError = Exception
 
 import polarsteps_pdf_generator as m
 
@@ -153,7 +155,14 @@ class ToggleSwitch(tk.Canvas):
             bg = parent.cget('background')
         except Exception:
             bg = kwargs.get('bg', None)
-        super().__init__(parent, width=width, height=height, highlightthickness=0, bd=0, bg=bg, **kwargs)
+        if bg is None:
+            kwargs.pop('bg', None)
+        else:
+            try:
+                kwargs['bg'] = str(bg)
+            except Exception:
+                kwargs.pop('bg', None)
+        super().__init__(parent, width=width, height=height, highlightthickness=0, bd=0, **kwargs)
         self.variable = variable if variable is not None else tk.BooleanVar(value=False)
         self.width = width
         self.height = height
@@ -208,7 +217,7 @@ class ToggleSwitch(tk.Canvas):
 
     def _draw(self):
         # If Pillow is available and use_aa enabled, render an anti-aliased image
-        if self.use_aa and HAVE_PIL:
+        if self.use_aa and HAVE_PIL and Image is not None and ImageDraw is not None and ImageTk is not None:
             try:
                 scale = 3
                 W = int(self.width * scale)
@@ -246,7 +255,10 @@ class ToggleSwitch(tk.Canvas):
                 draw.ellipse([knob_x, p, knob_x + 2 * radius, H - p], fill=self.knob_color)
 
                 # downsample for smooth edges
-                img_small = img.resize((self.width, self.height), resample=Image.LANCZOS)
+                resample_filter = getattr(Image, 'LANCZOS', getattr(Image, 'ANTIALIAS', None))
+                if resample_filter is None:
+                    resample_filter = 1
+                img_small = img.resize((self.width, self.height), resample=resample_filter)
                 # keep a reference to the PhotoImage to avoid GC
                 self._photo = ImageTk.PhotoImage(img_small)
                 if self._img_id is None:
@@ -409,8 +421,8 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         # load language manager early so UI strings come from language packs
+        cfg = {}
         try:
-            cfg = {}
             config_file = SCRIPT_DIR / 'config.toml'
             if config_file.exists():
                 content = config_file.read_text(encoding='utf-8')
@@ -475,7 +487,7 @@ class App(tk.Tk):
             work_h = self.winfo_screenheight()
 
             # On Windows, use desktop work area so taskbar is respected.
-            if sys.platform == 'win32':
+            if sys.platform == 'win32' and ctypes is not None:
                 try:
                     class _RECT(ctypes.Structure):
                         _fields_ = [
@@ -628,7 +640,7 @@ class App(tk.Tk):
         try:
             self._rendered_tooltip = _Tooltip(self, self.lang.t('gui.rendered'))
             self.trips_tree.bind('<Motion>', self._on_tree_motion)
-            self.trips_tree.bind('<Leave>', lambda e: self._rendered_tooltip.hide())
+            self.trips_tree.bind('<Leave>', lambda e: self._rendered_tooltip.hide() if self._rendered_tooltip else None)
         except Exception:
             self._rendered_tooltip = None
 
@@ -654,9 +666,9 @@ class App(tk.Tk):
         # Tooltip for the toggle (explanatory text shown on hover)
         try:
             self._toggle_tooltip = _Tooltip(self, self.lang.t('gui.toggle_date_tooltip'))
-            self.chk_date_toggle.bind('<Enter>', lambda e: self._toggle_tooltip.show(e.x_root + 10, e.y_root + 10))
-            self.chk_date_toggle.bind('<Motion>', lambda e: self._toggle_tooltip.show(e.x_root + 10, e.y_root + 10))
-            self.chk_date_toggle.bind('<Leave>', lambda e: self._toggle_tooltip.hide())
+            self.chk_date_toggle.bind('<Enter>', lambda e: self._toggle_tooltip.show(e.x_root + 10, e.y_root + 10) if self._toggle_tooltip else None)
+            self.chk_date_toggle.bind('<Motion>', lambda e: self._toggle_tooltip.show(e.x_root + 10, e.y_root + 10) if self._toggle_tooltip else None)
+            self.chk_date_toggle.bind('<Leave>', lambda e: self._toggle_tooltip.hide() if self._toggle_tooltip else None)
         except Exception:
             self._toggle_tooltip = None
 
@@ -847,15 +859,15 @@ class App(tk.Tk):
             except Exception:
                 pass
             self._stats_tooltip = _Tooltip(self.stats_btn, tt_text)
-            self.stats_btn.bind('<Enter>', lambda e: self._stats_tooltip.show(e.x_root + 10, e.y_root + 10))
-            self.stats_btn.bind('<Leave>', lambda e: self._stats_tooltip.hide())
+            self.stats_btn.bind('<Enter>', lambda e: self._stats_tooltip.show(e.x_root + 10, e.y_root + 10) if self._stats_tooltip else None)
+            self.stats_btn.bind('<Leave>', lambda e: self._stats_tooltip.hide() if self._stats_tooltip else None)
             try:
                 combined_tt_text = self.lang.t('gui.combined_html_tooltip')
             except Exception:
                 combined_tt_text = 'Build a combined HTML overview for selected or filtered trips'
             self._combined_html_tooltip = _Tooltip(self.combined_html_btn, combined_tt_text)
-            self.combined_html_btn.bind('<Enter>', lambda e: self._combined_html_tooltip.show(e.x_root + 10, e.y_root + 10))
-            self.combined_html_btn.bind('<Leave>', lambda e: self._combined_html_tooltip.hide())
+            self.combined_html_btn.bind('<Enter>', lambda e: self._combined_html_tooltip.show(e.x_root + 10, e.y_root + 10) if self._combined_html_tooltip else None)
+            self.combined_html_btn.bind('<Leave>', lambda e: self._combined_html_tooltip.hide() if self._combined_html_tooltip else None)
         except Exception:
             self._stats_tooltip = None
         self.render_btn = ttk.Button(frm_bottom, text=self.lang.t('gui.render_selected'), command=self._on_render)
@@ -1235,6 +1247,10 @@ class App(tk.Tk):
             lbl.pack(side=tk.LEFT)
             # keep reference to label for validation feedback
             self.config_labels[key] = lbl
+            ent = None
+            sp = None
+            cb = None
+            chk = None
             if var_type == 'bool':
                 var = tk.BooleanVar()
                 chk = ttk.Checkbutton(frm, variable=var)
@@ -1294,17 +1310,17 @@ class App(tk.Tk):
             # Hook widgets for mousewheel scrolling when the pointer is over them
             try:
                 self._hook_widget_for_mouse_scroll(frm)
-                if 'ent' in locals():
+                if ent is not None:
                     self._hook_widget_for_mouse_scroll(ent)
-                if 'sp' in locals():
+                if sp is not None:
                     self._hook_widget_for_mouse_scroll(sp)
-                if 'cb' in locals():
+                if cb is not None:
                     self._hook_widget_for_mouse_scroll(cb)
-                if 'chk' in locals():
+                if chk is not None:
                     self._hook_widget_for_mouse_scroll(chk)
             except Exception:
                 pass
-            return var
+            return var, None
 
         # Groups
         grp_general = ttk.LabelFrame(self.form_inner, text=self.lang.t('gui.group_general'))
@@ -1457,11 +1473,27 @@ class App(tk.Tk):
             val = _get(cfg, path, None)
             try:
                 if isinstance(var, tk.BooleanVar):
-                    var.set(bool(val) if val is not None else False)
+                    var.set(False if val is None else bool(val))
                 elif isinstance(var, tk.IntVar):
-                    var.set(int(val) if val is not None else 0)
+                    if val is None:
+                        var.set(0)
+                    elif isinstance(val, (int, float, str, bool)):
+                        try:
+                            var.set(int(val))
+                        except Exception:
+                            var.set(0)
+                    else:
+                        var.set(0)
                 elif isinstance(var, tk.DoubleVar):
-                    var.set(float(val) if val is not None else 0.0)
+                    if val is None:
+                        var.set(0.0)
+                    elif isinstance(val, (int, float, str, bool)):
+                        try:
+                            var.set(float(val))
+                        except Exception:
+                            var.set(0.0)
+                    else:
+                        var.set(0.0)
                 else:
                     # StringVar or others
                     if val is None:
@@ -1470,7 +1502,14 @@ class App(tk.Tk):
                         var.set(str(val))
             except Exception:
                 try:
-                    var.set(val)
+                    if isinstance(var, tk.BooleanVar):
+                        var.set(False)
+                    elif isinstance(var, tk.IntVar):
+                        var.set(0)
+                    elif isinstance(var, tk.DoubleVar):
+                        var.set(0.0)
+                    else:
+                        var.set(str(val) if val is not None else '')
                 except Exception:
                     pass
         # validate after loading to update UI feedback (no popup)
@@ -1624,9 +1663,10 @@ class App(tk.Tk):
             return None
 
         # Attempt in-place patching if we have original lines cached
-        if getattr(self, '_original_config_lines', None):
+        orig_lines = self._original_config_lines
+        if orig_lines is not None:
             try:
-                lines = list(self._original_config_lines)
+                lines = list(orig_lines)
                 # process keys
                 for path, var in self.config_vars.items():
                     parts = path.split('.')
@@ -1729,7 +1769,7 @@ class App(tk.Tk):
         except Exception:
             pass
 
-    def _validate_config_form(self, single_key: str = None):
+    def _validate_config_form(self, single_key: Optional[str] = None):
         """Validate form values. If `single_key` is given, only validate that key and return its state.
 
         Returns (ok: bool, errors: List[str])."""
@@ -2016,14 +2056,15 @@ class App(tk.Tk):
                 tt_text = "Zeige Statistiken für ausgewählte oder gefilterte Reisen"
             try:
                 # replace existing tooltip
-                if getattr(self, '_stats_tooltip', None):
+                tooltip = getattr(self, '_stats_tooltip', None)
+                if tooltip is not None:
                     try:
-                        self._stats_tooltip.hide()
+                        tooltip.hide()
                     except Exception:
                         pass
                 self._stats_tooltip = _Tooltip(self.stats_btn, tt_text)
-                self.stats_btn.bind('<Enter>', lambda e: self._stats_tooltip.show(e.x_root + 10, e.y_root + 10))
-                self.stats_btn.bind('<Leave>', lambda e: self._stats_tooltip.hide())
+                self.stats_btn.bind('<Enter>', lambda e: self._stats_tooltip.show(e.x_root + 10, e.y_root + 10) if self._stats_tooltip else None)
+                self.stats_btn.bind('<Leave>', lambda e: self._stats_tooltip.hide() if self._stats_tooltip else None)
             except Exception:
                 pass
         except Exception:
@@ -2259,12 +2300,6 @@ class App(tk.Tk):
                 except Exception:
                     pass
                 rc = 1
-        except Exception as e:
-            try:
-                self.log_queue.put(('pkg_output', {'pkg': pkg, 'line': f'Install error: {e}'}))
-            except Exception:
-                pass
-            rc = 1
         except Exception as e:
             try:
                 self.log_queue.put(('pkg_output', {'pkg': pkg, 'line': f'Install error: {e}'}))
@@ -2542,9 +2577,8 @@ class App(tk.Tk):
                 text = base + arrow
                 style = self.highlight_style or ''
             try:
-                self.trips_tree.heading(col, text=text, style=style)
+                self.trips_tree.heading(col, text=text)
             except Exception:
-                # some themes may not support style change
                 try:
                     self.trips_tree.heading(col, text=text)
                 except Exception:
@@ -2691,6 +2725,7 @@ class App(tk.Tk):
             except Exception:
                 pass
 
+            gui_lang = None
             try:
                 gui_lang = m.load_language_manager(config.get('language', 'en'), SCRIPT_DIR)
                 m._DEFAULT_LANGUAGE_MANAGER = gui_lang
@@ -2702,7 +2737,11 @@ class App(tk.Tk):
                 config['_pdf_language_manager'] = pdf_lang
                 config['_pdf_language_code'] = pdf_lang.language_code
             except Exception:
-                pass
+                gui_lang = m.load_language_manager('en', SCRIPT_DIR)
+                config['_language_code'] = gui_lang.language_code
+                pdf_lang = m.load_language_manager(config.get('pdf_language', config.get('language', 'en')), SCRIPT_DIR)
+                config['_pdf_language_manager'] = pdf_lang
+                config['_pdf_language_code'] = pdf_lang.language_code
 
             output_folder_html = Path(config.get('output_folder_html') or config.get('output_folder') or SCRIPT_DIR / 'TripPdfs')
             try:
@@ -2871,7 +2910,7 @@ class App(tk.Tk):
             except Exception:
                 map_bytes = b''
             charts = {}
-            if HAVE_MATPLOTLIB and display_agg.get('countries'):
+            if HAVE_MATPLOTLIB and plt is not None and display_agg.get('countries'):
                 try:
                     labels = list(display_agg['countries'].keys())
                     sizes = list(display_agg['countries'].values())
@@ -3264,6 +3303,8 @@ class App(tk.Tk):
                     try:
                         info = payload or {}
                         pkg = info.get('pkg')
+                        if not pkg:
+                            continue
                         pct = int(info.get('percent', 0))
                         try:
                             # update per-row progress
@@ -3287,6 +3328,8 @@ class App(tk.Tk):
                     try:
                         info = payload or {}
                         pkg = info.get('pkg')
+                        if not pkg:
+                            continue
                         status = info.get('status')
                         if status == 'start':
                             try:
@@ -3389,7 +3432,7 @@ class App(tk.Tk):
 
 
 class StatsDialog(tk.Toplevel):
-    def __init__(self, parent, agg: dict, map_bytes: bytes = None, charts: dict = None, language_code: str = 'en'):
+    def __init__(self, parent, agg: dict, map_bytes: Optional[bytes] = None, charts: Optional[dict] = None, language_code: str = 'en'):
         super().__init__(parent)
         # load language manager for translations
         try:
@@ -3472,7 +3515,7 @@ class StatsDialog(tk.Toplevel):
         txt.config(state=tk.DISABLED)
 
         # Map preview
-        if map_bytes and HAVE_PIL:
+        if map_bytes and HAVE_PIL and Image is not None and ImageTk is not None:
             try:
                 im = Image.open(io.BytesIO(map_bytes))
                 im.thumbnail((560, 400))
@@ -3484,9 +3527,10 @@ class StatsDialog(tk.Toplevel):
 
         # Charts on right
         if charts:
-            if charts.get('country_pie') and HAVE_PIL:
+            country_pie = charts.get('country_pie')
+            if country_pie and HAVE_PIL and Image is not None and ImageTk is not None:
                 try:
-                    im = Image.open(io.BytesIO(charts.get('country_pie')))
+                    im = Image.open(io.BytesIO(country_pie))
                     im.thumbnail((260, 200))
                     self.chart_img = ImageTk.PhotoImage(im)
                     lbl_chart = ttk.Label(right, image=self.chart_img)
