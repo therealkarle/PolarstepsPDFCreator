@@ -37,11 +37,18 @@ emoji_scale = 1.2
 # Page margin in millimeters
 safety_margin_mm = 12
 # Minimum photos per step / number of photos after which a new page is started
+# This value is kept for compatibility but is currently not exposed in the GUI.
 photos_before_page_break = 6 # legacy alias: max_photos_per_step
 # Fill the current page with photos (only for the active page):
 # true  -> continue filling until the limit set by photos_before_page_break, leftover goes to additional media
 # false -> strictly show only photos_before_page_break in the step
+# NOTE: This option is currently not exposed in the GUI and may not affect rendering with max_photos_per_step.
 fill_page_with_photos = true
+# Maximum photos to show on each step page. Set to 0 to show all photos on the step page.
+max_photos_per_step = 6
+# Where to place video links in the PDF: "step" shows links on the step page,
+# "appendix" gathers them at the end.
+video_links_location = "appendix"
 # Include an appendix with undisplayed step photos and all video links
 appendix_show_undisplayed_media = true
 # Photo wall layout: number of columns in the masonry grid

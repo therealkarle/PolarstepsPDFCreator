@@ -4741,6 +4741,10 @@ class HtmlPDFBuilder:
         # Layout options
         # renamed from max_photos_per_step
         self.photos_before_page_break = int(self.config.get("photos_before_page_break", self.config.get("max_photos_per_step", 6)))
+        self.max_photos_per_step = int(self.config.get("max_photos_per_step", self.photos_before_page_break))
+        self.video_links_location = str(self.config.get("video_links_location", "appendix")).strip().lower()
+        if self.video_links_location not in ("appendix", "step"):
+            self.video_links_location = "appendix"
         self.fill_page_with_photos = bool(self.config.get("fill_page_with_photos", True))
         self.min_photos_per_step = int(self.config.get("min_photos_per_step", self.photos_before_page_break))
         self.max_photos_per_page = int(self.config.get("max_photos_per_page", 0))  # 0 = no explicit limit
@@ -4776,15 +4780,13 @@ class HtmlPDFBuilder:
         while len(cache) > self._memory_cache_items:
             cache.popitem(last=False)
 
-    def _split_step_photos(self, photo_paths: List[Path]) -> Tuple[List[Path], List[Path]]:
+    def _split_step_photos(self, photo_paths: Sequence[Union[Path, str]]) -> Tuple[List[Union[Path, str]], List[Union[Path, str]]]:
         """Return (photos_to_show, extra_photos) for a step.
 
         Behavior:
-                - Base amount per step is photos_before_page_break.
-                - If fill_page_with_photos=true, add a limited number of photos intended
-                    to fill the current page, then move the rest to extra_photos.
-                - If fill_page_with_photos=false, show exactly the base amount.
-                - If total photos are below base amount, show all photos.
+                - max_photos_per_step controls how many photos are shown on the step page.
+                - 0 means show all step photos on the step page.
+                - otherwise any remaining photos are moved to the appendix.
         """
         if not photo_paths:
             return [], []
@@ -4793,32 +4795,15 @@ class HtmlPDFBuilder:
         if count == 0:
             return [], []
 
-        # threshold: minimal displayed images before considering page break
-        threshold = int(self.config.get("photos_before_page_break", self.photos_before_page_break))
-        if threshold <= 0:
-            threshold = 1
-
-        if count <= threshold:
+        max_photos = int(self.config.get("max_photos_per_step", self.max_photos_per_step))
+        if max_photos <= 0:
             return list(photo_paths), []
 
-        if self.fill_page_with_photos:
-            fill_limit = int(self.config.get("photo_wall_fill_limit", self.photo_wall_fill_limit))
-            if fill_limit <= 0:
-                fill_limit = threshold
+        if count <= max_photos:
+            return list(photo_paths), []
 
-            # "photo_wall_fill_limit" dient als absolutes Maximum
-            hard_cap = threshold
-            if fill_limit > 0:
-                hard_cap = min(hard_cap, fill_limit)
-
-            target = min(count, hard_cap)
-            photos_to_show = list(photo_paths[:target])
-            extra_photos = list(photo_paths[target:])
-            return photos_to_show, extra_photos
-
-        # strict threshold behavior: only threshold images, rest extra
-        photos_to_show = list(photo_paths[:threshold])
-        extra_photos = list(photo_paths[threshold:])
+        photos_to_show = list(photo_paths[:max_photos])
+        extra_photos = list(photo_paths[max_photos:])
         return photos_to_show, extra_photos
 
     def _image_bytes_to_data_url(self, data: bytes, mime: str = "image/png") -> str:
@@ -5008,6 +4993,38 @@ class HtmlPDFBuilder:
             return f"<div class=\"photo-grid\">{''.join(items)}</div>"
         return ""
 
+    def _build_video_links_html(self, video_paths: Sequence[Union[Path, str]]) -> str:
+        if not video_paths:
+            return ""
+
+        links = []
+        for index, v in enumerate(video_paths, start=1):
+            if not v:
+                continue
+            if isinstance(v, Path):
+                try:
+                    video_url = v.resolve().as_uri()
+                except Exception:
+                    video_url = str(v)
+            else:
+                video_url = str(v).strip()
+                if not (video_url.startswith("http://") or video_url.startswith("https://") or video_url.startswith("file:")):
+                    try:
+                        path = Path(video_url)
+                        if path.exists():
+                            video_url = path.resolve().as_uri()
+                    except Exception:
+                        pass
+
+            safe_url = self._escape(video_url)
+            label = self.lang.t("pdf.video_link_label", index=index)
+            links.append(f'<a class="video-link" href="{safe_url}">{self._escape(label)}</a>')
+
+        if not links:
+            return ""
+
+        return f"<div class=\"video-links\">{''.join(links)}</div>"
+
     def _build_video_grid_html(self, video_paths: List[str]) -> str:
         if not video_paths:
             return ""
@@ -5173,8 +5190,9 @@ class HtmlPDFBuilder:
             ".appendix-title { color: #1A5F7A; font-size: 20pt; margin: 4mm 0 2mm; }",
             ".appendix-subtitle { color: #666; font-size: 10pt; margin: 0 0 4mm; }",
             ".appendix-step-title { color: #1A5F7A; font-size: 14pt; margin: 6mm 0 2mm; }",
-            ".video-header { margin-top: 3mm; font-weight: 600; }",
-            ".video-link { display: block; color: #0066CC; text-decoration: none; font-size: 10pt; }",
+            ".video-links { margin: 4mm 0; }",
+            ".video-link { display: block; color: #0066CC; text-decoration: none; font-size: 10pt; margin-bottom: 4px; }",
+            ".video-link:hover { text-decoration: underline; }",
             ".video-box { margin-top: 6px; }",
             ".video-box video { width: 100%; max-height: 360px; border-radius: 4px; border: 1px solid #ccc; }",
             "a.link { color: #0066CC; text-decoration: none; }",
@@ -5271,18 +5289,22 @@ class HtmlPDFBuilder:
             # Photo grid
             photos_to_show = [Path(p) for p in photos if p is not None and not (isinstance(p, str) and (p.startswith('http://') or p.startswith('https://') or p.startswith('file:')))]
             photos_to_show += [p for p in photos if isinstance(p, str) and (p.startswith('http://') or p.startswith('https://') or p.startswith('file:'))]
+            photos_to_show, extra_photos = self._split_step_photos(photos_to_show)
             photo_html = self._build_photo_grid_html(photos_to_show)
 
-            # Video content is intentionally excluded from PDF output
-            # Add all media to step (no split hiding) and in appendix only if extra exists due explicit config.
-            extra_photos = []
-            if self.appendix_show_undisplayed_media and extra_photos:
-                appendix_items.append({
-                    "step_number": step_number,
-                    "display_name": display_name or f"{self.lang.t('pdf.step_label')} {step_number}",
-                    "extra_photos": extra_photos,
-                    "videos": [],
-                })
+            # Video links can appear directly in the step or in the appendix.
+            step_video_html = ""
+            if self.video_links_location == "step" and videos:
+                step_video_html = self._build_video_links_html(videos)
+
+            if self.appendix_show_undisplayed_media or (self.video_links_location == "appendix" and videos):
+                if extra_photos or (self.video_links_location == "appendix" and videos):
+                    appendix_items.append({
+                        "step_number": step_number,
+                        "display_name": display_name or f"{self.lang.t('pdf.step_label')} {step_number}",
+                        "extra_photos": extra_photos,
+                        "videos": videos if self.video_links_location == "appendix" else [],
+                    })
 
             step_section = [
                 "<div class=\"step\">",
@@ -5298,11 +5320,13 @@ class HtmlPDFBuilder:
                 step_section.append(f"<div class=\"step-desc-rest\">{desc_rest_html}</div>")
             if comments_html:
                 step_section.append(comments_html)
+            if step_video_html:
+                step_section.append(step_video_html)
 
             step_section.extend([photo_html, "</div>"])
             html_parts.extend(step_section)
 
-        if self.appendix_show_undisplayed_media and appendix_items:
+        if appendix_items:
             html_parts.extend([
                 "<div class=\"page-break\"></div>",
                 "<div class=\"appendix\">",
@@ -5318,6 +5342,12 @@ class HtmlPDFBuilder:
                     extra_html = self._build_photo_grid_html([Path(p) for p in extra_photos])
                     if extra_html:
                         html_parts.append(extra_html)
+
+                appendix_videos = item.get("videos", [])
+                if appendix_videos:
+                    video_links_html = self._build_video_links_html(appendix_videos)
+                    if video_links_html:
+                        html_parts.append(video_links_html)
             html_parts.append("</div>")
 
         html_parts.append("</body></html>")
