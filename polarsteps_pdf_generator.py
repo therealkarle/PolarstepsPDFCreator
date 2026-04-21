@@ -4830,7 +4830,7 @@ class HtmlPDFBuilder:
             self._cache_set(self._map_data_cache, key, url)
         return url
 
-    def _image_file_to_data_url(self, path: Path) -> Optional[str]:
+    def _image_file_to_data_url(self, path: Path) -> Optional[Tuple[str, float]]:
         try:
             key = None
             try:
@@ -4838,6 +4838,7 @@ class HtmlPDFBuilder:
                 key = (str(path), int(stat.st_mtime_ns), self.photo_max_width)
                 cached = self._cache_get(self._image_data_cache, key)
                 if cached is not None:
+                    # cached is a tuple: (url, aspect_ratio)
                     return cached
             except Exception:
                 key = None
@@ -4848,13 +4849,18 @@ class HtmlPDFBuilder:
                         ratio = float(self.photo_max_width) / float(img.width)
                         new_h = max(1, int(round(img.height * ratio)))
                         img = img.resize((self.photo_max_width, new_h), RESAMPLING_LANCZOS)
+                
+                # Calculate aspect ratio (width / height) safely
+                aspect_ratio = float(img.width) / float(img.height) if img.height > 0 else 1.0
+                
                 buf = io.BytesIO()
                 img.save(buf, format="JPEG", quality=88)
                 buf.seek(0)
                 url = self._image_bytes_to_data_url(buf.read(), mime="image/jpeg")
+                result = (url, aspect_ratio)
                 if key is not None:
-                    self._cache_set(self._image_data_cache, key, url)
-                return url
+                    self._cache_set(self._image_data_cache, key, result)
+                return result
         except Exception:
             return None
 
@@ -4953,13 +4959,16 @@ class HtmlPDFBuilder:
     def _build_photo_grid_html(self, photo_paths: Sequence[Union[Path, str]]) -> str:
         if not photo_paths:
             return ""
-        items = []
+        
+        # List of (url, aspect_ratio)
+        items: List[Tuple[str, float]] = []
 
-        def _photo_url(p):
+        def _photo_url(p) -> Optional[Tuple[str, float]]:
             if p is None:
                 return None
             if isinstance(p, str) and (p.startswith("http://") or p.startswith("https://") or p.startswith("file:")):
-                return p
+                # Online/file URLs don't readily have an aspect ratio. Assume 1.0 (square) as fallback.
+                return (p, 1.0)
             try:
                 return self._image_file_to_data_url(Path(p))
             except Exception:
@@ -4969,29 +4978,56 @@ class HtmlPDFBuilder:
         if workers > 1:
             try:
                 with ThreadPoolExecutor(max_workers=workers) as executor:
-                    urls = list(executor.map(_photo_url, photo_paths))
-                for url in urls:
-                    if url:
-                        items.append(f"<img src=\"{url}\"/>")
+                    results = list(executor.map(_photo_url, photo_paths))
+                for res in results:
+                    if res:
+                        items.append(res)
             except Exception:
                 for p in photo_paths:
                     try:
-                        url = _photo_url(p)
-                        if url:
-                            items.append(f"<img src=\"{url}\"/>")
+                        res = _photo_url(p)
+                        if res:
+                            items.append(res)
                     except Exception:
                         continue
         else:
             for p in photo_paths:
                 try:
-                    url = _photo_url(p)
-                    if url:
-                        items.append(f"<img src=\"{url}\"/>")
+                    res = _photo_url(p)
+                    if res:
+                        items.append(res)
                 except Exception:
                     continue
-        if items:
-            return f"<div class=\"photo-grid\">{''.join(items)}</div>"
-        return ""
+
+        if not items:
+            return ""
+        
+        col_count = max(1, int(self.photo_masonry_columns))
+        columns: List[List[Tuple[str, float]]] = [[] for _ in range(col_count)]
+        col_heights = [0.0] * col_count
+
+        # Greedy distribution: place next image in the column that is currently shortest
+        for url, asp in items:
+            min_idx = min(range(col_count), key=col_heights.__getitem__)
+            columns[min_idx].append((url, asp))
+            # Height added is proportional to 1 / aspect_ratio
+            # (since width of column is constant, say 1 unit)
+            col_heights[min_idx] += (1.0 / asp) if asp > 0 else 1.0
+
+        gap_px = self.photo_masonry_gap
+        # Construct masonry flexbox HTML
+        html_cols = []
+        for col_items in columns:
+            img_tags = []
+            for url, asp in col_items:
+                # Explicit aspect-ratio helps Playwright layout avoid overlapping during rendering
+                img_tags.append(f'<img src="{url}" style="aspect-ratio: {asp:.4f}; object-fit: contain;" />')
+            
+            # Using column-specific inner flex container
+            col_html = f'<div class="masonry-column" style="gap: {gap_px}px;">' + "".join(img_tags) + "</div>"
+            html_cols.append(col_html)
+
+        return f'<div class="masonry-row" style="gap: {gap_px}px;">{"".join(html_cols)}</div>'
 
     def _build_video_links_html(self, video_paths: Sequence[Union[Path, str]]) -> str:
         if not video_paths:
@@ -5176,7 +5212,7 @@ class HtmlPDFBuilder:
             ".page-break { page-break-after: always; }",
             ".step { page-break-inside: auto; }",
             ".step-intro { page-break-inside: avoid; page-break-after: avoid; }",
-            ".photo-grid { page-break-inside: auto; }",
+            ".masonry-row { page-break-inside: auto; }",
             ".step-desc-rest { page-break-inside: auto; margin-top: 2mm; }",
             ".step-title { color: #1A5F7A; font-size: 18pt; margin: 6mm 0 2mm; }",
             ".step-meta { color: #666; font-size: 10pt; margin: 0 0 4mm; }",
@@ -5185,8 +5221,9 @@ class HtmlPDFBuilder:
             ".comment-item { margin-bottom: 6px; }",
             ".comment-item:last-child { margin-bottom: 0; }",
             ".step-list { margin: 0 0 4mm 6mm; }",
-            ".photo-grid { column-count: %d; column-gap: %dpx; width: 100%%; margin: 0 0 4mm; page-break-inside: auto; }" % (self.photo_masonry_columns, self.photo_masonry_gap),
-            ".photo-grid img { width: 100%%; height: auto; display: block; margin-bottom: %dpx; break-inside: avoid; page-break-inside: auto; }" % (self.photo_masonry_gap),
+            ".masonry-row { display: flex; flex-direction: row; width: 100%%; margin: 0 0 4mm; page-break-inside: auto; justify-content: space-between; }",
+            ".masonry-column { display: flex; flex-direction: column; flex: 1; align-items: stretch; min-width: 0; padding-bottom: 2mm; page-break-inside: auto; }",
+            ".masonry-column img { width: 100%%; height: auto; display: block; break-inside: avoid; page-break-inside: auto; border-radius: 2px; }",
             ".appendix-title { color: #1A5F7A; font-size: 20pt; margin: 4mm 0 2mm; }",
             ".appendix-subtitle { color: #666; font-size: 10pt; margin: 0 0 4mm; }",
             ".appendix-step-title { color: #1A5F7A; font-size: 14pt; margin: 6mm 0 2mm; }",
