@@ -210,6 +210,7 @@
   "gui.form.fill_page_with_photos": "Fill page with photos",
   "gui.help.fill_page_with_photos": "If enabled, only the current page is filled with additional photos after the base amount",
   "gui.form.photo_wall_columns": "Photo wall columns",
+  "gui.form.photo_masonry_span_2_threshold": "Min Width/Height Ratio for 2 Cols",
   "gui.form.photo_wall_gap": "Photo wall gap",
   "gui.form.map_style": "Map style",
   "gui.form.hybrid_labels_opacity": "Hybrid labels opacity",

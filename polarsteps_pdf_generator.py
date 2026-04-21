@@ -5003,31 +5003,108 @@ class HtmlPDFBuilder:
             return ""
         
         col_count = max(1, int(self.photo_masonry_columns))
-        columns: List[List[Tuple[str, float]]] = [[] for _ in range(col_count)]
-        col_heights = [0.0] * col_count
-
-        # Greedy distribution: place next image in the column that is currently shortest
+        span_2_threshold = float(self.config.get("photo_masonry_span_2_threshold", 20.0 / 9.0))
+        span_3_threshold = span_2_threshold * 1.5
+        
+        items_with_span = []
         for url, asp in items:
-            min_idx = min(range(col_count), key=col_heights.__getitem__)
-            columns[min_idx].append((url, asp))
-            # Height added is proportional to 1 / aspect_ratio
-            # (since width of column is constant, say 1 unit)
-            col_heights[min_idx] += (1.0 / asp) if asp > 0 else 1.0
+            span = 1
+            if asp > span_3_threshold:
+                span = 3
+            elif asp > span_2_threshold:
+                span = 2
+            span = min(span, col_count)
+            items_with_span.append((url, asp, span))
+        
+        blocks = []
+        current_masonry = []
+
+        def flush_masonry():
+            if current_masonry:
+                blocks.append(("masonry", list(current_masonry)))
+                current_masonry.clear()
+
+        i = 0
+        while i < len(items_with_span):
+            url, asp, span = items_with_span[i]
+            
+            if span == 1:
+                current_masonry.append((url, asp))
+                i += 1
+                
+            elif span == col_count:
+                flush_masonry()
+                blocks.append(("full", [(url, asp, span)], 0))
+                i += 1
+                
+            else:
+                flush_masonry()
+                remaining_span = col_count - span
+                row_items = [(url, asp, span)]
+                i += 1 # Move to next item
+                
+                # Look ahead to fill the remaining span with normal items
+                j = i
+                while remaining_span > 0 and j < len(items_with_span):
+                    _n_url, _n_asp, _n_span = items_with_span[j]
+                    if _n_span <= remaining_span:
+                        row_items.append((_n_url, _n_asp, _n_span))
+                        remaining_span -= _n_span
+                        items_with_span.pop(j)
+                    else:
+                        j += 1
+                blocks.append(("flex_row", row_items, remaining_span))
+
+        flush_masonry()
 
         gap_px = self.photo_masonry_gap
-        # Construct masonry flexbox HTML
-        html_cols = []
-        for col_items in columns:
-            img_tags = []
-            for url, asp in col_items:
-                # Explicit aspect-ratio helps Playwright layout avoid overlapping during rendering
-                img_tags.append(f'<img src="{url}" style="aspect-ratio: {asp:.4f}; object-fit: contain;" />')
+        html_blocks = []
+        
+        for block in blocks:
+            b_type = block[0]
             
-            # Using column-specific inner flex container
-            col_html = f'<div class="masonry-column" style="gap: {gap_px}px;">' + "".join(img_tags) + "</div>"
-            html_cols.append(col_html)
+            if b_type == "masonry":
+                m_items = block[1]
+                columns: List[List[Tuple[str, float]]] = [[] for _ in range(col_count)]
+                col_heights = [0.0] * col_count
+                for url, asp in m_items:
+                    min_idx = min(range(col_count), key=col_heights.__getitem__)
+                    columns[min_idx].append((url, asp))
+                    col_heights[min_idx] += (1.0 / asp) if asp > 0 else 1.0
+                
+                html_cols = []
+                for col_items in columns:
+                    img_tags = []
+                    for url, asp in col_items:
+                        img_tags.append(f'<img src="{url}" style="aspect-ratio: {asp:.4f}; object-fit: contain;" />')
+                    col_html = f'<div class="masonry-column" style="gap: {gap_px}px;">' + "".join(img_tags) + "</div>"
+                    html_cols.append(col_html)
+                html_blocks.append(f'<div class="masonry-row" style="gap: {gap_px}px;">{"".join(html_cols)}</div>')
+                
+            elif b_type == "full":
+                url, asp, span = block[1][0]
+                html_blocks.append(
+                    f'<div class="masonry-row" style="gap: {gap_px}px;">'
+                    f'<div style="flex: 1; min-width: 0;"><img src="{url}" style="aspect-ratio: {asp:.4f}; object-fit: contain; width: 100%; height: auto; display: block; break-inside: avoid; border-radius: 2px;" /></div>'
+                    f'</div>'
+                )
+                
+            elif b_type == "flex_row":
+                row_items = block[1]
+                remaining_span = block[2]
+                inner_html = []
+                for r_url, r_asp, r_span in row_items:
+                    inner_html.append(
+                        f'<div style="flex: {r_span}; min-width: 0;">'
+                        f'<img src="{r_url}" style="aspect-ratio: {r_asp:.4f}; object-fit: contain; width: 100%; height: auto; display: block; break-inside: avoid; border-radius: 2px;" />'
+                        f'</div>'
+                    )
+                if remaining_span > 0:
+                    inner_html.append(f'<div style="flex: {remaining_span}; min-width: 0;"></div>')
+                
+                html_blocks.append(f'<div class="masonry-row" style="gap: {gap_px}px; align-items: flex-start;">{"".join(inner_html)}</div>')
 
-        return f'<div class="masonry-row" style="gap: {gap_px}px;">{"".join(html_cols)}</div>'
+        return "".join(html_blocks)
 
     def _build_video_links_html(self, video_paths: Sequence[Union[Path, str]]) -> str:
         if not video_paths:

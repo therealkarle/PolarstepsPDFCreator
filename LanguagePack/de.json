@@ -212,6 +212,7 @@
   "gui.form.fill_page_with_photos": "Seite mit Fotos auffüllen",
   "gui.help.fill_page_with_photos": "Wenn aktiv, wird nach der Basisanzahl nur die aktuelle Seite mit weiteren Fotos aufgefüllt",
   "gui.form.photo_wall_columns": "Foto-Wand Spalten",
+  "gui.form.photo_masonry_span_2_threshold": "Ab Aspect-Ratio X (Breite/Höhe) 2 Spalten nutzen",
   "gui.form.photo_wall_gap": "Foto-Wand Abstand",
   "gui.form.map_style": "Kartentyp",
   "gui.form.hybrid_labels_opacity": "Hybrid-Beschriftungs-Deckkraft",

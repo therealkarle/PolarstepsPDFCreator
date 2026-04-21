@@ -1362,6 +1362,7 @@ class App(tk.Tk):
             pass
         add_entry(grp_layout, self.lang.t('gui.appendix_include_undisplayed_media'), 'appendix_show_undisplayed_media', var_type='bool')
         add_entry(grp_layout, self.lang.t('gui.form.photo_wall_columns'), 'photo_wall_columns', var_type='int')
+        add_entry(grp_layout, self.lang.t('gui.form.photo_masonry_span_2_threshold'), 'photo_masonry_span_2_threshold', var_type='float')
         add_entry(grp_layout, self.lang.t('gui.form.photo_wall_gap'), 'photo_wall_gap', var_type='int')
 
         grp_map = ttk.LabelFrame(self.form_inner, text=self.lang.t('gui.group_map_general'))
@@ -1782,6 +1783,8 @@ class App(tk.Tk):
             e = _maybe_check_numeric(self.config_vars.get('photos_before_page_break'), 'Photos before page break', 'int', 0, 100)
             if e: errs.append(e)
             e = _maybe_check_numeric(self.config_vars.get('photo_wall_columns'), 'Photo wall columns', 'int', 1, 10)
+            if e: errs.append(e)
+            e = _maybe_check_numeric(self.config_vars.get('photo_masonry_span_2_threshold'), 'Photo masonry span 2 threshold (Breite/Höhe)', 'float', 1.0, 10.0)
             if e: errs.append(e)
             e = _maybe_check_numeric(self.config_vars.get('photo_wall_gap'), 'Photo wall gap', 'int', 0, 100)
             if e: errs.append(e)

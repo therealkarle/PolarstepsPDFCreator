@@ -1,126 +1,41 @@
-# --- App Behavior ---
-# Input/output locations (optional, can also be supplied on CLI)
-polarsteps_data_folder = "BSPData"
-output_folder = "TripPdfs" # defaults to TripPdfs/ next to script
-output_folder_pdf = "TripPdfs" # optional: separate folder for PDF output
-output_folder_html = "TripPdfs" # optional: separate folder for HTML output
-renderer_mode = "both" # pdf/html/both
-
-# Language selection (see LanguagePack/)
-# Supported: "en", "de" (copy a pack to add more)
 language = "de"
-# PDF language (if different from CLI language, leave empty to use 'language')
 pdf_language = "de"
-# List already rendered trips in the CLI menu
+polarsteps_data_folder = "BSPData"
+output_folder = "TripPdfs"
+output_folder_pdf = "TripPdfs"
+output_folder_html = "TripPdfs"
+renderer_mode = "both"
 show_rendered_trips = true
-# Open the generated PDF automatically after rendering
 open_pdf_after_render = true
-# Automatically check GitHub for updates at startup (requires network).
-# If enabled the program will back up your config.toml and perform a
-# git pull or pip upgrade when a newer commit is available. Manual
-# overrides via CLI flags are also supported.
 auto_update = false
-
-# --- Font Settings ---
-# Font size for the step title (e.g., "1. Amsterdam")
 step_title_font_size = 18
-# Font size for the step description text
 step_text_font_size = 12
-# Main text font path (fallback to default if not found)
 text_font_path = "C:/Windows/Fonts/SegoeUI.ttf"
-# Emoji font path (used for rendering emojis in text)
 emoji_font_path = "C:/Windows/Fonts/seguiemj.ttf"
-# Scale factor for emojis relative to text size
 emoji_scale = 1.2
-
-# --- Layout Settings ---
-# Page margin in millimeters
 safety_margin_mm = 12
-# Minimum photos per step / number of photos after which a new page is started
-# This value is kept for compatibility but is currently not exposed in the GUI.
-photos_before_page_break = 6 # legacy alias: max_photos_per_step
-# Fill the current page with photos (only for the active page):
-# true  -> continue filling until the limit set by photos_before_page_break, leftover goes to additional media
-# false -> strictly show only photos_before_page_break in the step
-# NOTE: This option is currently not exposed in the GUI and may not affect rendering with max_photos_per_step.
-fill_page_with_photos = true
-# Maximum photos to show on each step page. Set to 0 to show all photos on the step page.
 max_photos_per_step = 6
-# Where to place video links in the PDF: "step" shows links on the step page,
-# "appendix" gathers them at the end.
 video_links_location = "appendix"
-# Include an appendix with undisplayed step photos and all video links
 appendix_show_undisplayed_media = true
-# Photo wall layout: number of columns in the masonry grid
 photo_wall_columns = 3
-# Gap between photos in the wall (pixels/points)
+photo_masonry_span_2_threshold = 2.0
 photo_wall_gap = 2
-
-# --- General Map Settings ---
-# Map style: "hybrid" (satellite + labels), "satellite" (imagery only) or "road" (streets)
 map_style = "hybrid"
-# HTML map style: "road" uses OpenStreetMap, "satellite" uses ESRI imagery, "hybrid" uses ESRI imagery plus labels
-html_map_style = "hybrid"
-# Opacity for hybrid label overlay (0.0-1.0)
 hybrid_labels_opacity = 1.0
-
-# Base size of the circular photo markers in pixels. This is scaled by the map's
-# vertical resolution and any supersampling/render scale so markers keep consistent
-# appearance when rendering at higher resolutions.
 marker_thumb_size = 80
 
-# ==============================================================================
-# NEW GEOGRAPHIC BOUNDING BOX MAP SETTINGS
-# ==============================================================================
-# This new system uses a deterministic "Geographic Bounding Box" approach:
-# 1. Calculate bounds from required points
-# 2. Apply padding
-# 3. Enforce min/max width constraints
-# 4. Expand to 16:9 aspect ratio (never shrink)
-# 5. Convert to center/zoom for static map API
-
-[maps]
-# --- Common Settings ---
-# Geographic coverage is computed from the vertical resolution using the configured aspect ratio.
-
-# --- Overview Map ---
 [maps.overview]
-# Vertical output resolution in pixels (affects image resolution and marker sizing)
 vertical_resolution_px = 720
-# Aspect ratio for overview maps (width:height). Bounds are expanded to fit.
 aspect_ratio = "16:9"
-# Padding factor around all steps (0.10 = 10% on each side)
 padding_factor = 0.02
-# Algorithm for overview fitting. Supported values:
-#   - "bbox"  : Bounding-box expansion (default; consistent with step maps)
-#   - "radius": Radius-from-midpoint fitting (legacy behavior)
 algorithm = "bbox"
-# Minimum width in km (expands if all steps are very close)
 min_width_km = 25.0
 
-# --- Step Map ---
 [maps.step]
-# Vertical output resolution in pixels (affects image resolution and marker sizing)
 vertical_resolution_px = 360
-# Aspect ratio for step maps (width:height). Bounds are expanded to fit.
 aspect_ratio = "32:9"
-# Padding factor around included steps
-# Recommended range: 0.02 - 0.15 (smaller = tighter, larger = more margin)
-# Vertical padding is scaled by aspect ratio:
-#   vertical_padding = padding_factor / aspect_ratio
 padding_factor = 0.05
-# Minimum map width in km (prevents over-zoom on single points)
 min_width_km = 12.0
-# Maximum HORIZONTAL distance between farthest visible steps in km.
-# If prev and next neighbors exceed this threshold, the farthest from current is dropped.
-# If remaining neighbor still exceeds threshold, only current step is shown.
-# Vertical distance is derived from aspect ratio:
-#   vertical_limit_km = max_distance_farthest_steps_km / aspect_ratio
-# This prevents overly tall spans when horizontal coverage is high.
 max_distance_farthest_steps_km = 400.0
-# Cluster distance: if a neighbor is within this distance, include it
-# (used to group nearby steps together)
 cluster_distance_km = 2.0
-# Supersampling render scale for step maps (higher = sharper tiles)
-# 1.0 = normal, 2.0 = render at 2x resolution and downscale in PDF
 render_scale = 1.0
