@@ -3572,6 +3572,17 @@ class InteractiveHtmlBuilder:
     def _escape(self, text: str) -> str:
         return html.escape(text or "")
 
+    def _linkify(self, text: str) -> str:
+        """Convert URLs in text to clickable anchor tags (text must already be HTML-escaped)."""
+        url_pattern = r'(https?://[^\s<>" ]+|www\.[^\s<>" ]+)'
+
+        def replace_url(match):
+            url = match.group(1)
+            href = url if url.startswith('http') else f'http://{url}'
+            return f'<a class="link" href="{href}" target="_blank" rel="noopener noreferrer">{url}</a>'
+
+        return re.sub(url_pattern, replace_url, text)
+
     def _location_to_coordinates(self, location: dict):
         if not isinstance(location, dict):
             return None, None
@@ -3706,7 +3717,7 @@ class InteractiveHtmlBuilder:
                     "date": step_date_str or (step_data.get("start_time") if step_data.get("start_time") is not None else ""),
                     "location": location.get("name") or "",
                 },
-                "description": self._escape(description).replace("\n", "<br/>"),
+                "description": self._linkify(self._escape(description).replace("\n", "<br/>")),
                 "lat": lat,
                 "lon": lon,
                 "photos": photo_list,
@@ -3728,6 +3739,8 @@ class InteractiveHtmlBuilder:
                 '<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>',
                 '<style>',
                 'body { font-family: "Segoe UI", sans-serif; background:#f6f7f8; margin:0; padding:0; }',
+                '.step-desc a, .step-desc a:visited { color: #0066CC; text-decoration: none; }',
+                '.step-desc a:hover { text-decoration: underline; }',
                 '.step-photo-marker { border-radius: 50% !important; overflow: hidden !important; border: 2px solid #fff !important; box-shadow: 0 0 4px rgba(0,0,0,0.4) !important; }',
                 '.leaflet-marker-icon.step-photo-marker { width: 44px !important; height: 44px !important; }',
                 '.top-bar { background: #1A5F7A; color: #fff; padding: 12px 16px; display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 8px; }',
@@ -4305,6 +4318,8 @@ class CombinedHtmlBuilder:
             '.step-row .step-meta { font-size: 0.85rem; color: #555; margin-top: 4px; }',
             '.step-row .step-location-detail { font-size: 0.82rem; color: #666; margin-top: 4px; }',
             '.step-row .step-desc { font-size: 0.95rem; line-height: 1.5; margin: 10px 0 0 0; color: #333; }',
+            '.step-row .step-desc a, .step-row .step-desc a:visited { color: #0066CC; text-decoration: none; }',
+            '.step-row .step-desc a:hover { text-decoration: underline; }',
             '.step-row .step-comments { margin-top: 10px; padding: 12px 14px; background: #f4f7fb; border-left: 4px solid #1A5F7A; border-radius: 10px; color: #333; font-size: 0.95rem; }',
             '.step-row .comment-item { margin-bottom: 8px; }',
             '.step-row .comment-item:last-child { margin-bottom: 0; }',
@@ -4886,7 +4901,7 @@ class HtmlPDFBuilder:
             url = match.group(1)
             # Add http:// prefix for www. links
             href = url if url.startswith('http') else f'http://{url}'
-            return f'<a class="link" href="{href}">{url}</a>'
+            return f'<a class="link" href="{href}" target="_blank" rel="noopener noreferrer">{url}</a>'
         
         return re.sub(url_pattern, replace_url, text)
 
@@ -5317,8 +5332,8 @@ class HtmlPDFBuilder:
             ".video-link:hover { text-decoration: underline; }",
             ".video-box { margin-top: 6px; }",
             ".video-box video { width: 100%; max-height: 360px; border-radius: 4px; border: 1px solid #ccc; }",
-            "a.link { color: #0066CC; text-decoration: none; }",
-            "a.link:hover { text-decoration: underline; }",
+            "a, a:visited { color: #0066CC; text-decoration: none; }",
+            "a:hover { text-decoration: underline; }",
             "</style>",
             "</head>",
             "<body>",
