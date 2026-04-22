@@ -4960,17 +4960,22 @@ class HtmlPDFBuilder:
         if not photo_paths:
             return ""
         
-        # List of (url, aspect_ratio)
-        items: List[Tuple[str, float]] = []
+        # List of (url, aspect_ratio, file_uri)
+        items: List[Tuple[str, float, str]] = []
 
-        def _photo_url(p) -> Optional[Tuple[str, float]]:
+        def _photo_url(p) -> Optional[Tuple[str, float, str]]:
             if p is None:
                 return None
             if isinstance(p, str) and (p.startswith("http://") or p.startswith("https://") or p.startswith("file:")):
                 # Online/file URLs don't readily have an aspect ratio. Assume 1.0 (square) as fallback.
-                return (p, 1.0)
+                return (p, 1.0, p)
             try:
-                return self._image_file_to_data_url(Path(p))
+                data_url, asp = self._image_file_to_data_url(Path(p))
+                try:
+                    file_uri = Path(p).resolve().as_uri()
+                except Exception:
+                    file_uri = str(p)
+                return (data_url, asp, file_uri)
             except Exception:
                 return None
 
@@ -5007,14 +5012,14 @@ class HtmlPDFBuilder:
         span_3_threshold = span_2_threshold * 1.5
         
         items_with_span = []
-        for url, asp in items:
+        for url, asp, file_uri in items:
             span = 1
             if asp > span_3_threshold:
                 span = 3
             elif asp > span_2_threshold:
                 span = 2
             span = min(span, col_count)
-            items_with_span.append((url, asp, span))
+            items_with_span.append((url, asp, span, file_uri))
         
         blocks = []
         current_masonry = []
@@ -5026,29 +5031,29 @@ class HtmlPDFBuilder:
 
         i = 0
         while i < len(items_with_span):
-            url, asp, span = items_with_span[i]
+            url, asp, span, file_uri = items_with_span[i]
             
             if span == 1:
-                current_masonry.append((url, asp))
+                current_masonry.append((url, asp, file_uri))
                 i += 1
                 
             elif span == col_count:
                 flush_masonry()
-                blocks.append(("full", [(url, asp, span)], 0))
+                blocks.append(("full", [(url, asp, span, file_uri)], 0))
                 i += 1
                 
             else:
                 flush_masonry()
                 remaining_span = col_count - span
-                row_items = [(url, asp, span)]
+                row_items = [(url, asp, span, file_uri)]
                 i += 1 # Move to next item
                 
                 # Look ahead to fill the remaining span with normal items
                 j = i
                 while remaining_span > 0 and j < len(items_with_span):
-                    _n_url, _n_asp, _n_span = items_with_span[j]
+                    _n_url, _n_asp, _n_span, _n_file_uri = items_with_span[j]
                     if _n_span <= remaining_span:
-                        row_items.append((_n_url, _n_asp, _n_span))
+                        row_items.append((_n_url, _n_asp, _n_span, _n_file_uri))
                         remaining_span -= _n_span
                         items_with_span.pop(j)
                     else:
@@ -5060,32 +5065,34 @@ class HtmlPDFBuilder:
         gap_px = self.photo_masonry_gap
         html_blocks = []
         
+        link_style = "display: block; text-decoration: none; color: inherit; border: none; outline: none; margin: 0; padding: 0;"
+        
         for block in blocks:
             b_type = block[0]
             
             if b_type == "masonry":
                 m_items = block[1]
-                columns: List[List[Tuple[str, float]]] = [[] for _ in range(col_count)]
+                columns: List[List[Tuple[str, float, str]]] = [[] for _ in range(col_count)]
                 col_heights = [0.0] * col_count
-                for url, asp in m_items:
+                for url, asp, file_uri in m_items:
                     min_idx = min(range(col_count), key=col_heights.__getitem__)
-                    columns[min_idx].append((url, asp))
+                    columns[min_idx].append((url, asp, file_uri))
                     col_heights[min_idx] += (1.0 / asp) if asp > 0 else 1.0
                 
                 html_cols = []
                 for col_items in columns:
                     img_tags = []
-                    for url, asp in col_items:
-                        img_tags.append(f'<img src="{url}" style="aspect-ratio: {asp:.4f}; object-fit: contain;" />')
+                    for url, asp, file_uri in col_items:
+                        img_tags.append(f'<a href="{file_uri}" target="_blank" style="{link_style}"><img src="{url}" style="aspect-ratio: {asp:.4f}; object-fit: contain; width: 100%; height: auto; display: block; border-radius: 2px;" /></a>')
                     col_html = f'<div class="masonry-column" style="gap: {gap_px}px;">' + "".join(img_tags) + "</div>"
                     html_cols.append(col_html)
                 html_blocks.append(f'<div class="masonry-row" style="gap: {gap_px}px;">{"".join(html_cols)}</div>')
                 
             elif b_type == "full":
-                url, asp, span = block[1][0]
+                url, asp, span, file_uri = block[1][0]
                 html_blocks.append(
                     f'<div class="masonry-row" style="gap: {gap_px}px;">'
-                    f'<div style="flex: 1; min-width: 0;"><img src="{url}" style="aspect-ratio: {asp:.4f}; object-fit: contain; width: 100%; height: auto; display: block; break-inside: avoid; border-radius: 2px;" /></div>'
+                    f'<div style="flex: 1; min-width: 0;"><a href="{file_uri}" target="_blank" style="{link_style}"><img src="{url}" style="aspect-ratio: {asp:.4f}; object-fit: contain; width: 100%; height: auto; display: block; break-inside: avoid; border-radius: 2px;" /></a></div>'
                     f'</div>'
                 )
                 
@@ -5093,10 +5100,10 @@ class HtmlPDFBuilder:
                 row_items = block[1]
                 remaining_span = block[2]
                 inner_html = []
-                for r_url, r_asp, r_span in row_items:
+                for r_url, r_asp, r_span, r_file_uri in row_items:
                     inner_html.append(
                         f'<div style="flex: {r_span}; min-width: 0;">'
-                        f'<img src="{r_url}" style="aspect-ratio: {r_asp:.4f}; object-fit: contain; width: 100%; height: auto; display: block; break-inside: avoid; border-radius: 2px;" />'
+                        f'<a href="{r_file_uri}" target="_blank" style="{link_style}"><img src="{r_url}" style="aspect-ratio: {r_asp:.4f}; object-fit: contain; width: 100%; height: auto; display: block; break-inside: avoid; border-radius: 2px;" /></a>'
                         f'</div>'
                     )
                 if remaining_span > 0:
