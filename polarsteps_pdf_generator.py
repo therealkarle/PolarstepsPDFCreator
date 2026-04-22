@@ -4970,7 +4970,10 @@ class HtmlPDFBuilder:
                 # Online/file URLs don't readily have an aspect ratio. Assume 1.0 (square) as fallback.
                 return (p, 1.0, p)
             try:
-                data_url, asp = self._image_file_to_data_url(Path(p))
+                result = self._image_file_to_data_url(Path(p))
+                if result is None:
+                    return None
+                data_url, asp = result
                 try:
                     file_uri = Path(p).resolve().as_uri()
                 except Exception:
@@ -4983,15 +4986,13 @@ class HtmlPDFBuilder:
         if workers > 1:
             try:
                 with ThreadPoolExecutor(max_workers=workers) as executor:
-                    results = list(executor.map(_photo_url, photo_paths))
-                for res in results:
-                    if res:
-                        items.append(res)
+                    results = [res for res in executor.map(_photo_url, photo_paths) if res is not None]
+                items.extend(results)
             except Exception:
                 for p in photo_paths:
                     try:
                         res = _photo_url(p)
-                        if res:
+                        if res is not None:
                             items.append(res)
                     except Exception:
                         continue
@@ -4999,7 +5000,7 @@ class HtmlPDFBuilder:
             for p in photo_paths:
                 try:
                     res = _photo_url(p)
-                    if res:
+                    if res is not None:
                         items.append(res)
                 except Exception:
                     continue
